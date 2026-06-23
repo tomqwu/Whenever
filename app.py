@@ -229,7 +229,12 @@ def api_resolve():
     return jsonify({"iata": code})
 
 def date_range(start_iso, count):
-    d = dt.date.fromisoformat(start_iso)
+    if not start_iso:
+        return []
+    try:
+        d = dt.date.fromisoformat(start_iso)
+    except (ValueError, TypeError):
+        return []
     return [(d + dt.timedelta(days=i)).isoformat() for i in range(count)]
 
 @app.route("/api/search", methods=["POST"])
