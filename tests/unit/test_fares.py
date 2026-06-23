@@ -103,6 +103,17 @@ def test_get_fare_returns_first_valid(monkeypatch):
     assert res["source"] == "travelpayouts"
 
 
+def test_get_fare_provider_order(monkeypatch):
+    """amadeus must be tried BEFORE travelpayouts (provider tuple ordering contract)."""
+    call_order = []
+    monkeypatch.setattr(appmod, "amadeus_fare",
+                        lambda *a: call_order.append("amadeus") or None)
+    monkeypatch.setattr(appmod, "travelpayouts_fare",
+                        lambda *a: call_order.append("travelpayouts") or {"cheapest_cad": 1, "source": "travelpayouts"})
+    appmod.get_fare("YYZ", "PVG", "2026-12-12", "2027-01-04", 2, 0)
+    assert call_order == ["amadeus", "travelpayouts"]
+
+
 def test_get_fare_skips_exceptions(monkeypatch):
     def boom(*a):
         raise RuntimeError("provider down")

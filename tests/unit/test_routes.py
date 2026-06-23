@@ -42,7 +42,8 @@ def test_resolve_with_and_without_city(client, monkeypatch):
 
 
 def test_search_validation(client):
-    # Empty origin triggers the 400; supply dates so date_range isn't called with ""
+    # Supply explicit dep_dates/ret_dates to avoid the pre-validation date_range("") crash
+    # tracked in issue #9; without them the test never reaches the real 400 branch.
     r = client.post("/api/search", json={
         "origin": "", "destinations": [],
         "dep_dates": ["2026-12-12"], "ret_dates": ["2027-01-04"],

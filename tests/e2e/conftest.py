@@ -16,11 +16,12 @@ def live_server(monkeypatch):
     monkeypatch.setattr(appmod, "build_recommendation",
                         lambda *a, **k: "Best value: Shanghai (PVG)")
 
-    srv = make_server("127.0.0.1", 5099, appmod.app)
+    srv = make_server("127.0.0.1", 0, appmod.app)
     thread = threading.Thread(target=srv.serve_forever)
+    thread.daemon = True
     thread.start()
     try:
-        yield "http://127.0.0.1:5099"
+        yield f"http://127.0.0.1:{srv.server_port}"
     finally:
         srv.shutdown()
         thread.join()
