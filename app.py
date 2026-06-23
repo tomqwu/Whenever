@@ -435,7 +435,7 @@ def api_export_csv():
     return Response(
         csv_text,
         status=200,
-        mimetype="text/csv; charset=utf-8",
+        content_type="text/csv; charset=utf-8",
         headers={"Content-Disposition": 'attachment; filename="whenever-matrix.csv"'},
     )
 

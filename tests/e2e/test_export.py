@@ -97,7 +97,8 @@ class TestCsvExport:
         monkeypatch.setattr(appmod, "run_search", lambda *a, **k: FIXTURE_RESULT)
         status, headers, body = _post(f"{live_server}/api/export/csv", VALID_BODY)
         ct = headers.get("Content-Type", "")
-        assert ct.startswith("text/csv")
+        # Exactly one charset, no duplicate appended by Werkzeug
+        assert ct == "text/csv; charset=utf-8"
 
     def test_csv_content_disposition_attachment(self, live_server, monkeypatch):
         monkeypatch.setattr(appmod, "run_search", lambda *a, **k: FIXTURE_RESULT)

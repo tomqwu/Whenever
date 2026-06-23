@@ -285,3 +285,17 @@ class TestRenderPdf:
         out = render_pdf(result)
         assert isinstance(out, bytes)
         assert out[:4] == b"%PDF"
+
+    def test_non_latin1_city_does_not_crash(self):
+        """Non-Latin-1 city names (e.g. 'Łódź', '東京') must not raise.
+
+        fpdf2's built-in Helvetica is Latin-1 only; all PDF text is sanitized
+        so unsupported characters become '?' rather than crashing.
+        """
+        from export import render_pdf
+        result = _make_result()
+        result["results"][0]["city"] = "Łódź"
+        result["results"][1]["city"] = "東京"
+        out = render_pdf(result)
+        assert isinstance(out, bytes)
+        assert out[:4] == b"%PDF"

@@ -67,6 +67,17 @@ _MARGIN = 12
 _BODY_W = _PAGE_W - 2 * _MARGIN
 
 
+def _pdf_safe(s):
+    """Coerce any value to a Latin-1-safe string for fpdf2's built-in fonts.
+
+    fpdf2's bundled Helvetica is Latin-1 only, so non-Latin-1 characters
+    (e.g. in "Łódź" or "東京") would raise FPDFUnicodeEncodingException.
+    Unsupported characters become "?". A future enhancement is to bundle a
+    Unicode TTF font for proper non-Latin rendering.
+    """
+    return str(s).encode("latin-1", "replace").decode("latin-1")
+
+
 def render_pdf(result: dict) -> bytes:
     """Render run_search output as a PDF using fpdf2.
 
@@ -97,15 +108,13 @@ def render_pdf(result: dict) -> bytes:
     title = f"Whenever Flight Matrix - From {origin} | {pax_str}{fam_str} | Currency: CAD"
 
     pdf.set_font("Helvetica", "B", 14)
-    pdf.cell(0, 8, title, new_x=XPos.LMARGIN, new_y=YPos.NEXT, align="C")
+    pdf.cell(0, 8, _pdf_safe(title), new_x=XPos.LMARGIN, new_y=YPos.NEXT, align="C")
     pdf.ln(3)
 
     # ---- Recommendation ----
     if recommendation:
         pdf.set_font("Helvetica", "I", 10)
-        # Replace any non-latin-1 chars to avoid encoding errors
-        safe_rec = recommendation.encode("latin-1", errors="replace").decode("latin-1")
-        pdf.multi_cell(0, 6, f"Recommendation: {safe_rec}")
+        pdf.multi_cell(0, 6, _pdf_safe(f"Recommendation: {recommendation}"))
         pdf.ln(4)
 
     # ---- Per-city sections ----
@@ -117,7 +126,7 @@ def render_pdf(result: dict) -> bytes:
 
         # City heading
         pdf.set_font("Helvetica", "B", 11)
-        pdf.cell(0, 7, f"{city} ({iata})", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        pdf.cell(0, 7, _pdf_safe(f"{city} ({iata})"), new_x=XPos.LMARGIN, new_y=YPos.NEXT)
 
         # Best summary line
         if best:
@@ -138,7 +147,7 @@ def render_pdf(result: dict) -> bytes:
             summary = "  Best: no priceable options"
 
         pdf.set_font("Helvetica", "", 9)
-        pdf.cell(0, 5, summary, new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        pdf.cell(0, 5, _pdf_safe(summary), new_x=XPos.LMARGIN, new_y=YPos.NEXT)
         pdf.ln(1)
 
         if not grid:
@@ -169,16 +178,16 @@ def render_pdf(result: dict) -> bytes:
         # Header row (ret dates)
         pdf.set_font("Helvetica", "B", 8)
         pdf.set_fill_color(220, 220, 220)
-        pdf.cell(col_w, row_h, "dep \\ ret", border=1, fill=True)
+        pdf.cell(col_w, row_h, _pdf_safe("dep \\ ret"), border=1, fill=True)
         for rd in ret_dates:
-            pdf.cell(col_w, row_h, rd, border=1, fill=True)
+            pdf.cell(col_w, row_h, _pdf_safe(rd), border=1, fill=True)
         pdf.ln()
 
         # Data rows
         pdf.set_font("Helvetica", "", 8)
         for r_idx, r_row in enumerate(grid):
             dep_label = dep_dates[r_idx] if r_idx < len(dep_dates) else ""
-            pdf.cell(col_w, row_h, dep_label, border=1)
+            pdf.cell(col_w, row_h, _pdf_safe(dep_label), border=1)
             for cell in r_row:
                 cheap = cell.get("cheapest_cad")
                 stops = cell.get("stops")
@@ -190,7 +199,7 @@ def render_pdf(result: dict) -> bytes:
                     ns_mark = "*" if chosen == "nonstop" else ""
                     stops_s = str(stops) if stops is not None else "?"
                     label = f"CA${chosen_cad:,}{ns_mark} ({stops_s}st)"
-                pdf.cell(col_w, row_h, label, border=1)
+                pdf.cell(col_w, row_h, _pdf_safe(label), border=1)
             pdf.ln()
 
         pdf.ln(4)
