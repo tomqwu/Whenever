@@ -1,5 +1,5 @@
 [run]
-source = app
+source = app, watch, scheduler
 
 [report]
 show_missing = True

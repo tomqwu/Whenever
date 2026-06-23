@@ -83,6 +83,37 @@ the nonstop is "chosen"; otherwise the cheapest connection is chosen. Threshold 
 | `KIWI_API_KEY` | Kiwi/Tequila API key (free Self-Service tier at tequila.kiwi.com) | — |
 | `FARE_CACHE_TTL` | In-memory cache TTL (seconds) for fare results. Set `<= 0` to disable. | `3600` |
 
+## Price Watch
+
+`watch.py` + `scheduler.py` implement the "Watch This Trip" feature (issue #8).
+
+**DB file:** SQLite (stdlib `sqlite3`), path from `WATCH_DB` env (default `whenever_watches.db`).
+WAL mode is enabled for file DBs to handle light concurrent access.
+Schema: two tables — `watches` (one row per saved search) and `price_history` (one row per check).
+
+**Cron pattern:**
+```
+# Check all active watches once per hour
+0 * * * * cd /path/to/Whenever && python scheduler.py
+```
+`scheduler.py` opens the DB, calls `check_all_watches(db, fare_fn=app.get_fare)`, prints a
+summary to stdout, and exits 0. No long-running daemon — just run it as a cron job.
+
+**Notification options:**
+- Stdout: `[PRICE DROP] YYZ→PEK 2026-12-14/2027-01-04 CA$8,000 → CA$7,000 (-$1,000) book: <url>`
+- Webhook: set `WATCH_WEBHOOK_URL` to receive a JSON POST on each drop. Webhook failures are
+  caught and logged silently — they do not abort the run.
+- Email/SMS: deferred to a future release.
+
+**Cache-TTL caveat:** `get_fare` caches real priced results for `FARE_CACHE_TTL` seconds
+(default 3600). Running `python scheduler.py` more than once per hour will serve cached prices,
+not fresh API calls. Set a shorter `FARE_CACHE_TTL` or run at most once per hour.
+
+**Real-data guardrail:** `check_all_watches` calls `app.get_fare` directly. No fabricated
+prices are ever stored in `watches.last_price`. If `get_fare` returns `cheapest_cad=None`
+(no-data), the check is recorded in `price_history` with a null price, but `last_price` in
+`watches` is left unchanged (the last real price is preserved).
+
 ## Known limitations
 
 - Travelpayouts returns **cached** market fares (real, but not always live seat-level quotes);

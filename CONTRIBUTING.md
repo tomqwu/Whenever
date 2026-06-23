@@ -14,17 +14,19 @@ python3 app.py
 ```bash
 pip install -r requirements-dev.txt
 python -m playwright install chromium
-pytest --cov=app --cov-fail-under=99    # unit + e2e + coverage gate
+pytest --cov=app --cov=watch --cov=scheduler --cov-fail-under=99    # unit + e2e + coverage gate
 ```
 
 CI runs the same command on every PR and blocks merge to `main` if it fails or
-`app` coverage drops below 99%.
+coverage drops below 99% for `app`, `watch`, or `scheduler`.
 
 ## Project layout
 
 ```
 Whenever/
 ├── app.py                 # Flask backend + run_search (core search logic)
+├── watch.py               # WatchDB + check_all_watches (price-watch persistence)
+├── scheduler.py           # Standalone cron script: runs check_all_watches
 ├── templates/index.html   # single-page UI
 ├── requirements.txt
 ├── .env.example
@@ -42,6 +44,15 @@ Whenever/
   Any new pricing path must hit a real flight API and normalize to the `get_fare` dict shape.
 - Keep providers behind the `get_fare` adapter (see `docs/ARCHITECTURE.md`).
 - Don't commit secrets — use `.env` (git-ignored).
+
+## Price-watch env vars
+
+| Variable | Purpose | Default |
+|----------|---------|---------|
+| `WATCH_DB` | Path to the SQLite DB file used by `watch.py`/`scheduler.py` | `whenever_watches.db` |
+| `WATCH_WEBHOOK_URL` | URL to POST JSON on each price drop (optional) | — |
+
+Run the price-watch checker manually or via cron: `python scheduler.py`.
 
 ## Adding a flight provider
 
