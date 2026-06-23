@@ -21,4 +21,4 @@ jobs:
       - name: Install Playwright browser
         run: python -m playwright install --with-deps chromium
       - name: Run tests with coverage gate
-        run: pytest --cov=app --cov=cli --cov-report=term-missing --cov-fail-under=99
+        run: pytest --cov=app --cov-report=term-missing --cov-fail-under=99

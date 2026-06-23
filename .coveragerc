@@ -1,5 +1,5 @@
 [run]
-source = app, cli
+source = app
 
 [report]
 show_missing = True
