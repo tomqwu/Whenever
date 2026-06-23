@@ -80,3 +80,9 @@ You may instead pass explicit `dep_dates` / `ret_dates` arrays.
 ```
 
 Cells with no API result have `"cheapest_cad": null, "source": "no-data"`.
+
+**Errors**
+
+| Status | Condition |
+|--------|-----------|
+| 400    | `origin`, `destinations`, or dates are missing/empty/malformed (`{"error": "origin, destinations and dates required"}`) |

@@ -51,6 +51,25 @@ def test_search_validation(client):
     assert r.status_code == 400
 
 
+def test_search_missing_dates_returns_400(client):
+    # Issue #9: omitting dates must return 400, not 500 (ValueError from date_range(""))
+    r = client.post("/api/search", json={
+        "origin": "YYZ",
+        "destinations": [{"city": "X", "iata": "XXX"}],
+    })
+    assert r.status_code == 400
+
+
+def test_search_malformed_dates_returns_400(client):
+    # Issue #9: malformed dep_start/ret_start must also return 400, not 500
+    r = client.post("/api/search", json={
+        "origin": "YYZ",
+        "destinations": [{"city": "X", "iata": "XXX"}],
+        "dep_start": "not-a-date", "ret_start": "also-bad",
+    })
+    assert r.status_code == 400
+
+
 def test_search_success_picks_nonstop_when_within_threshold(client, monkeypatch):
     monkeypatch.setattr(appmod, "get_fare", lambda *a, **k: {
         "cheapest_cad": 1000, "stops": 1, "nonstop_cad": 1100, "source": "test", "book": None,
