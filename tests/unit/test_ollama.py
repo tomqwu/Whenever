@@ -16,7 +16,7 @@ def test_ollama_chat_strips_think_and_uses_system(monkeypatch, fake_resp):
 
 def test_ollama_chat_without_system(monkeypatch, fake_resp):
     def fake_post(url, json=None, timeout=None):
-        return fake_resp({"message": {"content": "world"}})
+        return fake_resp({"message": {"content": "  world  "}})
 
     monkeypatch.setattr(appmod.requests, "post", fake_post)
     out = appmod.ollama_chat("hi")
@@ -33,6 +33,15 @@ def test_ollama_ok_false(monkeypatch):
         raise RuntimeError("down")
 
     monkeypatch.setattr(appmod.requests, "get", boom)
+    assert appmod.ollama_ok() is False
+
+
+def test_ollama_ok_false_on_bad_status(monkeypatch, fake_resp):
+    monkeypatch.setattr(
+        appmod.requests,
+        "get",
+        lambda *a, **k: fake_resp({}, status=500, raise_exc=RuntimeError("bad status")),
+    )
     assert appmod.ollama_ok() is False
 
 
