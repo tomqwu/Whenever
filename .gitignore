@@ -16,6 +16,12 @@ env/
 .vscode/
 *.swp
 
+# Test / coverage artifacts
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+
 # Runtime data
 flight-matrix-history.csv
 flight-matrix-latest.md
