@@ -29,14 +29,27 @@ def client():
 
 
 @pytest.fixture(autouse=True)
-def _reset_state():
-    """Caches and the Amadeus token leak across tests; reset them."""
+def _reset_state(monkeypatch):
+    """Caches and the Amadeus token leak across tests; reset them.
+
+    Also clear all provider-credential globals so that ambient env vars
+    (e.g. KIWI_API_KEY exported in dev/CI) cannot affect provider-list
+    assertions.  Each test that needs a provider must set it explicitly
+    via its own monkeypatch; those patches are applied after this one and
+    take effect correctly because monkeypatch stacks.
+    """
+    monkeypatch.setattr(appmod, "AMADEUS_ID", None)
+    monkeypatch.setattr(appmod, "AMADEUS_SECRET", None)
+    monkeypatch.setattr(appmod, "TRAVELPAYOUTS_TOKEN", None)
+    monkeypatch.setattr(appmod, "KIWI_API_KEY", None)
     appmod.top_cities.cache_clear()
     appmod.resolve_airport.cache_clear()
     appmod._amadeus_token["value"] = None
     appmod._amadeus_token["exp"] = 0
     appmod._fare_cache.clear()
     yield
-    appmod.top_cities.cache_clear()
-    appmod.resolve_airport.cache_clear()
+    if hasattr(appmod.top_cities, "cache_clear"):
+        appmod.top_cities.cache_clear()
+    if hasattr(appmod.resolve_airport, "cache_clear"):
+        appmod.resolve_airport.cache_clear()
     appmod._fare_cache.clear()
