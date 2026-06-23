@@ -35,7 +35,7 @@ def _build_parser():
     p.add_argument("--dep-span", type=int, default=4, help="Number of departure dates (default: 4).")
     p.add_argument("--ret-start", required=True, help="Return window start date (ISO, YYYY-MM-DD).")
     p.add_argument("--ret-span", type=int, default=4, help="Number of return dates (default: 4).")
-    p.add_argument("--nonstop-threshold", type=int, default=25,
+    p.add_argument("--nonstop-threshold", type=float, default=25,
                    help="Max %% premium to prefer nonstop over cheapest (default: 25).")
     p.add_argument("--families", type=int, default=1, help="Number of families (default: 1).")
     return p

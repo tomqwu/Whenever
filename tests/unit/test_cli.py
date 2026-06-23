@@ -494,3 +494,53 @@ def test_cli_malformed_ret_start_errors(monkeypatch, capsys):
     assert rc != 0, "Malformed ret_start must exit non-zero"
     assert err.strip(), "A message must be printed to stderr"
     assert run_search_calls == [], "run_search must NOT be called when ret_dates is empty"
+
+
+# ---------------------------------------------------------------------------
+# --nonstop-threshold accepts fractional (float) values (API parity)
+# ---------------------------------------------------------------------------
+def test_cli_nonstop_threshold_fractional(monkeypatch, capsys):
+    """--nonstop-threshold 25.5 must be accepted and forwarded as float 25.5."""
+    received = {}
+
+    def capture(origin, dests, adults, child_ages, dep_dates, ret_dates,
+                threshold_pct=25, families=1):
+        received["threshold_pct"] = threshold_pct
+        return _fake_run_search(origin, dests, adults, child_ages, dep_dates, ret_dates)
+
+    monkeypatch.setattr(appmod, "resolve_airport", lambda city: "YYZ")
+    monkeypatch.setattr(appmod, "run_search", capture)
+
+    rc = cli.main([
+        "--from", "Toronto",
+        "--city", "Shanghai",
+        "--dep-start", "2026-12-12",
+        "--ret-start", "2027-01-04",
+        "--nonstop-threshold", "25.5",
+    ])
+    assert rc == 0, "--nonstop-threshold 25.5 should not be rejected by argparse"
+    assert received["threshold_pct"] == 25.5
+    assert isinstance(received["threshold_pct"], float)
+
+
+def test_cli_nonstop_threshold_integer_still_works(monkeypatch, capsys):
+    """--nonstop-threshold 25 (integer) must still be accepted and forwarded as 25.0."""
+    received = {}
+
+    def capture(origin, dests, adults, child_ages, dep_dates, ret_dates,
+                threshold_pct=25, families=1):
+        received["threshold_pct"] = threshold_pct
+        return _fake_run_search(origin, dests, adults, child_ages, dep_dates, ret_dates)
+
+    monkeypatch.setattr(appmod, "resolve_airport", lambda city: "YYZ")
+    monkeypatch.setattr(appmod, "run_search", capture)
+
+    rc = cli.main([
+        "--from", "Toronto",
+        "--city", "Shanghai",
+        "--dep-start", "2026-12-12",
+        "--ret-start", "2027-01-04",
+        "--nonstop-threshold", "25",
+    ])
+    assert rc == 0, "--nonstop-threshold 25 should be accepted"
+    assert received["threshold_pct"] == 25.0
