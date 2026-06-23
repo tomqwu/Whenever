@@ -52,5 +52,5 @@ Whenever/
 ## Ideas / roadmap
 
 - Caching layer to respect API rate limits on large grids.
-- Second provider for cross-checking (Kiwi/Tequila, Skyscanner).
+- Another provider for cross-checking (e.g. Skyscanner via RapidAPI); Amadeus, Travelpayouts, and Kiwi/Tequila are already wired in.
 - "Watch this trip" daily price-drop alerts.

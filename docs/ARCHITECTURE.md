@@ -61,8 +61,9 @@ Each provider returns a normalized dict:
   "source": "travelpayouts", "book": "https://..." }
 ```
 
-To add a provider (Kiwi/Tequila, Skyscanner via RapidAPI, etc.), write one function with that
-signature and add it to the tuple. No other code changes needed.
+Amadeus, Travelpayouts, and Kiwi/Tequila are the providers wired into this tuple today. To add
+another (e.g. Skyscanner via RapidAPI), write one function with that signature and add it to the
+tuple. No other code changes needed.
 
 ## Nonstop-preference rule
 
