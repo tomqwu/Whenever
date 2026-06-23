@@ -14,21 +14,22 @@ python3 app.py
 ```bash
 pip install -r requirements-dev.txt
 python -m playwright install chromium
-pytest --cov=app --cov=watch --cov=scheduler --cov-fail-under=99    # unit + e2e + coverage gate
+pytest --cov=app --cov=watch --cov=scheduler --cov=export --cov-fail-under=99    # unit + e2e + coverage gate
 ```
 
 CI runs the same command on every PR and blocks merge to `main` if it fails or
-coverage drops below 99% for `app`, `watch`, or `scheduler`.
+coverage drops below 99% for `app`, `watch`, `scheduler`, or `export`.
 
 ## Project layout
 
 ```
 Whenever/
 ├── app.py                 # Flask backend + run_search (core search logic)
+├── export.py              # render_csv / render_pdf — consumes run_search output (fpdf2)
 ├── watch.py               # WatchDB + check_all_watches (price-watch persistence)
 ├── scheduler.py           # Standalone cron script: runs check_all_watches
 ├── templates/index.html   # single-page UI
-├── requirements.txt
+├── requirements.txt       # includes fpdf2 (pure-Python PDF; no system libs required)
 ├── .env.example
 ├── docs/
 │   ├── ARCHITECTURE.md
