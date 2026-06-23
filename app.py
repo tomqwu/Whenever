@@ -208,7 +208,7 @@ def kiwi_fare(origin, dest, dep, ret, adults, children):
         "curr": "CAD", "limit": 20,
     }
     r = requests.get(
-        "https://api.tequila.kiwi.com/v2/search",
+        "https://tequila-api.kiwi.com/v2/search",
         headers={"apikey": KIWI_API_KEY},
         params=params,
         timeout=30,

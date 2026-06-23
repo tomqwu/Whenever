@@ -163,9 +163,16 @@ def test_kiwi_fare_happy_path(monkeypatch, fake_resp):
     # nonstop: 1 outbound + 1 return = max stops = 0
     itin_nonstop = _kiwi_itinerary(9500, [0, 1])
     payload = {"data": [itin_cheap, itin_nonstop]}
-    monkeypatch.setattr(appmod.requests, "get",
-                        lambda *a, **k: fake_resp(payload, status=200))
+    captured_urls = []
+
+    def fake_get(url, *a, **k):
+        captured_urls.append(url)
+        return fake_resp(payload, status=200)
+
+    monkeypatch.setattr(appmod.requests, "get", fake_get)
     res = appmod.kiwi_fare("YYZ", "PVG", "2026-12-12", "2027-01-04", 2, 0)
+    # Verify the correct Tequila API host is used (regression guard for codex-review P1 bug)
+    assert captured_urls == ["https://tequila-api.kiwi.com/v2/search"]
     assert res["cheapest_cad"] == 7000
     assert res["stops"] == 1
     assert res["nonstop_cad"] == 9500
