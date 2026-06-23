@@ -34,7 +34,7 @@ Ollama) only transforms/analyzes that data — **it never originates prices**. S
 A change is done only when **all** are true:
 
 - [ ] Unit + e2e tests written/updated and passing locally
-- [ ] Coverage ≥ 99% (`pytest --cov=app --cov-fail-under=99`)
+- [ ] Coverage ≥ 99% (`pytest --cov=app --cov=watch --cov=scheduler --cov-fail-under=99`)
 - [ ] Docs updated for the change
 - [ ] Code review run and findings resolved
 - [ ] Pushed to a branch, PR opened, CI green → merged to `main`
@@ -42,9 +42,10 @@ A change is done only when **all** are true:
 ## Commands
 
 ```bash
-pytest --cov=app --cov-fail-under=99 --cov-report=term-missing   # unit + coverage gate
-pytest tests/e2e                                                  # Playwright e2e
-python3 app.py                                                    # run locally
+pytest --cov=app --cov=watch --cov=scheduler --cov-fail-under=99 --cov-report=term-missing   # unit + coverage gate
+pytest tests/e2e                                                                               # Playwright e2e
+python3 app.py                                                                                 # run locally
+python scheduler.py                                                                            # run price-watch checker
 ```
 
 ## Project-specific guardrails
