@@ -1,5 +1,7 @@
 # Whenever ✈️
 
+[![CI](https://github.com/tomqwu/Whenever/actions/workflows/ci.yml/badge.svg)](https://github.com/tomqwu/Whenever/actions/workflows/ci.yml)
+
 A flexible-trip, best-value flight finder for travelers without fixed dates.
 Tell it roughly where and when — it searches **multiple cities × multiple dates**, prefers
 nonstop when the premium is small, and surfaces the most cost-effective combination.
