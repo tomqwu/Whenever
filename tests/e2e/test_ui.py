@@ -1,11 +1,14 @@
+import app as appmod
+
+
 def test_page_loads_and_health_renders(live_server, page):
     page.goto(live_server)
+    model = appmod.OLLAMA_MODEL
     page.wait_for_function(
-        "() => document.querySelector('#status') && "
-        "document.querySelector('#status').textContent.toLowerCase().includes('deepseek')"
+        "(m) => { const el = document.querySelector('#status'); return el && el.textContent.includes(m); }",
+        arg=model,
     )
-    status = page.inner_text("#status")
-    assert "deepseek" in status.lower()           # model name from /api/health
+    assert model in page.inner_text("#status")   # model name from /api/health
 
 
 def test_full_search_flow(live_server, page):
