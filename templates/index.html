@@ -1,0 +1,271 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Whenever — flexible-trip best-value finder</title>
+<style>
+:root{color-scheme:light;--accent:#d4843d;--accent2:#c9742e;--ink:#1c1c1a;--mut:#6b6b66;--line:#e7e7e2;--bg:#fafaf8;}
+*{box-sizing:border-box}
+body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;background:var(--bg);color:var(--ink);font-size:14px;line-height:1.45}
+.wrap{max-width:1120px;margin:0 auto;padding:22px 20px 80px}
+.brand{display:flex;align-items:baseline;gap:10px;margin-bottom:2px}
+.brand h1{font-size:24px;margin:0;letter-spacing:-.02em}
+.brand .em{font-size:22px}
+.tag{color:var(--mut);margin-bottom:18px}
+.status{font-size:12px;color:var(--mut);margin-bottom:16px}
+.status b{color:#2f7d32}
+.status .warn{color:#b94a48}
+.panel{background:#fff;border:1px solid var(--line);border-radius:12px;padding:16px 18px;margin-bottom:18px}
+.row{display:flex;flex-wrap:wrap;gap:16px}
+.field{display:flex;flex-direction:column;gap:4px}
+.field label{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:#8a8a83}
+input,select{padding:8px 10px;border:1px solid #d4d4cc;border-radius:8px;font-size:14px;background:#fff}
+input[type=number]{width:80px}
+button{cursor:pointer;border:1px solid var(--accent2);background:var(--accent);color:#fff;padding:9px 16px;border-radius:9px;font-size:14px;font-weight:600}
+button.sec{background:#fff;color:var(--mut);border-color:#d4d4cc}
+button:disabled{opacity:.5;cursor:default}
+.chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}
+.chip{display:inline-flex;align-items:center;gap:6px;border:1px solid #d4d4cc;border-radius:20px;padding:5px 11px;font-size:13px;cursor:pointer;background:#fff;user-select:none}
+.chip.on{background:#fcefe2;border-color:var(--accent);color:#8a4b16;font-weight:600}
+.kids{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.kids input{width:58px}
+.hint{font-size:12px;color:var(--mut)}
+.bar{height:6px;background:#ece9e2;border-radius:4px;overflow:hidden;margin:14px 0}
+.bar>div{height:100%;width:0;background:var(--accent);transition:width .2s}
+.rec{background:#fff7ef;border:1px solid #f0d9bf;border-radius:12px;padding:14px 16px;margin-bottom:20px;white-space:pre-wrap}
+.rec h3{margin:0 0 6px;font-size:14px;color:#8a4b16;text-transform:uppercase;letter-spacing:.04em}
+.summary{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:10px;margin-bottom:22px}
+.card{background:#fff;border:1px solid var(--line);border-radius:11px;padding:12px 14px}
+.card .city{font-weight:600}
+.card .price{font-size:20px;font-weight:700;margin:3px 0}
+.card .meta{font-size:11.5px;color:var(--mut)}
+.cityblock{margin-bottom:26px}
+.cityblock h2{font-size:15px;margin:0 0 8px}
+.cityblock h2 small{font-weight:400;color:#8a8a83;font-size:12px}
+table{border-collapse:collapse;width:100%;background:#fff;border:1px solid var(--line);border-radius:11px;overflow:hidden}
+th,td{padding:7px 8px;text-align:center;border:1px solid #eeede7;font-size:12.5px}
+th{background:#f4f1ea;color:#4a4a44;font-weight:600}
+td.rowh{background:#f4f1ea;font-weight:600}
+td a.price{display:block;font-weight:700;color:#1456b0;text-decoration:none}
+td a.price:hover{text-decoration:underline}
+.stops{font-size:10.5px;color:#8a8a83}
+.ns{font-size:11px;margin-top:2px}
+td.pick-ns{background:#e9f3e9}
+td.pick-ns .ns{color:#2f7d32;font-weight:600}
+td.best{outline:2px solid var(--accent);outline-offset:-2px}
+td.err{color:#b94a48;font-size:11px}
+.foot{font-size:12px;color:var(--mut);margin-top:6px}
+.estimate-flag{display:inline-block;font-size:11px;background:#fff3cd;border:1px solid #f0e0a0;color:#7a5b00;border-radius:5px;padding:1px 7px;margin-left:8px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="brand"><span class="em">✈️</span><h1>Whenever</h1></div>
+  <div class="tag">No fixed dates? That's your advantage. Tell us roughly — we'll find exactly.</div>
+  <div class="status" id="status">Checking local model…</div>
+
+  <div class="panel">
+    <div class="row">
+      <div class="field">
+        <label>Departure city</label>
+        <input id="depCity" placeholder="e.g. Toronto" value="Toronto">
+      </div>
+      <div class="field">
+        <label>Airport</label>
+        <input id="depCode" placeholder="YYZ" value="YYZ" style="width:90px">
+      </div>
+      <div class="field">
+        <label>Arrival country</label>
+        <input id="country" placeholder="e.g. China" value="China">
+      </div>
+      <div class="field" style="justify-content:flex-end">
+        <label>&nbsp;</label>
+        <button class="sec" id="loadCities">Get top cities →</button>
+      </div>
+    </div>
+    <div class="chips" id="cities"></div>
+
+    <div class="row" style="margin-top:16px">
+      <div class="field"><label>Adults</label><input id="adults" type="number" min="1" value="2"></div>
+      <div class="field">
+        <label>Children (ages)</label>
+        <div class="kids" id="kids"></div>
+      </div>
+      <div class="field"><label>Families (×)</label><input id="families" type="number" min="1" value="3"></div>
+    </div>
+
+    <div class="row" style="margin-top:16px">
+      <div class="field"><label>Earliest departure</label><input id="depStart" type="date" value="2026-12-12"></div>
+      <div class="field"><label># departure days</label><input id="depSpan" type="number" min="1" max="10" value="4"></div>
+      <div class="field"><label>Earliest return</label><input id="retStart" type="date" value="2027-01-04"></div>
+      <div class="field"><label># return days</label><input id="retSpan" type="number" min="1" max="10" value="4"></div>
+      <div class="field"><label>Nonstop premium OK (%)</label><input id="thresh" type="number" value="25"></div>
+    </div>
+
+    <div class="row" style="margin-top:16px;align-items:center">
+      <button id="run">Find best value</button>
+      <span class="hint" id="runHint"></span>
+    </div>
+  </div>
+
+  <div class="bar"><div id="prog"></div></div>
+  <div class="rec" id="rec" style="display:none"></div>
+  <div class="summary" id="summary"></div>
+  <div id="grids"></div>
+  <div class="foot" id="foot"></div>
+</div>
+
+<script>
+const $ = s => document.querySelector(s);
+let CITIES = [];   // [{city,iata,on}]
+let LAST = null;
+
+function fmtDate(iso){
+  const d = new Date(iso+'T00:00:00');
+  return d.toLocaleDateString('en-CA',{month:'short',day:'numeric'});
+}
+function money(v){ return v==null?'—':'$'+Math.round(v).toLocaleString('en-CA'); }
+
+// passengers: kid age inputs
+function renderKids(ages){
+  const box = $('#kids'); box.innerHTML='';
+  (ages||[11,9]).forEach(a=>{
+    const i=document.createElement('input'); i.type='number'; i.min=0; i.max=17; i.value=a; box.appendChild(i);
+  });
+  const add=document.createElement('button'); add.className='sec'; add.textContent='+'; add.style.padding='4px 9px';
+  add.onclick=()=>{ const i=document.createElement('input'); i.type='number'; i.min=0;i.max=17;i.value=8; box.insertBefore(i,add); };
+  const rem=document.createElement('button'); rem.className='sec'; rem.textContent='−'; rem.style.padding='4px 9px';
+  rem.onclick=()=>{ const ins=box.querySelectorAll('input'); if(ins.length) ins[ins.length-1].remove(); };
+  box.appendChild(add); box.appendChild(rem);
+}
+function kidAges(){ return [...$('#kids').querySelectorAll('input')].map(i=>parseInt(i.value)||0); }
+
+async function health(){
+  try{
+    const h = await (await fetch('/api/health')).json();
+    const s=$('#status');
+    const prov = (h.providers||[]);
+    let modelPart = h.ollama
+      ? `Local model <b>${h.model}</b> connected (analyzes results)`
+      : `<span class="warn">Ollama not reachable</span> — run <code>ollama serve</code> &amp; pull <b>${h.model}</b>`;
+    let farePart = prov.length
+      ? `flight data: <b>${prov.join(', ')}</b>`
+      : `<span class="warn">no flight API configured</span> — set TRAVELPAYOUTS_TOKEN or Amadeus keys to fetch real prices`;
+    s.innerHTML = modelPart + ' · ' + farePart;
+  }catch(e){ $('#status').innerHTML='<span class="warn">Backend not reachable.</span>'; }
+}
+
+$('#loadCities').onclick = async ()=>{
+  const country = $('#country').value.trim(); if(!country) return;
+  $('#loadCities').disabled=true; $('#loadCities').textContent='Asking model…';
+  try{
+    const r = await (await fetch('/api/top-cities',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({country, n:6})})).json();
+    CITIES = (r.cities||[]).map(c=>({...c,on:true}));
+    drawChips();
+  }catch(e){ alert('Could not load cities: '+e); }
+  $('#loadCities').disabled=false; $('#loadCities').textContent='Get top cities →';
+};
+
+function drawChips(){
+  const box=$('#cities'); box.innerHTML='';
+  CITIES.forEach((c,i)=>{
+    const el=document.createElement('span'); el.className='chip'+(c.on?' on':'');
+    el.textContent = `${c.city} (${c.iata})`;
+    el.onclick=()=>{ CITIES[i].on=!CITIES[i].on; drawChips(); };
+    box.appendChild(el);
+  });
+  if(CITIES.length){
+    const hint=document.createElement('span'); hint.className='hint'; hint.textContent='click to toggle';
+    box.appendChild(hint);
+  }
+}
+
+$('#depCity').addEventListener('change', async ()=>{
+  const city=$('#depCity').value.trim(); if(!city) return;
+  try{ const r=await (await fetch('/api/resolve',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({city})})).json(); if(r.iata) $('#depCode').value=r.iata; }catch(e){}
+});
+
+$('#run').onclick = async ()=>{
+  const dests = CITIES.filter(c=>c.on).map(c=>({city:c.city,iata:c.iata}));
+  if(!dests.length){ alert('Pick at least one destination city (use "Get top cities").'); return; }
+  const payload = {
+    origin: $('#depCode').value.trim().toUpperCase(),
+    destinations: dests,
+    adults: parseInt($('#adults').value)||1,
+    child_ages: kidAges(),
+    families: parseInt($('#families').value)||1,
+    dep_start: $('#depStart').value, dep_span: parseInt($('#depSpan').value)||4,
+    ret_start: $('#retStart').value, ret_span: parseInt($('#retSpan').value)||4,
+    nonstop_threshold: parseFloat($('#thresh').value)||25,
+  };
+  $('#run').disabled=true; $('#runHint').textContent='Searching '+dests.length+' cities…';
+  $('#prog').style.width='15%';
+  try{
+    const data = await (await fetch('/api/search',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(payload)})).json();
+    $('#prog').style.width='100%';
+    if(data.error){ alert(data.error); }
+    else { LAST=data; render(data); }
+  }catch(e){ alert('Search failed: '+e); }
+  $('#run').disabled=false; $('#runHint').textContent='';
+  setTimeout(()=>{$('#prog').style.width='0%';},600);
+};
+
+function render(data){
+  const thr = 1 + (parseFloat($('#thresh').value)||25)/100;
+  const fams = data.families||1;
+  // recommendation
+  const rec=$('#rec'); rec.style.display='block';
+  rec.innerHTML='<h3>Best-value pick</h3>'+ (data.recommendation||'');
+  // summary cards
+  const sum=$('#summary'); sum.innerHTML='';
+  data.results.forEach(r=>{
+    const b=r.best;
+    const card=document.createElement('div'); card.className='card';
+    card.innerHTML = `<div class="city">${r.city} <small>(${r.iata})</small></div>`+
+      `<div class="price">${b?money(b.chosen_cad):'—'}</div>`+
+      `<div class="meta">${b?fmtDate(b.dep)+' → '+fmtDate(b.ret)+' · '+(b.chosen==='nonstop'?'nonstop':b.stops+' stop(s)'):'no fares'}</div>`+
+      `<div class="meta">group ×${fams}: ${b?money(b.chosen_cad*fams):'—'}</div>`;
+    sum.appendChild(card);
+  });
+  // grids
+  const g=$('#grids'); g.innerHTML='';
+  const rets = data.ret_dates;
+  data.results.forEach(r=>{
+    const blk=document.createElement('div'); blk.className='cityblock';
+    let html=`<h2>${r.city} <small>(${r.iata})</small></h2><table><thead><tr><th>dep \\ ret</th>`+
+      rets.map(d=>`<th>${fmtDate(d)}</th>`).join('')+'</tr></thead><tbody>';
+    r.grid.forEach(row=>{
+      html+=`<tr><td class="rowh">${fmtDate(row[0].dep)}</td>`;
+      row.forEach(c=>{
+        if(c.cheapest_cad==null){ html+='<td class="err">n/a</td>'; return; }
+        const pickNS = c.nonstop_cad && c.cheapest_cad && c.nonstop_cad <= c.cheapest_cad*thr;
+        const cls = pickNS?'pick-ns':'';
+        let cell = `<a class="price" href="${c.book}" target="_blank" rel="noopener">${money(c.cheapest_cad)}</a>`+
+          `<div class="stops">${c.stops!=null?c.stops+' stop'+(c.stops===1?'':'s'):''}</div>`;
+        if(c.nonstop_cad) cell+=`<div class="ns">ns ${money(c.nonstop_cad)}</div>`;
+        html+=`<td class="${cls}" data-k="${c.dep}|${c.ret}">${cell}</td>`;
+      });
+      html+='</tr>';
+    });
+    html+='</tbody></table>';
+    blk.innerHTML=html; g.appendChild(blk);
+    if(r.best){ const td=blk.querySelector(`td[data-k="${r.best.dep}|${r.best.ret}"]`); if(td) td.classList.add('best'); }
+  });
+  const prov = (data.providers||[]);
+  const noData = data.results.some(r=>r.grid.some(row=>row.some(c=>c.source==='no-data')));
+  $('#foot').innerHTML = (prov.length
+      ? 'Live flight data via <b>'+prov.join(', ')+'</b>. The model analyzes these real fares — it does not generate prices. '
+      : '<span class="estimate-flag">no flight API</span> Set TRAVELPAYOUTS_TOKEN (or Amadeus keys) so the app can fetch real prices. ')+
+    (noData?'<span class="warn">Some cells returned no fares from the API. </span>':'')+
+    'Per family of '+(data.adults+data.child_ages.length)+'. Prices CAD · click any price to open the booking.';
+}
+
+renderKids([11,9]);
+health();
+</script>
+</body>
+</html>
