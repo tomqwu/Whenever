@@ -1,5 +1,21 @@
 # Contributing
 
+## Make targets
+
+A `Makefile` wraps the common tasks (run `make` to list them):
+
+```bash
+make install     # venv + runtime/dev deps + Playwright chromium
+make run         # run the Flask web app
+make test        # full suite + 99% coverage gate (same as CI)
+make test-unit   # unit tests only
+make test-e2e    # Playwright e2e only
+make cov         # full suite + HTML coverage report (htmlcov/)
+make ci          # alias for the CI gate
+make scheduler   # run the price-watch scheduler once
+make clean       # remove caches, coverage artifacts, local watch DB
+```
+
 ## Dev setup
 
 ```bash
@@ -8,6 +24,8 @@ pip install -r requirements.txt
 cp .env.example .env   # fill in OLLAMA_MODEL and a flight API key
 python3 app.py
 ```
+
+(Or just `make install && make run`.)
 
 ## Tests
 
