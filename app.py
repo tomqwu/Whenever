@@ -267,21 +267,17 @@ def date_range(start_iso, count):
         return []
     return [(d + dt.timedelta(days=i)).isoformat() for i in range(count)]
 
-@app.route("/api/search", methods=["POST"])
-def api_search():
-    b = request.get_json(force=True)
-    origin = (b.get("origin") or "").upper()[:3]
-    dests = b.get("destinations") or []          # [{city,iata}]
-    adults = int(b.get("adults", 2))
-    child_ages = [int(a) for a in (b.get("child_ages") or [])]
-    children = len(child_ages)
-    dep_dates = b.get("dep_dates") or date_range(b.get("dep_start", ""), int(b.get("dep_span", 4)))
-    ret_dates = b.get("ret_dates") or date_range(b.get("ret_start", ""), int(b.get("ret_span", 4)))
-    threshold = float(b.get("nonstop_threshold", 25)) / 100.0
-    families = int(b.get("families", 1))
+def run_search(origin, dests, adults, child_ages, dep_dates, ret_dates,
+               threshold_pct=25, families=1):
+    """Core best-value search shared by the web route and the CLI.
 
-    if not origin or not dests or not dep_dates or not ret_dates:
-        return jsonify({"error": "origin, destinations and dates required"}), 400
+    origin: IATA str; dests: list of {"city","iata"}; child_ages: list[int];
+    threshold_pct: nonstop premium % (e.g. 25). Returns dict with keys
+    origin, adults, child_ages, families, dep_dates, ret_dates, results,
+    recommendation, providers.
+    """
+    children = len(child_ages)
+    threshold = threshold_pct / 100.0
 
     results = []
     for dest in dests:
@@ -305,19 +301,38 @@ def api_search():
                     "book": f.get("book") or kayak_link(origin, code, dep, ret, adults, child_ages),
                 })
             grid.append(row)
-        # best cell for this city
         flat = [c for r in grid for c in r if c["chosen_cad"]]
         best = min(flat, key=lambda c: c["chosen_cad"]) if flat else None
         results.append({"city": dest.get("city"), "iata": code,
                         "grid": grid, "best": best})
 
     recommendation = build_recommendation(origin, results, adults, child_ages, families)
-    return jsonify({
+    return {
         "origin": origin, "adults": adults, "child_ages": child_ages,
         "families": families, "dep_dates": dep_dates, "ret_dates": ret_dates,
         "results": results, "recommendation": recommendation,
         "providers": providers_configured(),
-    })
+    }
+
+
+@app.route("/api/search", methods=["POST"])
+def api_search():
+    b = request.get_json(force=True)
+    origin = (b.get("origin") or "").upper()[:3]
+    dests = b.get("destinations") or []          # [{city,iata}]
+    adults = int(b.get("adults", 2))
+    child_ages = [int(a) for a in (b.get("child_ages") or [])]
+    dep_dates = b.get("dep_dates") or date_range(b.get("dep_start", ""), int(b.get("dep_span", 4)))
+    ret_dates = b.get("ret_dates") or date_range(b.get("ret_start", ""), int(b.get("ret_span", 4)))
+    threshold_pct = float(b.get("nonstop_threshold", 25))
+    families = int(b.get("families", 1))
+
+    if not origin or not dests or not dep_dates or not ret_dates:
+        return jsonify({"error": "origin, destinations and dates required"}), 400
+
+    result = run_search(origin, dests, adults, child_ages, dep_dates, ret_dates,
+                        threshold_pct=threshold_pct, families=families)
+    return jsonify(result)
 
 def build_recommendation(origin, results, adults, child_ages, families):
     bests = [{"city": r["city"], "iata": r["iata"],
