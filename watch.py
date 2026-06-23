@@ -173,6 +173,15 @@ def check_all_watches(
         source = fare.get("source") if fare else None
         book = fare.get("book") if fare else None
 
+        # Some providers (e.g. Amadeus) price a fare but give no booking
+        # deep-link. Fall back to a Kayak handoff so every alert has a usable
+        # booking URL — same behaviour as the web search route. The watch row
+        # stores `children` as a count, not ages, so pass [] for child_ages
+        # (origin/dest/dates/adults still encode a valid handoff).
+        if not book:
+            from app import kayak_link  # lazy import (avoids circular import)
+            book = kayak_link(origin, dest_iata, dep_date, ret_date, adults, [])
+
         # Record the check (null price OK in history)
         db.update_price(watch_id, new_price, source, book, now_iso)
 

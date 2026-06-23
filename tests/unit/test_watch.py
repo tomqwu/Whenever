@@ -233,6 +233,50 @@ def test_check_all_watches_drop_stdout_format(db, capsys):
     assert "https://k.com/trip" in out
 
 
+def test_check_all_watches_book_none_falls_back_to_kayak(db, capsys):
+    """When the provider gives no book link, the drop uses a Kayak fallback URL.
+
+    The fallback must be consistent across the drop record, the stdout line,
+    the webhook payload, AND the stored price_history.book.
+    """
+    _sample_watch(db, last_price=8000)
+    with patch("watch.requests.post") as mock_post:
+        mock_post.return_value = MagicMock(status_code=200)
+        drops = check_all_watches(
+            db,
+            fare_fn=_fare_fn_returning(7000, source="amadeus", book=None),
+            webhook_url="https://hooks.example.com/price-drop",
+        )
+    assert len(drops) == 1
+    d = drops[0]
+    # drop record uses the kayak fallback
+    assert d["book"].startswith("https://www.kayak.com")
+    assert "YYZ-PEK" in d["book"]
+    # stdout line uses the fallback
+    out = capsys.readouterr().out
+    assert "[PRICE DROP]" in out
+    assert d["book"] in out
+    assert "book: None" not in out
+    # webhook payload uses the fallback
+    call_args = mock_post.call_args
+    body = call_args[1].get("json") or call_args[0][1]
+    assert body["book"] == d["book"]
+    # stored price_history.book uses the fallback
+    cur = db._conn.execute("SELECT book FROM price_history WHERE watch_id=?", (d["watch_id"],))
+    assert cur.fetchone()[0] == d["book"]
+
+
+def test_check_all_watches_provider_book_link_preserved(db):
+    """When the provider supplies a book link, it is used unchanged (no fallback)."""
+    _sample_watch(db, last_price=8000)
+    drops = check_all_watches(
+        db, fare_fn=_fare_fn_returning(7000, book="https://k.com/book")
+    )
+    assert drops[0]["book"] == "https://k.com/book"
+    cur = db._conn.execute("SELECT book FROM price_history")
+    assert cur.fetchone()[0] == "https://k.com/book"
+
+
 def test_check_all_watches_no_drop_same_price(db, capsys):
     """Same price: no drop record and no stdout."""
     _sample_watch(db, last_price=8000)
