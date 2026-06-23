@@ -18,7 +18,7 @@ pytest --cov=app --cov=cli --cov-fail-under=99    # unit + e2e + coverage gate
 ```
 
 CI runs the same command on every PR and blocks merge to `main` if it fails or
-coverage drops below 99% for either `app.py` or `cli.py`.
+the **combined** coverage of `app` and `cli` drops below 99%.
 
 ## Project layout
 

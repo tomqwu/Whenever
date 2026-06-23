@@ -160,3 +160,55 @@ def test_build_recommendation_fallback_no_prices(monkeypatch):
     results = [{"city": "Nowhere", "iata": "XXX", "best": None}]
     out = appmod.build_recommendation("YYZ", results, 1, [], 1)
     assert out == "No priceable options found."
+
+
+# ---------------------------------------------------------------------------
+# Fix 1 regression: fractional nonstop_threshold must not be truncated to int
+# ---------------------------------------------------------------------------
+
+def test_search_fractional_threshold_honored(client, monkeypatch):
+    """Regression: api_search must parse nonstop_threshold as float.
+
+    cheapest=1000, nonstop=1255.  Boundary:
+      threshold=25   → limit=1250  → nonstop too pricey → cheapest chosen
+      threshold=25.5 → limit=1255  → nonstop exactly at limit → nonstop chosen
+    If threshold were truncated to int(25.5)=25 the nonstop would not be picked.
+    """
+    monkeypatch.setattr(appmod, "get_fare", lambda *a, **k: {
+        "cheapest_cad": 1000, "stops": 1, "nonstop_cad": 1255,
+        "source": "test", "book": None,
+    })
+    monkeypatch.setattr(appmod, "build_recommendation", lambda *a, **k: "rec")
+
+    payload = {
+        "origin": "YYZ",
+        "destinations": [{"city": "X", "iata": "XXX"}],
+        "dep_dates": ["2026-12-12"],
+        "ret_dates": ["2027-01-04"],
+        "nonstop_threshold": 25.5,  # float: 1255 <= 1000*1.255 → nonstop chosen
+    }
+    cell = client.post("/api/search", json=payload).get_json()["results"][0]["grid"][0][0]
+    assert cell["chosen"] == "nonstop", (
+        "Fractional threshold 25.5 should select nonstop at 1255 (limit=1255.0); "
+        "int truncation to 25 would set limit=1250 and pick cheapest instead."
+    )
+    assert cell["chosen_cad"] == 1255
+
+
+def test_search_string_fractional_threshold_does_not_raise(client, monkeypatch):
+    """Regression: nonstop_threshold sent as string '25.5' must not raise (int() would fail)."""
+    monkeypatch.setattr(appmod, "get_fare", lambda *a, **k: {
+        "cheapest_cad": 1000, "stops": 1, "nonstop_cad": 1100,
+        "source": "test", "book": None,
+    })
+    monkeypatch.setattr(appmod, "build_recommendation", lambda *a, **k: "rec")
+
+    payload = {
+        "origin": "YYZ",
+        "destinations": [{"city": "X", "iata": "XXX"}],
+        "dep_dates": ["2026-12-12"],
+        "ret_dates": ["2027-01-04"],
+        "nonstop_threshold": "25.5",  # string decimal — float() handles this, int() does not
+    }
+    r = client.post("/api/search", json=payload)
+    assert r.status_code == 200, "String '25.5' threshold must not crash the route"

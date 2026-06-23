@@ -324,7 +324,7 @@ def api_search():
     child_ages = [int(a) for a in (b.get("child_ages") or [])]
     dep_dates = b.get("dep_dates") or date_range(b.get("dep_start", ""), int(b.get("dep_span", 4)))
     ret_dates = b.get("ret_dates") or date_range(b.get("ret_start", ""), int(b.get("ret_span", 4)))
-    threshold_pct = int(b.get("nonstop_threshold", 25))
+    threshold_pct = float(b.get("nonstop_threshold", 25))
     families = int(b.get("families", 1))
 
     if not origin or not dests or not dep_dates or not ret_dates:

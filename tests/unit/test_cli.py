@@ -338,3 +338,159 @@ def test_cli_nonstop_threshold_forwarded(monkeypatch, capsys):
         "--nonstop-threshold", "15",
     ])
     assert received["threshold_pct"] == 15
+
+
+# ---------------------------------------------------------------------------
+# Fix 2: 3-letter mixed-case city (e.g. "Hue") must go through resolve_airport
+# ---------------------------------------------------------------------------
+
+def test_cli_title_case_3letter_city_resolves(monkeypatch, capsys):
+    """'Hue' is 3 letters but not all-uppercase, so it must be resolved, not used as-is."""
+    resolve_calls = []
+
+    def spy_resolve(city):
+        resolve_calls.append(city)
+        return "HUI"
+
+    monkeypatch.setattr(appmod, "resolve_airport", spy_resolve)
+    monkeypatch.setattr(appmod, "run_search", _fake_run_search)
+
+    rc = cli.main([
+        "--from", "YYZ",
+        "--city", "Hue",
+        "--dep-start", "2026-12-12",
+        "--ret-start", "2027-01-04",
+    ])
+    assert rc == 0
+    # resolve_airport must have been called for the destination "Hue"
+    assert "Hue" in resolve_calls, (
+        "3-letter mixed-case city 'Hue' must be resolved via resolve_airport, "
+        "not used directly as an IATA code."
+    )
+
+
+def test_cli_uppercase_iata_city_skips_resolve(monkeypatch, capsys):
+    """'YYZ' passed as --city must be used directly without calling resolve_airport."""
+    resolve_calls = []
+
+    def spy_resolve(city):
+        resolve_calls.append(city)
+        return "PVG"
+
+    monkeypatch.setattr(appmod, "resolve_airport", spy_resolve)
+    monkeypatch.setattr(appmod, "run_search", _fake_run_search)
+
+    rc = cli.main([
+        "--from", "YYZ",      # uppercase IATA → passthrough (no resolve call)
+        "--city", "YVR",      # uppercase IATA → passthrough (no resolve call)
+        "--dep-start", "2026-12-12",
+        "--ret-start", "2027-01-04",
+    ])
+    assert rc == 0
+    # resolve_airport must NOT have been called for the IATA origin or IATA destination
+    assert resolve_calls == [], (
+        "All-uppercase 3-letter codes ('YYZ', 'YVR') must bypass resolve_airport entirely."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Fix 2: lowercase 3-letter input for --from must also go through resolve
+# ---------------------------------------------------------------------------
+def test_cli_lowercase_3letter_origin_resolves(monkeypatch, capsys):
+    """'yyz' is 3 letters but lowercase, so it must be resolved, not passed straight through."""
+    resolve_calls = []
+
+    def spy_resolve(city):
+        resolve_calls.append(city)
+        return "YYZ"
+
+    monkeypatch.setattr(appmod, "resolve_airport", spy_resolve)
+    monkeypatch.setattr(appmod, "run_search", _fake_run_search)
+    monkeypatch.setattr(appmod, "top_cities",
+                        lambda c, n: [{"city": "TestCity", "iata": "TST"}])
+
+    rc = cli.main([
+        "--from", "yyz",
+        "--country", "Canada",
+        "--dep-start", "2026-12-12",
+        "--ret-start", "2027-01-04",
+    ])
+    assert rc == 0
+    assert "yyz" in resolve_calls, (
+        "Lowercase 'yyz' must be resolved via resolve_airport, not used as a raw IATA code."
+    )
+
+
+# ---------------------------------------------------------------------------
+# Fix 3: malformed dep_start → non-zero exit, stderr message, no run_search call
+# ---------------------------------------------------------------------------
+
+def test_cli_malformed_dep_start_errors(monkeypatch, capsys):
+    """A malformed --dep-start must print an error to stderr and exit non-zero
+    WITHOUT calling run_search (matching the web API's 400 behavior)."""
+    run_search_calls = []
+
+    def spy_run_search(*a, **k):
+        run_search_calls.append(1)
+        return _fake_run_search(*a, **k)
+
+    monkeypatch.setattr(appmod, "resolve_airport", lambda city: "YYZ")
+    monkeypatch.setattr(appmod, "run_search", spy_run_search)
+
+    rc = cli.main([
+        "--from", "YYZ",
+        "--city", "PVG",
+        "--dep-start", "not-a-date",
+        "--ret-start", "2027-01-04",
+    ])
+    err = capsys.readouterr().err
+    assert rc != 0, "Malformed dep_start must exit non-zero"
+    assert err.strip(), "A message must be printed to stderr"
+    assert run_search_calls == [], "run_search must NOT be called when dep_dates is empty"
+
+
+def test_cli_zero_dep_span_errors(monkeypatch, capsys):
+    """--dep-span 0 produces an empty dep_dates; must exit non-zero without calling run_search."""
+    run_search_calls = []
+
+    def spy_run_search(*a, **k):
+        run_search_calls.append(1)
+        return _fake_run_search(*a, **k)
+
+    monkeypatch.setattr(appmod, "resolve_airport", lambda city: "YYZ")
+    monkeypatch.setattr(appmod, "run_search", spy_run_search)
+
+    rc = cli.main([
+        "--from", "YYZ",
+        "--city", "PVG",
+        "--dep-start", "2026-12-12",
+        "--dep-span", "0",
+        "--ret-start", "2027-01-04",
+    ])
+    err = capsys.readouterr().err
+    assert rc != 0, "--dep-span 0 (empty window) must exit non-zero"
+    assert err.strip(), "A message must be printed to stderr"
+    assert run_search_calls == [], "run_search must NOT be called when dep_dates is empty"
+
+
+def test_cli_malformed_ret_start_errors(monkeypatch, capsys):
+    """A malformed --ret-start must print an error to stderr and exit non-zero."""
+    run_search_calls = []
+
+    def spy_run_search(*a, **k):
+        run_search_calls.append(1)
+        return _fake_run_search(*a, **k)
+
+    monkeypatch.setattr(appmod, "resolve_airport", lambda city: "YYZ")
+    monkeypatch.setattr(appmod, "run_search", spy_run_search)
+
+    rc = cli.main([
+        "--from", "YYZ",
+        "--city", "PVG",
+        "--dep-start", "2026-12-12",
+        "--ret-start", "bad-ret-date",
+    ])
+    err = capsys.readouterr().err
+    assert rc != 0, "Malformed ret_start must exit non-zero"
+    assert err.strip(), "A message must be printed to stderr"
+    assert run_search_calls == [], "run_search must NOT be called when ret_dates is empty"
