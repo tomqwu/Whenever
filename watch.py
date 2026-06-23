@@ -16,6 +16,13 @@ from typing import Callable, Optional
 import requests
 
 
+# Placeholder age used to encode the correct passenger COUNT in a kayak
+# fallback link when a watch stored a children count but no exact ages.
+# It is approximate (the traveler adjusts ages at the booking site) and only
+# used when exact ages weren't saved.
+DEFAULT_CHILD_AGE = 10
+
+
 # ---------------------------------------------------------------------------
 # WatchDB
 # ---------------------------------------------------------------------------
@@ -197,12 +204,21 @@ def check_all_watches(
 
         # Some providers (e.g. Amadeus) price a fare but give no booking
         # deep-link. Fall back to a Kayak handoff so every alert has a usable
-        # booking URL — same behaviour as the web search route. The watch row
-        # stores the real child ages, so pass them through to encode the
-        # correct passenger count in the fallback URL.
+        # booking URL — same behaviour as the web search route. Encode the
+        # correct passenger COUNT: prefer exact saved ages; otherwise, when a
+        # children count was stored without ages, use a placeholder age per
+        # child so the link still carries the right number of kids. The
+        # placeholder age is approximate (the traveler adjusts it at the
+        # booking site) and only used when exact ages weren't saved.
         if not book:
             from app import kayak_link  # lazy import (avoids circular import)
-            book = kayak_link(origin, dest_iata, dep_date, ret_date, adults, child_ages)
+            if child_ages:
+                book_ages = child_ages
+            elif children:
+                book_ages = [DEFAULT_CHILD_AGE] * children
+            else:
+                book_ages = []
+            book = kayak_link(origin, dest_iata, dep_date, ret_date, adults, book_ages)
 
         # Record the check (null price OK in history)
         db.update_price(watch_id, new_price, source, book, now_iso)

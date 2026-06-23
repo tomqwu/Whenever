@@ -284,6 +284,25 @@ def test_check_all_watches_kayak_fallback_encodes_child_ages(db):
     assert "children-11-9" in book
 
 
+def test_check_all_watches_kayak_fallback_count_only_placeholder_ages(db):
+    """A watch with a children COUNT but NO ages + no provider book link →
+    kayak fallback URL encodes the right number of kids via placeholder ages."""
+    db.add_watch(
+        origin="YYZ", dest_iata="PEK", dest_city="Beijing",
+        dep_date="2026-12-14", ret_date="2027-01-04",
+        adults=2, children=2, threshold_pct=25.0,
+        last_price=8000, last_source="travelpayouts",
+        created_at="2026-06-23T00:00:00",
+    )
+    drops = check_all_watches(
+        db, fare_fn=_fare_fn_returning(7000, source="amadeus", book=None)
+    )
+    assert len(drops) == 1
+    book = drops[0]["book"]
+    assert book.startswith("https://www.kayak.com")
+    assert "children-10-10" in book
+
+
 def test_check_all_watches_kayak_fallback_no_children_adults_only(db):
     """A watch with no children → kayak fallback URL has no children segment."""
     _sample_watch(db, last_price=8000)  # child_ages defaults to []
