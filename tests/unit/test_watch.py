@@ -266,6 +266,49 @@ def test_check_all_watches_book_none_falls_back_to_kayak(db, capsys):
     assert cur.fetchone()[0] == d["book"]
 
 
+def test_check_all_watches_kayak_fallback_encodes_child_ages(db):
+    """A watch with child ages + no provider book link → kayak URL encodes ages."""
+    db.add_watch(
+        origin="YYZ", dest_iata="PEK", dest_city="Beijing",
+        dep_date="2026-12-14", ret_date="2027-01-04",
+        adults=2, child_ages=[11, 9], threshold_pct=25.0,
+        last_price=8000, last_source="travelpayouts",
+        created_at="2026-06-23T00:00:00",
+    )
+    drops = check_all_watches(
+        db, fare_fn=_fare_fn_returning(7000, source="amadeus", book=None)
+    )
+    assert len(drops) == 1
+    book = drops[0]["book"]
+    assert book.startswith("https://www.kayak.com")
+    assert "children-11-9" in book
+
+
+def test_check_all_watches_kayak_fallback_no_children_adults_only(db):
+    """A watch with no children → kayak fallback URL has no children segment."""
+    _sample_watch(db, last_price=8000)  # child_ages defaults to []
+    drops = check_all_watches(
+        db, fare_fn=_fare_fn_returning(7000, source="amadeus", book=None)
+    )
+    assert len(drops) == 1
+    book = drops[0]["book"]
+    assert book.startswith("https://www.kayak.com")
+    assert "children" not in book
+
+
+def test_watchdb_persists_and_parses_child_ages(db):
+    """child_ages is stored JSON-encoded and parsed back to a list; children=len."""
+    db.add_watch(
+        origin="YYZ", dest_iata="PEK", dest_city="Beijing",
+        dep_date="2026-12-14", ret_date="2027-01-04",
+        adults=2, child_ages=[11, 9], threshold_pct=25.0,
+        created_at="2026-06-23T00:00:00",
+    )
+    w = db.list_watches()[0]
+    assert w["child_ages"] == [11, 9]
+    assert w["children"] == 2
+
+
 def test_check_all_watches_provider_book_link_preserved(db):
     """When the provider supplies a book link, it is used unchanged (no fallback)."""
     _sample_watch(db, last_price=8000)
@@ -291,6 +334,19 @@ def test_check_all_watches_no_drop_higher_price(db):
     _sample_watch(db, last_price=8000)
     drops = check_all_watches(db, fare_fn=_fare_fn_returning(9000))
     assert drops == []
+
+
+def test_check_all_watches_seeded_baseline_fires_on_first_run(db):
+    """A watch saved WITH last_price reports a drop on the FIRST scheduler run.
+
+    Previously the first run was treated as baseline-setting and the drop was
+    suppressed; a seeded baseline must let the first drop fire immediately.
+    """
+    _sample_watch(db, last_price=8000)  # baseline seeded at save time
+    drops = check_all_watches(db, fare_fn=_fare_fn_returning(7000))
+    assert len(drops) == 1
+    assert drops[0]["old_price"] == 8000
+    assert drops[0]["new_price"] == 7000
 
 
 def test_check_all_watches_no_last_price(db):

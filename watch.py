@@ -9,6 +9,7 @@ Prices come only from app.get_fare (real provider chain) — never fabricated.
 """
 
 import datetime
+import json
 import sqlite3
 from typing import Callable, Optional
 
@@ -44,6 +45,7 @@ class WatchDB:
                 ret_date      TEXT NOT NULL,
                 adults        INTEGER NOT NULL DEFAULT 2,
                 children      INTEGER NOT NULL DEFAULT 0,
+                child_ages    TEXT NOT NULL DEFAULT '[]',
                 threshold_pct REAL NOT NULL DEFAULT 25.0,
                 last_price    INTEGER,
                 last_source   TEXT,
@@ -75,17 +77,23 @@ class WatchDB:
         last_price: Optional[int] = None,
         last_source: Optional[str] = None,
         created_at: Optional[str] = None,
+        child_ages: Optional[list] = None,
     ) -> int:
         if created_at is None:
             created_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        if child_ages is None:
+            child_ages = []
+        # Keep the children COUNT consistent with the stored ages list.
+        children = len(child_ages)
         cur = self._conn.execute(
             """INSERT INTO watches
                (origin, dest_iata, dest_city, dep_date, ret_date,
-                adults, children, threshold_pct, last_price, last_source,
-                created_at, active)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,1)""",
+                adults, children, child_ages, threshold_pct,
+                last_price, last_source, created_at, active)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,1)""",
             (origin, dest_iata, dest_city, dep_date, ret_date,
-             adults, children, threshold_pct, last_price, last_source, created_at),
+             adults, children, json.dumps(child_ages), threshold_pct,
+             last_price, last_source, created_at),
         )
         self._conn.commit()
         return cur.lastrowid
@@ -95,7 +103,12 @@ class WatchDB:
             cur = self._conn.execute("SELECT * FROM watches WHERE active=1 ORDER BY id")
         else:
             cur = self._conn.execute("SELECT * FROM watches ORDER BY id")
-        return [dict(row) for row in cur.fetchall()]
+        rows = []
+        for row in cur.fetchall():
+            d = dict(row)
+            d["child_ages"] = json.loads(d.get("child_ages") or "[]")
+            rows.append(d)
+        return rows
 
     def remove_watch(self, watch_id: int):
         self._conn.execute("UPDATE watches SET active=0 WHERE id=?", (watch_id,))
@@ -165,7 +178,8 @@ def check_all_watches(
         dep_date = watch["dep_date"]
         ret_date = watch["ret_date"]
         adults = watch["adults"]
-        children = watch["children"]
+        child_ages = watch.get("child_ages") or []
+        children = len(child_ages)
         last_price = watch["last_price"]
 
         fare = fare_fn(origin, dest_iata, dep_date, ret_date, adults, children)
@@ -176,11 +190,11 @@ def check_all_watches(
         # Some providers (e.g. Amadeus) price a fare but give no booking
         # deep-link. Fall back to a Kayak handoff so every alert has a usable
         # booking URL — same behaviour as the web search route. The watch row
-        # stores `children` as a count, not ages, so pass [] for child_ages
-        # (origin/dest/dates/adults still encode a valid handoff).
+        # stores the real child ages, so pass them through to encode the
+        # correct passenger count in the fallback URL.
         if not book:
             from app import kayak_link  # lazy import (avoids circular import)
-            book = kayak_link(origin, dest_iata, dep_date, ret_date, adults, [])
+            book = kayak_link(origin, dest_iata, dep_date, ret_date, adults, child_ages)
 
         # Record the check (null price OK in history)
         db.update_price(watch_id, new_price, source, book, now_iso)

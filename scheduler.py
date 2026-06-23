@@ -31,6 +31,9 @@ def add_watch(
     adults: int = 2,
     children: int = 0,
     threshold_pct: float = 25.0,
+    last_price: Optional[int] = None,
+    last_source: Optional[str] = None,
+    child_ages: Optional[list] = None,
 ) -> int:
     """Thin wrapper: add a watch to the given WatchDB. Returns the new watch id."""
     return db.add_watch(
@@ -42,6 +45,9 @@ def add_watch(
         adults=adults,
         children=children,
         threshold_pct=threshold_pct,
+        last_price=last_price,
+        last_source=last_source,
+        child_ages=child_ages,
     )
 
 
