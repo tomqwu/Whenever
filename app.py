@@ -19,6 +19,7 @@ AMADEUS_ID = os.environ.get("AMADEUS_CLIENT_ID")
 AMADEUS_SECRET = os.environ.get("AMADEUS_CLIENT_SECRET")
 # Travelpayouts / Aviasales token (free signup) -> real cached market fares + booking links
 TRAVELPAYOUTS_TOKEN = os.environ.get("TRAVELPAYOUTS_TOKEN")
+KIWI_API_KEY = os.environ.get("KIWI_API_KEY")
 CURRENCY = os.environ.get("CURRENCY", "cad").lower()
 FARE_CACHE_TTL = int(os.environ.get("FARE_CACHE_TTL", "3600"))
 
@@ -28,6 +29,8 @@ def providers_configured():
         p.append("amadeus")
     if TRAVELPAYOUTS_TOKEN:
         p.append("travelpayouts")
+    if KIWI_API_KEY:
+        p.append("kiwi")
     return p
 
 app = Flask(__name__)
@@ -186,9 +189,72 @@ def travelpayouts_fare(origin, dest, dep, ret, adults, children):
         "book": book,
     }
 
+def kiwi_fare(origin, dest, dep, ret, adults, children):
+    """Real fares from Kiwi/Tequila v2/search API. Returns booking deep-link."""
+    if not KIWI_API_KEY:
+        return None
+    # Tequila expects dates in dd/mm/YYYY format
+    try:
+        dep_fmt = dt.date.fromisoformat(dep).strftime("%d/%m/%Y")
+        ret_fmt = dt.date.fromisoformat(ret).strftime("%d/%m/%Y")
+    except (ValueError, TypeError):
+        dep_fmt = dep
+        ret_fmt = ret
+    params = {
+        "fly_from": origin, "fly_to": dest,
+        "date_from": dep_fmt, "date_to": dep_fmt,
+        "return_from": ret_fmt, "return_to": ret_fmt,
+        "adults": adults, "children": children,
+        "curr": "CAD", "limit": 20,
+    }
+    r = requests.get(
+        "https://tequila-api.kiwi.com/v2/search",
+        headers={"apikey": KIWI_API_KEY},
+        params=params,
+        timeout=30,
+    )
+    if r.status_code != 200:
+        return None
+    try:
+        data = r.json().get("data", [])
+    except Exception:
+        return None
+    if not data:
+        return None
+
+    def parse_itin(itin):
+        """Return (price_int, max_stops, is_nonstop, deep_link) or raise."""
+        price = int(round(float(itin["price"])))
+        route = itin["route"]
+        outbound = [seg for seg in route if seg["return"] == 0]
+        inbound = [seg for seg in route if seg["return"] == 1]
+        out_stops = len(outbound) - 1
+        in_stops = len(inbound) - 1
+        max_stops = max(out_stops, in_stops)
+        is_ns = max_stops == 0
+        return price, max_stops, is_ns, itin.get("deep_link")
+
+    try:
+        parsed = [parse_itin(it) for it in data]
+    except Exception:
+        return None
+
+    cheapest = min(parsed, key=lambda x: x[0])
+    nonstops = [p for p in parsed if p[2]]
+    ns = min(nonstops, key=lambda x: x[0]) if nonstops else None
+
+    return {
+        "cheapest_cad": cheapest[0],
+        "stops": cheapest[1],
+        "nonstop_cad": ns[0] if ns else None,
+        "source": "kiwi",
+        "book": cheapest[3],
+    }
+
+
 def _get_fare_uncached(origin, dest, dep, ret, adults, children):
     """Try each configured provider in order; return first real priced result."""
-    for provider in (amadeus_fare, travelpayouts_fare):
+    for provider in (amadeus_fare, travelpayouts_fare, kiwi_fare):
         try:
             res = provider(origin, dest, dep, ret, adults, children)
             if res and res.get("cheapest_cad"):

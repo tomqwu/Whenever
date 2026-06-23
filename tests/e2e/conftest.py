@@ -6,6 +6,10 @@ import app as appmod
 
 @pytest.fixture
 def live_server(monkeypatch):
+    monkeypatch.setattr(appmod, "KIWI_API_KEY", None)
+    monkeypatch.setattr(appmod, "AMADEUS_ID", None)
+    monkeypatch.setattr(appmod, "AMADEUS_SECRET", None)
+    monkeypatch.setattr(appmod, "TRAVELPAYOUTS_TOKEN", None)
     monkeypatch.setattr(appmod, "ollama_ok", lambda: True)
     monkeypatch.setattr(appmod, "top_cities",
                         lambda country, n=6: [{"city": "Shanghai", "iata": "PVG"}])

@@ -14,6 +14,7 @@ Whenever is a small Flask web app with three responsibilities, kept deliberately
                 │  2. Fare layer   ──▶  Flight APIs (REAL data)│
                 │       • Amadeus Self-Service                 │
                 │       • Travelpayouts / Aviasales            │
+                │       • Kiwi / Tequila                       │
                 │       • get_fare() adapter, no AI here       │
                 │                                              │
                 │  3. Booking links ──▶ provider deep-link or  │
@@ -46,7 +47,7 @@ configured, cells return `source: "no-data"` rather than a fabricated number.
 
 ```python
 def get_fare(origin, dest, dep, ret, adults, children):
-    for provider in (amadeus_fare, travelpayouts_fare):
+    for provider in (amadeus_fare, travelpayouts_fare, kiwi_fare):
         res = provider(...)
         if res and res.get("cheapest_cad"):
             return res
@@ -60,8 +61,9 @@ Each provider returns a normalized dict:
   "source": "travelpayouts", "book": "https://..." }
 ```
 
-To add a provider (Kiwi/Tequila, Skyscanner via RapidAPI, etc.), write one function with that
-signature and add it to the tuple. No other code changes needed.
+Amadeus, Travelpayouts, and Kiwi/Tequila are the providers wired into this tuple today. To add
+another (e.g. Skyscanner via RapidAPI), write one function with that signature and add it to the
+tuple. No other code changes needed.
 
 ## Nonstop-preference rule
 
@@ -78,6 +80,7 @@ the nonstop is "chosen"; otherwise the cheapest connection is chosen. Threshold 
 | `CURRENCY` | output currency | `cad` |
 | `TRAVELPAYOUTS_TOKEN` | Travelpayouts API token | — |
 | `AMADEUS_CLIENT_ID` / `AMADEUS_CLIENT_SECRET` | Amadeus creds | — |
+| `KIWI_API_KEY` | Kiwi/Tequila API key (free Self-Service tier at tequila.kiwi.com) | — |
 | `FARE_CACHE_TTL` | In-memory cache TTL (seconds) for fare results. Set `<= 0` to disable. | `3600` |
 
 ## Known limitations

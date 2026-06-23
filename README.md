@@ -71,7 +71,8 @@ If no provider is set, the grid shows "no fares" and tells you to add a key. Eac
 out to a live booking search. DeepSeek then analyzes whatever real fares were collected to pick the
 best-value trip — it is never the source of a price.
 
-The fare layer is a simple adapter (`get_fare` in `app.py`); add Kiwi, Skyscanner, etc. the same way.
+The fare layer is a simple adapter (`get_fare` in `app.py`); Amadeus, Travelpayouts, and Kiwi/Tequila
+are wired in this way, and new providers (e.g. Skyscanner) plug in the same way.
 
 ## Files
 
@@ -92,7 +93,7 @@ The fare layer is a simple adapter (`get_fare` in `app.py`); add Kiwi, Skyscanne
 ## Roadmap
 
 - Caching layer to respect API rate limits on large date grids.
-- A second flight provider for cross-checking (Kiwi/Tequila, Skyscanner).
+- More flight providers for cross-checking (Skyscanner, etc.); Kiwi/Tequila is already supported.
 - "Watch this trip" daily price-drop alerts.
 
 ## License
