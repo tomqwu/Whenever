@@ -114,6 +114,32 @@ prices are ever stored in `watches.last_price`. If `get_fare` returns `cheapest_
 (no-data), the check is recorded in `price_history` with a null price, but `last_price` in
 `watches` is left unchanged (the last real price is preserved).
 
+## Export
+
+`export.py` provides `render_csv(result) -> str` and `render_pdf(result) -> bytes`,
+both consuming the dict returned by `run_search()`.
+
+**Endpoints (stateless POST-only):**
+
+| Endpoint | Method | Response |
+|----------|--------|----------|
+| `/api/export/csv` | POST | `text/csv; charset=utf-8`, `Content-Disposition: attachment; filename="whenever-matrix.csv"` |
+| `/api/export/pdf` | POST | `application/pdf`, `Content-Disposition: attachment; filename="whenever-matrix.pdf"` |
+
+Both accept the same JSON body as `POST /api/search`. The server re-runs `run_search`
+(calling the real `get_fare` chain) on each export request — there is no server-side
+job storage and no `GET /api/export/<job_id>` route.
+
+**PDF library:** `fpdf2` (pure-Python; pip-only; no system libraries such as pango or
+cairo are required). The PDF is built programmatically — no HTML template is used.
+
+**CSV columns:** `city, iata, dep_date, ret_date, cheapest_cad, stops, nonstop_cad,
+chosen, chosen_cad, source, book`. One row per `(city, dep_date, ret_date)` matrix cell.
+`None`/no-data cells render as empty strings.
+
+**Real-data guardrail:** export routes call `run_search` which calls `get_fare`.
+No fabricated prices appear in exported files. Web-only — there is no CLI export path.
+
 ## Known limitations
 
 - Travelpayouts returns **cached** market fares (real, but not always live seat-level quotes);

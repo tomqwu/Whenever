@@ -10,7 +10,8 @@ deep-links to a real Kayak search for booking.
 import os, re, json, time, datetime as dt
 from functools import lru_cache
 import requests
-from flask import Flask, request, jsonify, render_template
+from flask import Flask, request, jsonify, render_template, Response
+import export
 
 # ----------------------------- config -----------------------------
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
@@ -381,11 +382,18 @@ def run_search(origin, dests, adults, child_ages, dep_dates, ret_dates,
     }
 
 
-@app.route("/api/search", methods=["POST"])
-def api_search():
-    b = request.get_json(force=True)
+def _search_args_from_body(b: dict):
+    """Parse a request body dict into run_search keyword arguments.
+
+    Returns a dict of kwargs suitable for ``run_search(**args)``, or None if
+    the body is invalid (missing origin, destinations, or dates — same
+    conditions as the existing 400 guard in api_search).
+
+    This is the single authoritative parsing path shared by api_search,
+    /api/export/csv, and /api/export/pdf.
+    """
     origin = (b.get("origin") or "").upper()[:3]
-    dests = b.get("destinations") or []          # [{city,iata}]
+    dests = b.get("destinations") or []
     adults = int(b.get("adults", 2))
     child_ages = [int(a) for a in (b.get("child_ages") or [])]
     dep_dates = b.get("dep_dates") or date_range(b.get("dep_start", ""), int(b.get("dep_span", 4)))
@@ -394,11 +402,58 @@ def api_search():
     families = int(b.get("families", 1))
 
     if not origin or not dests or not dep_dates or not ret_dates:
-        return jsonify({"error": "origin, destinations and dates required"}), 400
+        return None
 
-    result = run_search(origin, dests, adults, child_ages, dep_dates, ret_dates,
-                        threshold_pct=threshold_pct, families=families)
+    return dict(
+        origin=origin, dests=dests, adults=adults, child_ages=child_ages,
+        dep_dates=dep_dates, ret_dates=ret_dates,
+        threshold_pct=threshold_pct, families=families,
+    )
+
+
+_SEARCH_ARGS_400 = {"error": "origin, destinations and dates required"}
+
+
+@app.route("/api/search", methods=["POST"])
+def api_search():
+    b = request.get_json(force=True)
+    args = _search_args_from_body(b)
+    if args is None:
+        return jsonify(_SEARCH_ARGS_400), 400
+    result = run_search(**args)
     return jsonify(result)
+
+
+@app.route("/api/export/csv", methods=["POST"])
+def api_export_csv():
+    b = request.get_json(force=True)
+    args = _search_args_from_body(b)
+    if args is None:
+        return jsonify(_SEARCH_ARGS_400), 400
+    result = run_search(**args)
+    csv_text = export.render_csv(result)
+    return Response(
+        csv_text,
+        status=200,
+        content_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": 'attachment; filename="whenever-matrix.csv"'},
+    )
+
+
+@app.route("/api/export/pdf", methods=["POST"])
+def api_export_pdf():
+    b = request.get_json(force=True)
+    args = _search_args_from_body(b)
+    if args is None:
+        return jsonify(_SEARCH_ARGS_400), 400
+    result = run_search(**args)
+    pdf_bytes = export.render_pdf(result)
+    return Response(
+        pdf_bytes,
+        status=200,
+        mimetype="application/pdf",
+        headers={"Content-Disposition": 'attachment; filename="whenever-matrix.pdf"'},
+    )
 
 def build_recommendation(origin, results, adults, child_ages, families):
     bests = [{"city": r["city"], "iata": r["iata"],
