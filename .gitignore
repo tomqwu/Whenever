@@ -16,6 +16,10 @@ env/
 .vscode/
 *.swp
 
+# Tooling / scratch
+.superpowers/
+tmp/
+
 # Test / coverage artifacts
 .coverage
 .coverage.*
