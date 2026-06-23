@@ -140,6 +140,28 @@ chosen, chosen_cad, source, book`. One row per `(city, dep_date, ret_date)` matr
 **Real-data guardrail:** export routes call `run_search` which calls `get_fare`.
 No fabricated prices appear in exported files. Web-only — there is no CLI export path.
 
+## Country Seed Config
+
+`config/country_seeds.yaml` is a hand-maintained YAML file that maps lowercase country names
+to a list of destination candidates with IATA codes, priorities, and an optional flag.
+
+**Path:** loaded at `app.py` module import time via `_load_seed_config()` into `_SEED_CONFIG`.
+The path is resolved relative to `app.py`: `os.path.join(os.path.dirname(__file__), "config", "country_seeds.yaml")`.
+
+**n-limit / optional rule** (implemented in `top_cities(country, n)`):
+- **Required cities** (`optional: false` or omitted): up to `n` returned, sorted by `priority`.
+- **Optional cities** (`optional: true`): ALL appended after the required set regardless of `n`.
+  The frontend renders optional cities unchecked; users opt in by clicking the chip.
+- Example: `top_cities("China", 6)` → 6 required (priority 1–6) + 3 optional (priority 7–8) = 9 total.
+- `n` caps the required set only; it never filters optional cities.
+
+**LLM fallback:** If no seed entry exists for the requested country, the existing `ollama_chat`
+path is used and entries are annotated with `optional: False`. The `lru_cache` on `top_cities`
+remains valid — the seed lookup is deterministic by `(country, n)`.
+
+**Graceful degradation:** If `config/country_seeds.yaml` is absent or unparseable at startup,
+a warning is logged and `_SEED_CONFIG = {}` so all countries fall through to the LLM.
+
 ## Known limitations
 
 - Travelpayouts returns **cached** market fares (real, but not always live seat-level quotes);

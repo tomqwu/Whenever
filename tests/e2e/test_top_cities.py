@@ -1,0 +1,138 @@
+"""E2E tests for #16 — configurable country-seed list.
+
+These tests run the Flask app in a real thread. The ``live_server`` fixture
+stubs out ``top_cities``, so for seed-path tests we use a separate fixture
+(``seed_live_server``) that restores the real function and injects
+``_SEED_CONFIG`` directly — no file I/O, no LLM calls needed.
+"""
+import threading
+import pytest
+import requests as req
+from werkzeug.serving import make_server
+import app as appmod
+
+# ---------------------------------------------------------------------------
+# Minimal China seed config identical to the real YAML content
+# ---------------------------------------------------------------------------
+CHINA_SEED = {
+    "china": {
+        "display_name": "China",
+        "candidates": [
+            {"city": "Beijing",  "iata": "PEK", "alt_iata": ["PKX"], "priority": 1},
+            {"city": "Shanghai", "iata": "PVG", "alt_iata": ["SHA"], "priority": 2},
+            {"city": "Guangzhou","iata": "CAN", "priority": 3},
+            {"city": "Shenzhen", "iata": "SZX", "priority": 4},
+            {"city": "Chengdu",  "iata": "TFU", "alt_iata": ["CTU"], "priority": 5},
+            {"city": "Xiamen",   "iata": "XMN", "priority": 6},
+            {"city": "Haikou",   "iata": "HAK", "priority": 7, "optional": True},
+            {"city": "Sanya",    "iata": "SYX", "priority": 7, "optional": True},
+            {"city": "Shenyang", "iata": "SHE", "priority": 8, "optional": True},
+        ],
+    }
+}
+
+
+@pytest.fixture
+def seed_live_server(monkeypatch):
+    """A live Flask server with provider env vars cleared and _SEED_CONFIG injected.
+
+    Unlike the default live_server, top_cities is NOT replaced — the real
+    function runs so seed lookup is exercised.  The LLM (ollama_chat) is
+    patched to raise, ensuring any successful response comes from the seed.
+    """
+    monkeypatch.setattr(appmod, "KIWI_API_KEY", None)
+    monkeypatch.setattr(appmod, "AMADEUS_ID", None)
+    monkeypatch.setattr(appmod, "AMADEUS_SECRET", None)
+    monkeypatch.setattr(appmod, "TRAVELPAYOUTS_TOKEN", None)
+    monkeypatch.setattr(appmod, "ollama_ok", lambda: True)
+    monkeypatch.setattr(appmod, "_SEED_CONFIG", CHINA_SEED)
+    monkeypatch.setattr(
+        appmod, "ollama_chat",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError(
+            "ollama_chat must not be called when a seed is present"
+        ))
+    )
+    appmod.top_cities.cache_clear()
+
+    srv = make_server("127.0.0.1", 0, appmod.app)
+    thread = threading.Thread(target=srv.serve_forever)
+    thread.daemon = True
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{srv.server_port}"
+    finally:
+        srv.shutdown()
+        thread.join()
+        appmod.top_cities.cache_clear()
+
+
+# ---------------------------------------------------------------------------
+# API-level assertions: seed cities returned without LLM call
+# ---------------------------------------------------------------------------
+
+def test_top_cities_api_returns_seed_cities_without_llm(seed_live_server):
+    """POST /api/top-cities for China returns seed cities without calling the LLM."""
+    resp = req.post(
+        f"{seed_live_server}/api/top-cities",
+        json={"country": "China", "n": 6},
+    )
+    assert resp.status_code == 200, f"Expected 200, got {resp.status_code}: {resp.text}"
+    cities = resp.json()["cities"]
+
+    city_names = [c["city"] for c in cities]
+    assert "Beijing" in city_names, f"Beijing missing from {city_names}"
+    assert "Shanghai" in city_names, f"Shanghai missing from {city_names}"
+
+    optional_cities = [c for c in cities if c.get("optional") is True]
+    assert len(optional_cities) >= 1, "At least one optional city must be returned"
+
+    haikou = next((c for c in cities if c["iata"] == "HAK"), None)
+    assert haikou is not None, "Haikou (HAK) must be in the response"
+    assert haikou["optional"] is True, "Haikou must be optional=true"
+
+
+def test_top_cities_api_optional_and_priority_in_response(seed_live_server):
+    """Every city in the /api/top-cities response has optional and priority fields."""
+    resp = req.post(
+        f"{seed_live_server}/api/top-cities",
+        json={"country": "China", "n": 6},
+    )
+    assert resp.status_code == 200
+    cities = resp.json()["cities"]
+
+    for city in cities:
+        assert "optional" in city, f"'optional' missing in {city}"
+        assert "priority" in city, f"'priority' missing in {city}"
+
+    # Exactly 6 required + 3 optional
+    required = [c for c in cities if not c["optional"]]
+    optional = [c for c in cities if c["optional"]]
+    assert len(required) == 6
+    assert len(optional) == 3
+
+
+# ---------------------------------------------------------------------------
+# Browser assertion: optional city chip NOT pre-selected; required IS
+# ---------------------------------------------------------------------------
+
+def test_optional_cities_chip_not_prechecked_required_is(seed_live_server, page):
+    """Required city chips are .on; optional city chips are NOT .on initially.
+
+    Validates the templates/index.html change: on: !city.optional.
+    """
+    page.goto(seed_live_server)
+    page.click("#loadCities")
+    # Wait until at least one chip appears
+    page.wait_for_selector(".chip")
+
+    # Required city Beijing should be .on (pre-selected)
+    beijing_chip = page.query_selector(".chip.on:has-text('Beijing')")
+    assert beijing_chip is not None, "Beijing (required) chip must have class 'on'"
+
+    # Optional city Haikou should NOT be .on (unchecked)
+    haikou_on = page.query_selector(".chip.on:has-text('Haikou')")
+    assert haikou_on is None, "Haikou (optional) chip must NOT have class 'on'"
+
+    # Haikou chip must still exist (just unchecked)
+    haikou_chip = page.query_selector(".chip:has-text('Haikou')")
+    assert haikou_chip is not None, "Haikou chip must be rendered (even though unchecked)"
