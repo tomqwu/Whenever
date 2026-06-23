@@ -9,6 +9,17 @@ cp .env.example .env   # fill in OLLAMA_MODEL and a flight API key
 python3 app.py
 ```
 
+## Tests
+
+```bash
+pip install -r requirements-dev.txt
+python -m playwright install chromium
+pytest --cov=app --cov-fail-under=99    # unit + e2e + coverage gate
+```
+
+CI runs the same command on every PR and blocks merge to `main` if it fails or
+coverage drops below 99%.
+
 ## Project layout
 
 ```
