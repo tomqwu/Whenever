@@ -544,3 +544,35 @@ def test_cli_nonstop_threshold_integer_still_works(monkeypatch, capsys):
     ])
     assert rc == 0, "--nonstop-threshold 25 should be accepted"
     assert received["threshold_pct"] == 25.0
+
+
+# ---------------------------------------------------------------------------
+# Fix: top_cities raises (e.g. Ollama down) → non-zero exit + stderr + no run_search
+# ---------------------------------------------------------------------------
+def test_cli_top_cities_raises_errors_gracefully(monkeypatch, capsys):
+    """If top_cities raises, the CLI must print a concise error to stderr,
+    return non-zero, and must NOT call run_search."""
+    run_search_calls = []
+
+    def exploding_top_cities(country, n):
+        raise RuntimeError("Ollama connection refused")
+
+    def spy_run_search(*a, **k):
+        run_search_calls.append(1)
+        return _fake_run_search(*a, **k)
+
+    monkeypatch.setattr(appmod, "resolve_airport", lambda city: "YYZ")
+    monkeypatch.setattr(appmod, "top_cities", exploding_top_cities)
+    monkeypatch.setattr(appmod, "run_search", spy_run_search)
+
+    rc = cli.main([
+        "--from", "Toronto",
+        "--country", "China",
+        "--dep-start", "2026-12-12",
+        "--ret-start", "2027-01-04",
+    ])
+    err = capsys.readouterr().err
+    assert rc != 0, "top_cities failure must exit non-zero"
+    assert "China" in err, "Error message must mention the country"
+    assert "Ollama connection refused" in err, "Error message must include the exception text"
+    assert run_search_calls == [], "run_search must NOT be called when top_cities raises"

@@ -105,7 +105,11 @@ def main(argv=None) -> int:
 
     # Resolve destinations
     if args.country:
-        dests = app.top_cities(args.country, args.max_cities)
+        try:
+            dests = app.top_cities(args.country, args.max_cities)
+        except Exception as e:
+            print(f"error: could not expand country '{args.country}': {e}", file=sys.stderr)
+            return 1
         if not dests:
             print(f"Error: no cities found for country '{args.country}'.", file=sys.stderr)
             return 1
