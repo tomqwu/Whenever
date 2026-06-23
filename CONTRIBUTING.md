@@ -14,19 +14,17 @@ python3 app.py
 ```bash
 pip install -r requirements-dev.txt
 python -m playwright install chromium
-pytest --cov=app --cov=cli --cov-fail-under=99    # unit + e2e + coverage gate
+pytest --cov=app --cov-fail-under=99    # unit + e2e + coverage gate
 ```
 
 CI runs the same command on every PR and blocks merge to `main` if it fails or
-the **combined** coverage of `app` and `cli` drops below 99%.
+`app` coverage drops below 99%.
 
 ## Project layout
 
 ```
 Whenever/
-├── app.py                 # Flask backend + run_search (core logic shared with CLI)
-├── cli.py                 # whenever CLI entry point (calls app.run_search)
-├── pyproject.toml         # package metadata + `whenever` console script
+├── app.py                 # Flask backend + run_search (core search logic)
 ├── templates/index.html   # single-page UI
 ├── requirements.txt
 ├── .env.example
@@ -53,7 +51,6 @@ Whenever/
 
 ## Ideas / roadmap
 
-- CLI front-end (`whenever` command) sharing the same core functions.
 - Caching layer to respect API rate limits on large grids.
 - Second provider for cross-checking (Kiwi/Tequila, Skyscanner).
 - "Watch this trip" daily price-drop alerts.

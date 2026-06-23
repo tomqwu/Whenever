@@ -73,32 +73,9 @@ best-value trip — it is never the source of a price.
 
 The fare layer is a simple adapter (`get_fare` in `app.py`); add Kiwi, Skyscanner, etc. the same way.
 
-## CLI
-
-After `pip install -e .` (or `pip install whenever`), a `whenever` command is available:
-
-```bash
-whenever --from Toronto --country China \
-         --dep-start 2026-12-12 --dep-span 4 \
-         --ret-start 2027-01-04 --ret-span 4 \
-         --adults 2 --child 11 --child 9
-```
-
-Single destination:
-
-```bash
-whenever --from YYZ --city Shanghai \
-         --dep-start 2026-12-12 --ret-start 2027-01-04
-```
-
-The CLI runs the **same `run_search` function** as the web API — no logic is duplicated.
-Requires the same environment variables (`TRAVELPAYOUTS_TOKEN` or Amadeus creds, `OLLAMA_HOST`).
-
 ## Files
 
-- `app.py` — Flask backend + `run_search` core (shared by web route and CLI).
-- `cli.py` — `whenever` CLI entry point; calls `app.run_search` directly.
-- `pyproject.toml` — package metadata; declares the `whenever` console script.
+- `app.py` — Flask backend + `run_search` core (search logic shared by routes and tests).
 - `templates/index.html` — the UI (form + matrices + clickable prices).
 - `requirements.txt` — Python deps.
 - `.env.example` — copy to `.env` and fill in.
@@ -114,7 +91,6 @@ Requires the same environment variables (`TRAVELPAYOUTS_TOKEN` or Amadeus creds,
 
 ## Roadmap
 
-- **CLI front-end** (`whenever` command) sharing the same core functions — *next up*.
 - Caching layer to respect API rate limits on large date grids.
 - A second flight provider for cross-checking (Kiwi/Tequila, Skyscanner).
 - "Watch this trip" daily price-drop alerts.
