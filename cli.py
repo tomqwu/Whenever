@@ -56,13 +56,16 @@ def _render(result: dict) -> str:
     lines = []
     dep_dates = result["dep_dates"]
     ret_dates = result["ret_dates"]
+    families = result.get("families", 1)
 
     for r in result["results"]:
         lines.append(f"\n=== {r['city']} ({r['iata']}) ===")
-        # Header row: ret dates
+        # Header row: ret dates (prices per family)
         header = "          " + "  ".join(f"{d[-5:]:<12}" for d in ret_dates)
         lines.append(header)
         lines.append("          " + "-" * (14 * len(ret_dates)))
+        if families > 1:
+            lines.append(f"  (prices per family — multiply by {families} for group total)")
 
         for i, dep in enumerate(dep_dates):
             row_cells = []
@@ -83,7 +86,11 @@ def _render(result: dict) -> str:
         if r["best"]:
             b = r["best"]
             mark = "*nonstop*" if b["chosen"] == "nonstop" else "cheapest"
-            lines.append(f"  Best: {b['dep']} → {b['ret']}  CA${b['chosen_cad']:,}  [{mark}]")
+            best_line = f"  Best: {b['dep']} → {b['ret']}  CA${b['chosen_cad']:,}/family  [{mark}]"
+            if families > 1:
+                group_total = b["chosen_cad"] * families
+                best_line += f"  · group ×{families}: CA${group_total:,}"
+            lines.append(best_line)
         else:
             lines.append("  Best: no priceable cells found")
 

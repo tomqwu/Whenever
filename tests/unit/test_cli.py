@@ -576,3 +576,70 @@ def test_cli_top_cities_raises_errors_gracefully(monkeypatch, capsys):
     assert "China" in err, "Error message must mention the country"
     assert "Ollama connection refused" in err, "Error message must include the exception text"
     assert run_search_calls == [], "run_search must NOT be called when top_cities raises"
+
+
+# ---------------------------------------------------------------------------
+# families > 1: per-family label and group total appear in output
+# ---------------------------------------------------------------------------
+def _fake_run_search_families(families):
+    """Returns a run_search result with chosen_cad=2000 and given families count."""
+    def _search(origin, dests, adults, child_ages, dep_dates, ret_dates,
+                threshold_pct=25, families=families):
+        grid = [[{
+            "dep": d, "ret": r,
+            "cheapest_cad": 2000, "stops": 1,
+            "nonstop_cad": 2200, "chosen": "cheapest", "chosen_cad": 2000,
+            "source": "test", "book": "https://kayak.com/x",
+        } for r in ret_dates] for d in dep_dates]
+        flat = [c for row in grid for c in row]
+        best = min(flat, key=lambda c: c["chosen_cad"]) if flat else None
+        return {
+            "origin": origin, "adults": adults, "child_ages": child_ages,
+            "families": families, "dep_dates": dep_dates, "ret_dates": ret_dates,
+            "results": [{"city": "TestCity", "iata": "TST", "grid": grid, "best": best}],
+            "recommendation": "Best pick: go to TestCity",
+            "providers": [],
+        }
+    return _search
+
+
+def test_cli_families_3_shows_per_family_label_and_group_total(monkeypatch, capsys):
+    """With --families 3, output must show '/family' label and 'group ×3' total."""
+    monkeypatch.setattr(appmod, "resolve_airport", lambda city: "YYZ")
+    monkeypatch.setattr(appmod, "top_cities",
+                        lambda c, n: [{"city": "TestCity", "iata": "TST"}])
+    monkeypatch.setattr(appmod, "run_search", _fake_run_search_families(3))
+
+    rc = cli.main([
+        "--from", "Toronto",
+        "--country", "Testland",
+        "--dep-start", "2026-12-12", "--dep-span", "2",
+        "--ret-start", "2027-01-04", "--ret-span", "2",
+        "--families", "3",
+    ])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "/family" in out, "Per-family label must appear in output"
+    assert "group ×3" in out, "Group multiplier label must appear"
+    assert "CA$6,000" in out, "Group total (2000*3=6000) must appear"
+    assert "prices per family" in out, "Legend line must appear when families > 1"
+
+
+def test_cli_families_1_no_group_line(monkeypatch, capsys):
+    """With --families 1 (default), output must NOT show a group total line."""
+    monkeypatch.setattr(appmod, "resolve_airport", lambda city: "YYZ")
+    monkeypatch.setattr(appmod, "top_cities",
+                        lambda c, n: [{"city": "TestCity", "iata": "TST"}])
+    monkeypatch.setattr(appmod, "run_search", _fake_run_search_families(1))
+
+    rc = cli.main([
+        "--from", "Toronto",
+        "--country", "Testland",
+        "--dep-start", "2026-12-12", "--dep-span", "2",
+        "--ret-start", "2027-01-04", "--ret-span", "2",
+    ])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "group ×" not in out, "Single family must not show a group total"
+    assert "prices per family" not in out, "Legend must not appear for single family"
+    assert "/family" in out, "Per-family label must still appear on the Best line"
