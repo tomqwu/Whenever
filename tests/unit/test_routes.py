@@ -60,6 +60,16 @@ def test_search_missing_dates_returns_400(client):
     assert r.status_code == 400
 
 
+def test_search_non_string_dates_returns_400(client):
+    # Issue #9: non-string dep_start (e.g. integer) must return 400, not 500 (TypeError)
+    r = client.post("/api/search", json={
+        "origin": "YYZ",
+        "destinations": [{"city": "X", "iata": "XXX"}],
+        "dep_start": 123, "ret_start": 456,
+    })
+    assert r.status_code == 400
+
+
 def test_search_malformed_dates_returns_400(client):
     # Issue #9: malformed dep_start/ret_start must also return 400, not 500
     r = client.post("/api/search", json={

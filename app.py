@@ -233,7 +233,7 @@ def date_range(start_iso, count):
         return []
     try:
         d = dt.date.fromisoformat(start_iso)
-    except ValueError:
+    except (ValueError, TypeError):
         return []
     return [(d + dt.timedelta(days=i)).isoformat() for i in range(count)]
 
