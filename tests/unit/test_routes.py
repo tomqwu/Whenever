@@ -1,0 +1,132 @@
+import app as appmod
+
+
+def test_index_renders(client):
+    r = client.get("/")
+    assert r.status_code == 200
+    assert b"Whenever" in r.data
+
+
+def test_health(client, monkeypatch):
+    monkeypatch.setattr(appmod, "ollama_ok", lambda: True)
+    body = client.get("/api/health").get_json()
+    assert body["ollama"] is True
+    assert "model" in body
+
+
+def test_top_cities_requires_country(client):
+    r = client.post("/api/top-cities", json={"country": ""})
+    assert r.status_code == 400
+
+
+def test_top_cities_success(client, monkeypatch):
+    monkeypatch.setattr(appmod, "top_cities", lambda c, n: [{"city": "Beijing", "iata": "PEK"}])
+    r = client.post("/api/top-cities", json={"country": "China", "n": 6})
+    assert r.status_code == 200
+    assert r.get_json()["cities"][0]["iata"] == "PEK"
+
+
+def test_top_cities_model_error(client, monkeypatch):
+    def boom(c, n):
+        raise RuntimeError("model offline")
+
+    monkeypatch.setattr(appmod, "top_cities", boom)
+    r = client.post("/api/top-cities", json={"country": "China"})
+    assert r.status_code == 502
+
+
+def test_resolve_with_and_without_city(client, monkeypatch):
+    monkeypatch.setattr(appmod, "resolve_airport", lambda city: "YYZ")
+    assert client.post("/api/resolve", json={"city": "Toronto"}).get_json()["iata"] == "YYZ"
+    assert client.post("/api/resolve", json={"city": ""}).get_json()["iata"] == ""
+
+
+def test_search_validation(client):
+    # Empty origin triggers the 400; supply dates so date_range isn't called with ""
+    r = client.post("/api/search", json={
+        "origin": "", "destinations": [],
+        "dep_dates": ["2026-12-12"], "ret_dates": ["2027-01-04"],
+    })
+    assert r.status_code == 400
+
+
+def test_search_success_picks_nonstop_when_within_threshold(client, monkeypatch):
+    monkeypatch.setattr(appmod, "get_fare", lambda *a, **k: {
+        "cheapest_cad": 1000, "stops": 1, "nonstop_cad": 1100, "source": "test", "book": None,
+    })
+    monkeypatch.setattr(appmod, "build_recommendation", lambda *a, **k: "Best value: Shanghai")
+    payload = {
+        "origin": "YYZ",
+        "destinations": [{"city": "Shanghai", "iata": "PVG"}],
+        "adults": 2, "child_ages": [11],
+        "dep_start": "2026-12-12", "dep_span": 2,
+        "ret_start": "2027-01-04", "ret_span": 2,
+        "nonstop_threshold": 25,
+    }
+    data = client.post("/api/search", json=payload).get_json()
+    cell = data["results"][0]["grid"][0][0]
+    assert cell["chosen"] == "nonstop"            # 1100 <= 1000 * 1.25
+    assert cell["chosen_cad"] == 1100
+    assert data["recommendation"] == "Best value: Shanghai"
+    assert data["results"][0]["best"] is not None
+
+
+def test_search_chooses_cheapest_when_nonstop_too_pricey(client, monkeypatch):
+    monkeypatch.setattr(appmod, "get_fare", lambda *a, **k: {
+        "cheapest_cad": 1000, "stops": 1, "nonstop_cad": 2000, "source": "test", "book": "https://b",
+    })
+    monkeypatch.setattr(appmod, "build_recommendation", lambda *a, **k: "rec")
+    payload = {
+        "origin": "YYZ", "destinations": [{"city": "X", "iata": "XXX"}],
+        "dep_dates": ["2026-12-12"], "ret_dates": ["2027-01-04"],
+        "nonstop_threshold": 10,
+    }
+    cell = client.post("/api/search", json=payload).get_json()["results"][0]["grid"][0][0]
+    assert cell["chosen"] == "cheapest"           # 2000 > 1000 * 1.10
+    assert cell["book"] == "https://b"
+
+
+def test_search_handles_no_data_cells(client, monkeypatch):
+    monkeypatch.setattr(appmod, "get_fare", lambda *a, **k: {
+        "cheapest_cad": None, "stops": None, "nonstop_cad": None, "source": "no-data",
+    })
+    monkeypatch.setattr(appmod, "build_recommendation", lambda *a, **k: "rec")
+    payload = {
+        "origin": "YYZ", "destinations": [{"city": "X", "iata": "XXX"}],
+        "dep_dates": ["2026-12-12"], "ret_dates": ["2027-01-04"],
+    }
+    res = client.post("/api/search", json=payload).get_json()["results"][0]
+    assert res["best"] is None                    # no priceable cells
+    assert res["grid"][0][0]["book"].startswith("https://www.kayak.com")
+
+
+def test_build_recommendation_success(monkeypatch):
+    monkeypatch.setattr(appmod, "ollama_chat", lambda prompt: "AI says go to Shanghai")
+    results = [{"city": "Shanghai", "iata": "PVG",
+                "best": {"chosen_cad": 8000, "dep": "2026-12-12", "ret": "2027-01-04",
+                         "chosen": "cheapest", "stops": 1}}]
+    out = appmod.build_recommendation("YYZ", results, 2, [11], 3)
+    assert out == "AI says go to Shanghai"
+
+
+def test_build_recommendation_fallback_with_prices(monkeypatch):
+    def boom(prompt):
+        raise RuntimeError("ollama down")
+
+    monkeypatch.setattr(appmod, "ollama_chat", boom)
+    results = [{"city": "Shanghai", "iata": "PVG",
+                "best": {"chosen_cad": 8000, "dep": "2026-12-12", "ret": "2027-01-04",
+                         "chosen": "cheapest", "stops": 1}}]
+    out = appmod.build_recommendation("YYZ", results, 2, [11], 3)
+    assert "Best value: Shanghai" in out
+    assert "AI summary unavailable" in out
+
+
+def test_build_recommendation_fallback_no_prices(monkeypatch):
+    def boom(prompt):
+        raise RuntimeError("ollama down")
+
+    monkeypatch.setattr(appmod, "ollama_chat", boom)
+    results = [{"city": "Nowhere", "iata": "XXX", "best": None}]
+    out = appmod.build_recommendation("YYZ", results, 1, [], 1)
+    assert out == "No priceable options found."
