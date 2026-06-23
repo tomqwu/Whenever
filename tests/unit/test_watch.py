@@ -309,6 +309,43 @@ def test_watchdb_persists_and_parses_child_ages(db):
     assert w["children"] == 2
 
 
+def test_watchdb_explicit_children_count_without_ages(db):
+    """children passed WITHOUT ages is preserved (not silently zeroed)."""
+    db.add_watch(
+        origin="YYZ", dest_iata="PEK", dest_city="Beijing",
+        dep_date="2026-12-14", ret_date="2027-01-04",
+        adults=2, children=2, threshold_pct=25.0,
+        created_at="2026-06-23T00:00:00",
+    )
+    w = db.list_watches()[0]
+    assert w["children"] == 2
+    assert w["child_ages"] == []
+
+
+def test_check_all_watches_prices_explicit_children_without_ages(db):
+    """check_all_watches calls get_fare with the stored children count (=2),
+    not len(child_ages) (=0), when ages are unknown."""
+    db.add_watch(
+        origin="YYZ", dest_iata="PEK", dest_city="Beijing",
+        dep_date="2026-12-14", ret_date="2027-01-04",
+        adults=2, children=2, threshold_pct=25.0,
+        last_price=8000, last_source="travelpayouts",
+        created_at="2026-06-23T00:00:00",
+    )
+    captured = {}
+
+    def fare_fn(origin, dest, dep, ret, adults, children):
+        captured["adults"] = adults
+        captured["children"] = children
+        return {"cheapest_cad": 7000, "stops": 1, "nonstop_cad": None,
+                "source": "kiwi", "book": "https://k.com/book"}
+
+    drops = check_all_watches(db, fare_fn=fare_fn)
+    assert len(drops) == 1
+    assert captured["adults"] == 2
+    assert captured["children"] == 2
+
+
 def test_check_all_watches_provider_book_link_preserved(db):
     """When the provider supplies a book link, it is used unchanged (no fallback)."""
     _sample_watch(db, last_price=8000)

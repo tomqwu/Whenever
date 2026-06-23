@@ -29,3 +29,4 @@ htmlcov/
 # Runtime data
 flight-matrix-history.csv
 flight-matrix-latest.md
+whenever_watches.db*

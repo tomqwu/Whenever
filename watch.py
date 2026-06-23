@@ -83,8 +83,14 @@ class WatchDB:
             created_at = datetime.datetime.now(datetime.timezone.utc).isoformat()
         if child_ages is None:
             child_ages = []
-        # Keep the children COUNT consistent with the stored ages list.
-        children = len(child_ages)
+        # Reconcile the two passenger inputs:
+        #   - If ages are supplied, they are authoritative (count = len(ages)).
+        #   - Otherwise preserve the explicit `children` count (ages unknown),
+        #     and store an empty ages list.
+        if child_ages:
+            children = len(child_ages)
+        else:
+            child_ages = []
         cur = self._conn.execute(
             """INSERT INTO watches
                (origin, dest_iata, dest_city, dep_date, ret_date,
@@ -179,7 +185,9 @@ def check_all_watches(
         ret_date = watch["ret_date"]
         adults = watch["adults"]
         child_ages = watch.get("child_ages") or []
-        children = len(child_ages)
+        # Use the stored children COUNT (may exceed len(child_ages) when ages
+        # were unknown at save time); the kayak fallback still uses child_ages.
+        children = watch["children"]
         last_price = watch["last_price"]
 
         fare = fare_fn(origin, dest_iata, dep_date, ret_date, adults, children)
