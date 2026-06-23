@@ -1,6 +1,9 @@
 def test_page_loads_and_health_renders(live_server, page):
     page.goto(live_server)
-    page.wait_for_selector("#status")
+    page.wait_for_function(
+        "() => document.querySelector('#status') && "
+        "document.querySelector('#status').textContent.toLowerCase().includes('deepseek')"
+    )
     status = page.inner_text("#status")
     assert "deepseek" in status.lower()           # model name from /api/health
 
