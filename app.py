@@ -20,6 +20,7 @@ AMADEUS_SECRET = os.environ.get("AMADEUS_CLIENT_SECRET")
 # Travelpayouts / Aviasales token (free signup) -> real cached market fares + booking links
 TRAVELPAYOUTS_TOKEN = os.environ.get("TRAVELPAYOUTS_TOKEN")
 CURRENCY = os.environ.get("CURRENCY", "cad").lower()
+FARE_CACHE_TTL = int(os.environ.get("FARE_CACHE_TTL", "3600"))
 
 def providers_configured():
     p = []
@@ -30,6 +31,12 @@ def providers_configured():
     return p
 
 app = Flask(__name__)
+
+# ----------------------- fare cache -----------------------
+# Maps (origin, dest, dep, ret, adults, children) -> (expiry_epoch, result_dict).
+# Only real priced results (cheapest_cad is truthy) are stored; no-data sentinels
+# are never cached so a transient provider failure is not persisted.
+_fare_cache: dict = {}
 
 # ----------------------------- Ollama -----------------------------
 def ollama_chat(prompt, system=None, timeout=120):
@@ -179,8 +186,8 @@ def travelpayouts_fare(origin, dest, dep, ret, adults, children):
         "book": book,
     }
 
-def get_fare(origin, dest, dep, ret, adults, children):
-    """Collect REAL pricing from configured flight APIs. No AI here."""
+def _get_fare_uncached(origin, dest, dep, ret, adults, children):
+    """Try each configured provider in order; return first real priced result."""
     for provider in (amadeus_fare, travelpayouts_fare):
         try:
             res = provider(origin, dest, dep, ret, adults, children)
@@ -189,6 +196,29 @@ def get_fare(origin, dest, dep, ret, adults, children):
         except Exception:
             continue
     return {"cheapest_cad": None, "stops": None, "nonstop_cad": None, "source": "no-data"}
+
+
+def get_fare(origin, dest, dep, ret, adults, children):
+    """Collect REAL pricing from configured flight APIs. No AI here.
+
+    Results with real prices are cached in _fare_cache for FARE_CACHE_TTL seconds.
+    No-data sentinels are never cached.  Set FARE_CACHE_TTL <= 0 to disable caching.
+    """
+    if FARE_CACHE_TTL <= 0:
+        return _get_fare_uncached(origin, dest, dep, ret, adults, children)
+
+    key = (origin, dest, dep, ret, adults, children)
+    now = time.time()
+    entry = _fare_cache.get(key)
+    if entry is not None:
+        expiry, cached_result = entry
+        if expiry > now:
+            return cached_result
+
+    result = _get_fare_uncached(origin, dest, dep, ret, adults, children)
+    if result.get("cheapest_cad"):
+        _fare_cache[key] = (now + FARE_CACHE_TTL, result)
+    return result
 
 # ------------------------ booking links ---------------------------
 def kayak_link(origin, dest, dep, ret, adults, child_ages):

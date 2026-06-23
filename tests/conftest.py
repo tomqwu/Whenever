@@ -35,6 +35,8 @@ def _reset_state():
     appmod.resolve_airport.cache_clear()
     appmod._amadeus_token["value"] = None
     appmod._amadeus_token["exp"] = 0
+    appmod._fare_cache.clear()
     yield
     appmod.top_cities.cache_clear()
     appmod.resolve_airport.cache_clear()
+    appmod._fare_cache.clear()

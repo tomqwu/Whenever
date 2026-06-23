@@ -78,6 +78,7 @@ the nonstop is "chosen"; otherwise the cheapest connection is chosen. Threshold 
 | `CURRENCY` | output currency | `cad` |
 | `TRAVELPAYOUTS_TOKEN` | Travelpayouts API token | — |
 | `AMADEUS_CLIENT_ID` / `AMADEUS_CLIENT_SECRET` | Amadeus creds | — |
+| `FARE_CACHE_TTL` | In-memory cache TTL (seconds) for fare results. Set `<= 0` to disable. | `3600` |
 
 ## Known limitations
 
@@ -85,4 +86,7 @@ the nonstop is "chosen"; otherwise the cheapest connection is chosen. Threshold 
   Amadeus test environment has limited inventory. Click-through booking links show live fares.
 - Per-ticket → party scaling treats children at ~full fare for Travelpayouts (Amadeus prices
   children properly). Verify exact totals at booking.
-- No caching layer yet — a large date grid × many cities can hit API rate limits.
+- An in-memory TTL cache (`_fare_cache`, default 3600 s) sits in front of provider calls.
+  Only real priced results are cached; no-data sentinels are never stored. Configure via
+  `FARE_CACHE_TTL`; set `<= 0` to disable. Cache is process-local and not shared across
+  workers or restarts.
