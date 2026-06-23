@@ -1,0 +1,39 @@
+china:
+  display_name: "China"
+  candidates:
+    - city: "Beijing"
+      iata: "PEK"
+      alt_iata: ["PKX"]
+      priority: 1
+      notes: "Primary gateway; strong direct-route supply from YYZ/YVR"
+    - city: "Shanghai"
+      iata: "PVG"
+      alt_iata: ["SHA"]
+      priority: 2
+    - city: "Guangzhou"
+      iata: "CAN"
+      priority: 3
+    - city: "Shenzhen"
+      iata: "SZX"
+      priority: 4
+    - city: "Chengdu"
+      iata: "TFU"
+      alt_iata: ["CTU"]
+      priority: 5
+      notes: "CTU coverage varies by provider"
+    - city: "Xiamen"
+      iata: "XMN"
+      priority: 6
+    - city: "Haikou"
+      iata: "HAK"
+      priority: 7
+      optional: true
+    - city: "Sanya"
+      iata: "SYX"
+      priority: 7
+      optional: true
+    - city: "Shenyang"
+      iata: "SHE"
+      priority: 8
+      optional: true
+      notes: "Family/region-specific"

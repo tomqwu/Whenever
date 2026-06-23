@@ -162,7 +162,7 @@ $('#loadCities').onclick = async ()=>{
   try{
     const r = await (await fetch('/api/top-cities',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({country, n:6})})).json();
-    CITIES = (r.cities||[]).map(c=>({...c,on:true}));
+    CITIES = (r.cities||[]).map(c=>({...c,on:!c.optional}));
     drawChips();
   }catch(e){ alert('Could not load cities: '+e); }
   $('#loadCities').disabled=false; $('#loadCities').textContent='Get top cities →';

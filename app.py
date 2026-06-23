@@ -7,11 +7,33 @@ LLM via Ollama (default model: deepseek-v4pro). Fares come from Amadeus if
 credentials are set, otherwise from clearly-labeled AI estimates. Every price
 deep-links to a real Kayak search for booking.
 """
-import os, re, json, time, datetime as dt
+import os, re, json, time, datetime as dt, logging
 from functools import lru_cache
 import requests
+import yaml
 from flask import Flask, request, jsonify, render_template, Response
 import export
+
+_log = logging.getLogger(__name__)
+
+# ----------------------- country seed config -----------------------
+def _load_seed_config():
+    path = os.path.join(os.path.dirname(__file__), "config", "country_seeds.yaml")
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = yaml.safe_load(f)
+        if not isinstance(data, dict):
+            _log.warning("country_seeds.yaml parsed to non-dict; falling back to LLM-only")
+            return {}
+        return data
+    except FileNotFoundError:
+        _log.warning("config/country_seeds.yaml not found; falling back to LLM-only for all countries")
+        return {}
+    except Exception as exc:
+        _log.warning("Failed to parse country_seeds.yaml (%s); falling back to LLM-only", exc)
+        return {}
+
+_SEED_CONFIG: dict = _load_seed_config()
 
 # ----------------------------- config -----------------------------
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
@@ -76,9 +98,49 @@ def ollama_ok():
     except Exception:
         return False
 
-# ----------------------- top cities (GenAI) -----------------------
+# ----------------------- top cities (seed-first, then GenAI) -----------------------
 @lru_cache(maxsize=128)
 def top_cities(country, n=6):
+    """Return top destination cities for *country*.
+
+    Seed path (preferred):
+        If ``_SEED_CONFIG`` has an entry for ``country.lower()``, build the
+        result from the YAML candidates:
+        - Required cities (``optional`` falsy) up to ``n``, sorted by priority.
+        - ALL optional cities (``optional: true``) appended after, regardless of ``n``.
+        Each entry: ``{city, iata, optional: bool, priority: int}``.
+
+    LLM fallback:
+        If no seed entry exists, call ``ollama_chat`` and return up to ``n`` entries
+        each annotated with ``optional: False``.
+    """
+    key = country.lower()
+    seed = _SEED_CONFIG.get(key)
+    if seed:
+        candidates = seed.get("candidates", [])
+        # Sort all candidates by priority
+        candidates = sorted(candidates, key=lambda c: c.get("priority", 999))
+        required = [c for c in candidates if not c.get("optional", False)]
+        optional = [c for c in candidates if c.get("optional", False)]
+
+        out = []
+        for c in required[:n]:
+            out.append({
+                "city": str(c["city"]).strip(),
+                "iata": str(c["iata"]).strip().upper()[:3],
+                "optional": False,
+                "priority": int(c.get("priority", 0)),
+            })
+        for c in optional:
+            out.append({
+                "city": str(c["city"]).strip(),
+                "iata": str(c["iata"]).strip().upper()[:3],
+                "optional": True,
+                "priority": int(c.get("priority", 0)),
+            })
+        return out
+
+    # LLM fallback
     prompt = (
         f"List the top {n} destination cities in {country} for international leisure "
         f"travelers. Return ONLY a JSON array; each item: "
@@ -89,8 +151,11 @@ def top_cities(country, n=6):
     out = []
     for d in data:
         if isinstance(d, dict) and d.get("iata"):
-            out.append({"city": str(d.get("city", "")).strip(),
-                        "iata": str(d["iata"]).strip().upper()[:3]})
+            out.append({
+                "city": str(d.get("city", "")).strip(),
+                "iata": str(d["iata"]).strip().upper()[:3],
+                "optional": False,
+            })
     return out[:n]
 
 @lru_cache(maxsize=256)

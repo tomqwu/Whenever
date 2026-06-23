@@ -55,6 +55,36 @@ Whenever/
 
 Run the price-watch checker manually or via cron: `python scheduler.py`.
 
+## Adding a country seed
+
+To pre-configure the destination cities for a country (bypassing the LLM for that country):
+
+1. Open `config/country_seeds.yaml`.
+2. Add a new top-level key — the country name **lowercased** (e.g. `japan`).
+3. Follow this schema:
+   ```yaml
+   japan:
+     display_name: "Japan"
+     candidates:
+       - city: "Tokyo"
+         iata: "NRT"
+         alt_iata: ["HND"]
+         priority: 1
+         notes: "Optional free-text note"
+       - city: "Osaka"
+         iata: "KIX"
+         priority: 2
+       - city: "Sapporo"
+         iata: "CTS"
+         priority: 5
+         optional: true   # shown unchecked; user opts in
+   ```
+4. **Priority** controls ordering. Required cities (no `optional: true`) up to `n` are returned
+   first; optional cities are always appended regardless of `n`.
+5. **IATA codes** must be verified against the configured flight provider (Amadeus, Travelpayouts, Kiwi).
+   `alt_iata` is metadata only — the primary `iata` is what `get_fare` uses.
+6. No code changes needed — the YAML is loaded at startup by `_load_seed_config()` in `app.py`.
+
 ## Adding a flight provider
 
 1. Write `def myprovider_fare(origin, dest, dep, ret, adults, children): -> dict|None`.

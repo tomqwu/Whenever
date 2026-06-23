@@ -46,18 +46,21 @@ def test_ollama_ok_false_on_bad_status(monkeypatch, fake_resp):
 
 
 def test_top_cities_filters_invalid_items(monkeypatch):
+    # Use a country not in _SEED_CONFIG to exercise the LLM fallback path.
+    monkeypatch.setattr(appmod, "_SEED_CONFIG", {})
     payload = [
-        {"city": "Beijing", "iata": "pek"},
+        {"city": "Alpha City", "iata": "alp"},
         {"city": "NoCode"},          # dropped: no iata
         "garbage",                    # dropped: not a dict
-        {"city": "Shanghai", "iata": "PVGXX"},
+        {"city": "Beta City", "iata": "BETXX"},
     ]
     monkeypatch.setattr(appmod, "ollama_chat", lambda *a, **k: __import__("json").dumps(payload))
     appmod.top_cities.cache_clear()
-    out = appmod.top_cities("China", 6)
+    out = appmod.top_cities("Narnia", 6)
+    # LLM path now annotates each entry with optional=False
     assert out == [
-        {"city": "Beijing", "iata": "PEK"},
-        {"city": "Shanghai", "iata": "PVG"},
+        {"city": "Alpha City", "iata": "ALP", "optional": False},
+        {"city": "Beta City",  "iata": "BET", "optional": False},
     ]
 
 
