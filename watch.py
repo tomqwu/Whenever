@@ -217,6 +217,6 @@ def _print_drop(drop: dict):
 
 def _post_webhook(url: str, drop: dict):
     try:
-        requests.post(url, json=drop)
+        requests.post(url, json=drop, timeout=10)
     except Exception:
         pass

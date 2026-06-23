@@ -155,13 +155,17 @@ def test_watchdb_close_idempotent(db):
 def test_watchdb_close_exception_suppressed():
     """If conn.close() raises, WatchDB.close() silently continues."""
     _db = WatchDB(":memory:")
+    real_conn = _db._conn  # keep a handle so we can close it for real
 
     class _BrokenConn:
         def close(self):
             raise OSError("disk error")
 
     _db._conn = _BrokenConn()
-    _db.close()  # must not raise
+    try:
+        _db.close()  # must not raise
+    finally:
+        real_conn.close()  # avoid leaking the real connection (ResourceWarning)
 
 
 def test_check_all_watches_default_fare_fn(db, monkeypatch):
@@ -343,6 +347,8 @@ def test_check_all_watches_webhook_called_on_drop(db):
     call_kwargs = mock_post.call_args
     url = call_kwargs[0][0] if call_kwargs[0] else call_kwargs[1].get("url")
     assert url == "https://hooks.example.com/price-drop"
+    # webhook POST must be bounded by a timeout so a slow endpoint can't hang
+    assert call_kwargs.kwargs.get("timeout") is not None
     # JSON body must contain the drop fields
     import json as _json
     body = call_kwargs[1].get("json") or call_kwargs[0][1]

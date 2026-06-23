@@ -57,7 +57,7 @@ def remove_watch(db: WatchDB, watch_id: int) -> None:
 
 def main(argv=None) -> int:
     """Open the DB, run all active watches, print summary, return exit code."""
-    db_path = os.environ.get("WATCH_DB", "whenever_watches.db")
+    db_path = os.environ.get("WATCH_DB") or "whenever_watches.db"
     webhook_url = os.environ.get("WATCH_WEBHOOK_URL")
 
     db = WatchDB(db_path)

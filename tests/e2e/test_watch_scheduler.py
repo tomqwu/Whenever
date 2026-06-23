@@ -177,6 +177,29 @@ def test_scheduler_remove_watch(tmp_path, monkeypatch):
     assert watches == []
 
 
+def test_scheduler_main_blank_watch_db_falls_back_to_default(monkeypatch):
+    """A present-but-empty WATCH_DB ("") must resolve to whenever_watches.db,
+    not an anonymous/transient SQLite DB."""
+    monkeypatch.setenv("WATCH_DB", "")
+    monkeypatch.delenv("WATCH_WEBHOOK_URL", raising=False)
+
+    captured = {}
+
+    class _FakeDB:
+        def __init__(self, path):
+            captured["path"] = path
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(scheduler, "WatchDB", _FakeDB)
+    monkeypatch.setattr(scheduler, "check_all_watches", lambda *a, **k: [])
+
+    exit_code = scheduler.main([])
+    assert exit_code == 0
+    assert captured["path"] == "whenever_watches.db"
+
+
 def test_scheduler_main_with_webhook(tmp_path, monkeypatch):
     """E2E: webhook env var set but POST raises; main still returns 0."""
     from unittest.mock import patch
