@@ -251,6 +251,8 @@ def test_serpapi_fare_happy_path(monkeypatch, fake_resp):
     """Happy path: one 1-stop best_flight (cheaper) + one nonstop other_flight (pricier).
 
     Price is the party total as-is — NOT scaled. book is None.
+    nonstop_cad is always None for SerpApi: the single-call round-trip response only
+    describes the outbound leg, so we can't confirm a true round-trip nonstop.
     """
     monkeypatch.setattr(appmod, "SERPAPI_KEY", "k")
     payload = {
@@ -273,8 +275,8 @@ def test_serpapi_fare_happy_path(monkeypatch, fake_resp):
 
     assert res is not None
     assert res["cheapest_cad"] == 2675          # party total, not scaled
-    assert res["stops"] == 1                    # 1 layover
-    assert res["nonstop_cad"] == 3500           # other_flights entry has no layovers
+    assert res["stops"] == 1                    # 1 outbound layover (cheapest entry)
+    assert res["nonstop_cad"] is None           # never claimed: single-call response is outbound-only
     assert res["source"] == "serpapi"
     assert res["book"] is None                  # no booking URL in SerpApi response
     assert captured["url"] == "https://serpapi.com/search.json"

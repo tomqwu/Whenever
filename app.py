@@ -364,11 +364,16 @@ def serpapi_fare(origin, dest, dep, ret, adults, children):
     try:
         cheapest = min(flights, key=lambda f: f["price"])
         cheapest_cad = round(float(cheapest["price"]))
+        # stops reflects the OUTBOUND leg only: SerpApi's round-trip (type=1) response
+        # describes only the outbound choice (Google's first-screen view). This is a
+        # reasonable display approximation.
         stops = len(cheapest.get("layovers") or [])
-        nonstops = [f for f in flights if not (f.get("layovers"))]
-        nonstop_cad = round(float(min(nonstops, key=lambda f: f["price"])["price"])) if nonstops else None
     except Exception:
         return None
+    # SerpApi's round-trip response only describes the outbound leg, so we cannot
+    # confirm a true round-trip nonstop without an extra departure_token request;
+    # to avoid mislabeling we don't claim nonstop for this provider.
+    nonstop_cad = None
     return {
         "cheapest_cad": cheapest_cad,
         "stops": stops,
