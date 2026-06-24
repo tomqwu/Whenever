@@ -21,7 +21,7 @@ make clean       # remove caches, coverage artifacts, local watch DB
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env   # fill in OLLAMA_MODEL and a flight API key
+cp .env.example .env   # fill in your keys — the app auto-loads .env, no export needed
 python3 app.py
 ```
 
