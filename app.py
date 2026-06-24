@@ -41,6 +41,7 @@ _SEED_CONFIG: dict = _load_seed_config()
 # ----------------------------- config -----------------------------
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "deepseek-v4pro")
+OLLAMA_API_KEY = os.environ.get("OLLAMA_API_KEY")
 AMADEUS_ID = os.environ.get("AMADEUS_CLIENT_ID")
 AMADEUS_SECRET = os.environ.get("AMADEUS_CLIENT_SECRET")
 # Travelpayouts / Aviasales token (free signup) -> real cached market fares + booking links
@@ -68,6 +69,11 @@ app = Flask(__name__)
 _fare_cache: dict = {}
 
 # ----------------------------- Ollama -----------------------------
+def _ollama_headers():
+    """Return Bearer auth header if OLLAMA_API_KEY is set, else empty dict."""
+    return {"Authorization": f"Bearer {OLLAMA_API_KEY}"} if OLLAMA_API_KEY else {}
+
+
 def ollama_chat(prompt, system=None, timeout=120):
     """Call local Ollama; return raw text. Strips <think> reasoning blocks."""
     msgs = []
@@ -78,6 +84,7 @@ def ollama_chat(prompt, system=None, timeout=120):
         f"{OLLAMA_HOST}/api/chat",
         json={"model": OLLAMA_MODEL, "messages": msgs, "stream": False,
               "options": {"temperature": 0.2}},
+        headers=_ollama_headers(),
         timeout=timeout,
     )
     r.raise_for_status()
@@ -96,7 +103,7 @@ def extract_json(text):
 
 def ollama_ok():
     try:
-        requests.get(f"{OLLAMA_HOST}/api/tags", timeout=3).raise_for_status()
+        requests.get(f"{OLLAMA_HOST}/api/tags", headers=_ollama_headers(), timeout=3).raise_for_status()
         return True
     except Exception:
         return False
