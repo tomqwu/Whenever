@@ -362,6 +362,12 @@ def serpapi_fare(origin, dest, dep, ret, adults, children):
     flights = (data.get("best_flights") or []) + (data.get("other_flights") or [])
     if not flights:
         return None
+    # Real Google Flights responses sometimes include entries with NO usable price
+    # (missing key or price: None). Filter those out so a few priceless entries don't
+    # discard the whole result — keep the priced ones and pick the cheapest among them.
+    flights = [f for f in flights if isinstance(f.get("price"), (int, float))]
+    if not flights:
+        return None
     try:
         cheapest = min(flights, key=lambda f: f["price"])
         cheapest_cad = round(float(cheapest["price"]))
