@@ -309,10 +309,50 @@ def test_serpapi_fare_both_lists_empty(monkeypatch, fake_resp):
     assert appmod.serpapi_fare("YYZ", "PVG", "2026-12-12", "2027-01-04", 2, 0) is None
 
 
-def test_serpapi_fare_malformed_missing_price(monkeypatch, fake_resp):
-    """Flight entry missing 'price' field → None (defensive)."""
+def test_serpapi_fare_all_entries_missing_price(monkeypatch, fake_resp):
+    """Every flight entry lacks a usable price (missing key / None) → None (defensive)."""
     monkeypatch.setattr(appmod, "SERPAPI_KEY", "k")
-    bad_payload = {"best_flights": [{"flights": [], "type": "Round trip"}]}
+    bad_payload = {
+        "best_flights": [{"flights": [], "type": "Round trip"}],          # no price key
+        "other_flights": [{"price": None, "flights": [], "type": "Round trip"}],  # price None
+    }
+    monkeypatch.setattr(appmod.requests, "get",
+                        lambda *a, **k: fake_resp(bad_payload, status=200))
+    assert appmod.serpapi_fare("YYZ", "PVG", "2026-12-12", "2027-01-04", 2, 0) is None
+
+
+def test_serpapi_fare_mixed_priced_and_priceless(monkeypatch, fake_resp):
+    """LIVE-bug regression: real responses mix entries WITH a numeric price and entries
+    WITHOUT one (missing key or price: None). serpapi_fare must ignore the priceless
+    entries and return the cheapest PRICED fare — NOT None, and NOT raise KeyError.
+    """
+    monkeypatch.setattr(appmod, "SERPAPI_KEY", "k")
+    payload = {
+        "best_flights": [
+            {"price": 3100, "layovers": [{"duration": 60}], "flights": [], "type": "Round trip"},
+            {"flights": [], "type": "Round trip"},  # no price key
+        ],
+        "other_flights": [
+            {"price": None, "flights": [], "type": "Round trip"},          # price None
+            {"price": 2675, "layovers": [{"duration": 90}], "flights": [], "type": "Round trip"},
+            {"flights": [], "type": "Round trip"},                          # no price key
+        ],
+    }
+    monkeypatch.setattr(appmod.requests, "get",
+                        lambda *a, **k: fake_resp(payload, status=200))
+    res = appmod.serpapi_fare("YYZ", "PVG", "2026-12-12", "2027-01-04", 2, 0)
+
+    assert res is not None                       # priceless entries no longer kill the result
+    assert res["cheapest_cad"] == 2675           # cheapest among the PRICED entries
+    assert res["stops"] == 1                      # 1 layover on the cheapest priced entry
+    assert res["source"] == "serpapi"
+
+
+def test_serpapi_fare_priced_but_unprocessable(monkeypatch, fake_resp):
+    """A priced entry that survives the filter but blows up downstream (e.g. a
+    non-iterable 'layovers') is handled defensively → None instead of crashing."""
+    monkeypatch.setattr(appmod, "SERPAPI_KEY", "k")
+    bad_payload = {"best_flights": [{"price": 2675, "layovers": 5, "flights": []}]}
     monkeypatch.setattr(appmod.requests, "get",
                         lambda *a, **k: fake_resp(bad_payload, status=200))
     assert appmod.serpapi_fare("YYZ", "PVG", "2026-12-12", "2027-01-04", 2, 0) is None
