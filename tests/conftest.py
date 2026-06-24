@@ -42,6 +42,7 @@ def _reset_state(monkeypatch):
     monkeypatch.setattr(appmod, "AMADEUS_SECRET", None)
     monkeypatch.setattr(appmod, "TRAVELPAYOUTS_TOKEN", None)
     monkeypatch.setattr(appmod, "KIWI_API_KEY", None)
+    monkeypatch.setattr(appmod, "SERPAPI_KEY", None)
     appmod.top_cities.cache_clear()
     appmod.resolve_airport.cache_clear()
     appmod._amadeus_token["value"] = None

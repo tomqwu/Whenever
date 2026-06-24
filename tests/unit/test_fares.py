@@ -237,6 +237,137 @@ def test_providers_configured_excludes_kiwi_when_unset(monkeypatch):
     assert "kiwi" not in appmod.providers_configured()
 
 
+# ---------------------------------------------------------------------------
+# serpapi_fare tests
+# ---------------------------------------------------------------------------
+
+def test_serpapi_fare_none_without_key(monkeypatch):
+    """serpapi_fare returns None immediately when SERPAPI_KEY is not set."""
+    monkeypatch.setattr(appmod, "SERPAPI_KEY", None)
+    assert appmod.serpapi_fare("YYZ", "PVG", "2026-12-12", "2027-01-04", 2, 0) is None
+
+
+def test_serpapi_fare_happy_path(monkeypatch, fake_resp):
+    """Happy path: one 1-stop best_flight (cheaper) + one nonstop other_flight (pricier).
+
+    Price is the party total as-is — NOT scaled. book is None.
+    nonstop_cad is always None for SerpApi: the single-call round-trip response only
+    describes the outbound leg, so we can't confirm a true round-trip nonstop.
+    """
+    monkeypatch.setattr(appmod, "SERPAPI_KEY", "k")
+    payload = {
+        "best_flights": [
+            {"price": 2675, "layovers": [{"duration": 90}], "flights": [], "type": "Round trip"},
+        ],
+        "other_flights": [
+            {"price": 3500, "flights": [], "type": "Round trip"},  # no layovers key → nonstop
+        ],
+    }
+    captured = {}
+
+    def fake_get(url, params=None, timeout=None):
+        captured["url"] = url
+        captured["params"] = params
+        return fake_resp(payload, status=200)
+
+    monkeypatch.setattr(appmod.requests, "get", fake_get)
+    res = appmod.serpapi_fare("YYZ", "PVG", "2026-12-12", "2027-01-04", 2, 0)
+
+    assert res is not None
+    assert res["cheapest_cad"] == 2675          # party total, not scaled
+    assert res["stops"] == 1                    # 1 outbound layover (cheapest entry)
+    assert res["nonstop_cad"] is None           # never claimed: single-call response is outbound-only
+    assert res["source"] == "serpapi"
+    assert res["book"] is None                  # no booking URL in SerpApi response
+    assert captured["url"] == "https://serpapi.com/search.json"
+    assert captured["params"]["engine"] == "google_flights"
+    assert captured["params"]["api_key"] == "k"
+    assert captured["params"]["sort_by"] == 2   # Price sort: ensure cheapest itinerary is returned
+
+
+def test_serpapi_fare_non_200(monkeypatch, fake_resp):
+    """Non-200 response → None."""
+    monkeypatch.setattr(appmod, "SERPAPI_KEY", "k")
+    monkeypatch.setattr(appmod.requests, "get", lambda *a, **k: fake_resp({}, status=503))
+    assert appmod.serpapi_fare("YYZ", "PVG", "2026-12-12", "2027-01-04", 2, 0) is None
+
+
+def test_serpapi_fare_error_key(monkeypatch, fake_resp):
+    """Response with top-level 'error' key → None."""
+    monkeypatch.setattr(appmod, "SERPAPI_KEY", "k")
+    monkeypatch.setattr(appmod.requests, "get",
+                        lambda *a, **k: fake_resp({"error": "Invalid API key."}, status=200))
+    assert appmod.serpapi_fare("YYZ", "PVG", "2026-12-12", "2027-01-04", 2, 0) is None
+
+
+def test_serpapi_fare_both_lists_empty(monkeypatch, fake_resp):
+    """Both best_flights and other_flights empty → None."""
+    monkeypatch.setattr(appmod, "SERPAPI_KEY", "k")
+    monkeypatch.setattr(appmod.requests, "get",
+                        lambda *a, **k: fake_resp(
+                            {"best_flights": [], "other_flights": []}, status=200))
+    assert appmod.serpapi_fare("YYZ", "PVG", "2026-12-12", "2027-01-04", 2, 0) is None
+
+
+def test_serpapi_fare_malformed_missing_price(monkeypatch, fake_resp):
+    """Flight entry missing 'price' field → None (defensive)."""
+    monkeypatch.setattr(appmod, "SERPAPI_KEY", "k")
+    bad_payload = {"best_flights": [{"flights": [], "type": "Round trip"}]}
+    monkeypatch.setattr(appmod.requests, "get",
+                        lambda *a, **k: fake_resp(bad_payload, status=200))
+    assert appmod.serpapi_fare("YYZ", "PVG", "2026-12-12", "2027-01-04", 2, 0) is None
+
+
+def test_serpapi_fare_json_decode_error(monkeypatch):
+    """If r.json() raises (body is not JSON), serpapi_fare returns None."""
+    monkeypatch.setattr(appmod, "SERPAPI_KEY", "k")
+
+    class BrokenResp:
+        status_code = 200
+        def json(self):
+            raise ValueError("not json")
+
+    monkeypatch.setattr(appmod.requests, "get", lambda *a, **k: BrokenResp())
+    assert appmod.serpapi_fare("YYZ", "PVG", "2026-12-12", "2027-01-04", 2, 0) is None
+
+
+def test_providers_configured_includes_serpapi_when_set(monkeypatch):
+    """providers_configured() includes 'serpapi' only when SERPAPI_KEY is set."""
+    monkeypatch.setattr(appmod, "SERPAPI_KEY", "somekey")
+    assert "serpapi" in appmod.providers_configured()
+
+
+def test_providers_configured_excludes_serpapi_when_unset(monkeypatch):
+    """providers_configured() does NOT include 'serpapi' when SERPAPI_KEY is None."""
+    monkeypatch.setattr(appmod, "SERPAPI_KEY", None)
+    assert "serpapi" not in appmod.providers_configured()
+
+
+def test_serpapi_tried_first_in_provider_chain(monkeypatch):
+    """serpapi_fare is called FIRST — before amadeus, travelpayouts, kiwi."""
+    call_order = []
+    serpapi_result = {"cheapest_cad": 2675, "stops": 1, "nonstop_cad": 3500,
+                      "source": "serpapi", "book": None}
+    monkeypatch.setattr(appmod, "serpapi_fare",
+                        lambda *a: call_order.append("serpapi") or serpapi_result)
+    monkeypatch.setattr(appmod, "amadeus_fare",
+                        lambda *a: call_order.append("amadeus") or None)
+    monkeypatch.setattr(appmod, "travelpayouts_fare",
+                        lambda *a: call_order.append("travelpayouts") or None)
+    monkeypatch.setattr(appmod, "kiwi_fare",
+                        lambda *a: call_order.append("kiwi") or None)
+    monkeypatch.setattr(appmod, "FARE_CACHE_TTL", 0)
+
+    res = appmod.get_fare("YYZ", "PVG", "2026-12-12", "2027-01-04", 2, 0)
+
+    assert call_order[0] == "serpapi"
+    assert res["source"] == "serpapi"
+    # amadeus/travelpayouts/kiwi never called because serpapi succeeded
+    assert "amadeus" not in call_order
+    assert "travelpayouts" not in call_order
+    assert "kiwi" not in call_order
+
+
 def test_kiwi_fare_invalid_date_format_falls_through(monkeypatch, fake_resp):
     """When dep/ret are not valid ISO dates the raw strings are passed to the API."""
     monkeypatch.setattr(appmod, "KIWI_API_KEY", "k")

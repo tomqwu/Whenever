@@ -12,6 +12,7 @@ Whenever is a small Flask web app with three responsibilities, kept deliberately
                 │       • analyze collected fares → pick best  │
                 │                                              │
                 │  2. Fare layer   ──▶  Flight APIs (REAL data)│
+                │       • SerpApi (Google Flights, preferred)  │
                 │       • Amadeus Self-Service                 │
                 │       • Travelpayouts / Aviasales            │
                 │       • Kiwi / Tequila                       │
@@ -56,7 +57,7 @@ configured, cells return `source: "no-data"` rather than a fabricated number.
 
 ```python
 def get_fare(origin, dest, dep, ret, adults, children):
-    for provider in (amadeus_fare, travelpayouts_fare, kiwi_fare):
+    for provider in (serpapi_fare, amadeus_fare, travelpayouts_fare, kiwi_fare):
         res = provider(...)
         if res and res.get("cheapest_cad"):
             return res
@@ -70,9 +71,13 @@ Each provider returns a normalized dict:
   "source": "travelpayouts", "book": "https://..." }
 ```
 
-Amadeus, Travelpayouts, and Kiwi/Tequila are the providers wired into this tuple today. To add
-another (e.g. Skyscanner via RapidAPI), write one function with that signature and add it to the
-tuple. No other code changes needed.
+**Provider priority (first match wins):**
+1. **SerpApi / Google Flights** (`SERPAPI_KEY`) — live Google Flights results; best coverage for long-haul exact-date searches (e.g. Toronto → China Dec 2026). Prices are party totals in CAD (not per-ticket). No direct booking URL; falls back to Kayak link. The single-call round-trip response exposes only the outbound leg, so `nonstop_cad` is not populated for this provider (no false round-trip nonstop), and `stops` reflects the outbound leg only.
+2. **Amadeus Self-Service** (`AMADEUS_CLIENT_ID` + `AMADEUS_CLIENT_SECRET`) — test environment; limited inventory.
+3. **Travelpayouts / Aviasales** (`TRAVELPAYOUTS_TOKEN`) — cached market fares; per-ticket price scaled to party total.
+4. **Kiwi / Tequila** (`KIWI_API_KEY`) — real fares with booking deep-links.
+
+To add another provider, write one function with the signature above and prepend/append it to the tuple. No other code changes needed.
 
 ## Nonstop-preference rule
 
@@ -91,6 +96,7 @@ the nonstop is "chosen"; otherwise the cheapest connection is chosen. Threshold 
 | `TRAVELPAYOUTS_TOKEN` | Travelpayouts API token | — |
 | `AMADEUS_CLIENT_ID` / `AMADEUS_CLIENT_SECRET` | Amadeus creds | — |
 | `KIWI_API_KEY` | Kiwi/Tequila API key (free Self-Service tier at tequila.kiwi.com) | — |
+| `SERPAPI_KEY` | SerpApi API key for live Google Flights data (free trial at serpapi.com); preferred provider | — |
 | `FARE_CACHE_TTL` | In-memory cache TTL (seconds) for fare results. Set `<= 0` to disable. | `3600` |
 | `PORT` | Dev-server port (`python app.py`). Default avoids macOS AirPlay Receiver, which holds 5000. | `5001` |
 
