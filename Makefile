@@ -40,7 +40,7 @@ cov: ## Full suite + HTML coverage report in htmlcov/
 
 ci: test ## Alias for the CI gate (what GitHub Actions runs)
 
-run: ## Run the Flask web app (http://localhost:5000)
+run: ## Run the Flask web app (http://localhost:5001)
 	$(PYTHON) app.py
 
 scheduler: ## Run the price-watch scheduler once (re-prices saved watches)

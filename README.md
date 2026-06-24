@@ -57,7 +57,8 @@ export TRAVELPAYOUTS_TOKEN=...           # easiest: free token, real cached fare
 python3 app.py
 ```
 
-Then open **http://localhost:5000** in your browser.
+Then open **http://localhost:5001** in your browser. (Port 5001 avoids the macOS
+AirPlay Receiver, which holds 5000. Override with the `PORT` env var.)
 
 ## Flight data (required)
 
