@@ -347,6 +347,7 @@ def serpapi_fare(origin, dest, dep, ret, adults, children):
         "adults": adults,
         "children": children,
         "type": 1,
+        "sort_by": 2,
         "api_key": SERPAPI_KEY,
     }
     r = requests.get("https://serpapi.com/search.json", params=params, timeout=30)

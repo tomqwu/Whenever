@@ -282,6 +282,7 @@ def test_serpapi_fare_happy_path(monkeypatch, fake_resp):
     assert captured["url"] == "https://serpapi.com/search.json"
     assert captured["params"]["engine"] == "google_flights"
     assert captured["params"]["api_key"] == "k"
+    assert captured["params"]["sort_by"] == 2   # Price sort: ensure cheapest itinerary is returned
 
 
 def test_serpapi_fare_non_200(monkeypatch, fake_resp):
