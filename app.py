@@ -47,6 +47,7 @@ AMADEUS_SECRET = os.environ.get("AMADEUS_CLIENT_SECRET")
 # Travelpayouts / Aviasales token (free signup) -> real cached market fares + booking links
 TRAVELPAYOUTS_TOKEN = os.environ.get("TRAVELPAYOUTS_TOKEN")
 KIWI_API_KEY = os.environ.get("KIWI_API_KEY")
+SERPAPI_KEY = os.environ.get("SERPAPI_KEY")
 CURRENCY = os.environ.get("CURRENCY", "cad").lower()
 FARE_CACHE_TTL = int(os.environ.get("FARE_CACHE_TTL", "3600"))
 # Dev-server port. Default 5001 to avoid macOS AirPlay Receiver, which holds 5000.
@@ -54,6 +55,8 @@ PORT = int(os.environ.get("PORT", "5001"))
 
 def providers_configured():
     p = []
+    if SERPAPI_KEY:
+        p.append("serpapi")
     if AMADEUS_ID and AMADEUS_SECRET:
         p.append("amadeus")
     if TRAVELPAYOUTS_TOKEN:
@@ -330,9 +333,54 @@ def kiwi_fare(origin, dest, dep, ret, adults, children):
     }
 
 
+def serpapi_fare(origin, dest, dep, ret, adults, children):
+    """Live Google Flights fares via SerpApi. Price is the PARTY TOTAL in CAD (not per-ticket)."""
+    if not SERPAPI_KEY:
+        return None
+    params = {
+        "engine": "google_flights",
+        "departure_id": origin,
+        "arrival_id": dest,
+        "outbound_date": dep,
+        "return_date": ret,
+        "currency": "CAD",
+        "adults": adults,
+        "children": children,
+        "type": 1,
+        "api_key": SERPAPI_KEY,
+    }
+    r = requests.get("https://serpapi.com/search.json", params=params, timeout=30)
+    if r.status_code != 200:
+        return None
+    try:
+        data = r.json()
+    except Exception:
+        return None
+    if data.get("error"):
+        return None
+    flights = (data.get("best_flights") or []) + (data.get("other_flights") or [])
+    if not flights:
+        return None
+    try:
+        cheapest = min(flights, key=lambda f: f["price"])
+        cheapest_cad = round(float(cheapest["price"]))
+        stops = len(cheapest.get("layovers") or [])
+        nonstops = [f for f in flights if not (f.get("layovers"))]
+        nonstop_cad = round(float(min(nonstops, key=lambda f: f["price"])["price"])) if nonstops else None
+    except Exception:
+        return None
+    return {
+        "cheapest_cad": cheapest_cad,
+        "stops": stops,
+        "nonstop_cad": nonstop_cad,
+        "source": "serpapi",
+        "book": None,
+    }
+
+
 def _get_fare_uncached(origin, dest, dep, ret, adults, children):
     """Try each configured provider in order; return first real priced result."""
-    for provider in (amadeus_fare, travelpayouts_fare, kiwi_fare):
+    for provider in (serpapi_fare, amadeus_fare, travelpayouts_fare, kiwi_fare):
         try:
             res = provider(origin, dest, dep, ret, adults, children)
             if res and res.get("cheapest_cad"):
