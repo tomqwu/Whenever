@@ -11,8 +11,11 @@ import os, re, json, time, datetime as dt, logging
 from functools import lru_cache
 import requests
 import yaml
+from dotenv import load_dotenv
 from flask import Flask, request, jsonify, render_template, Response
 import export
+
+load_dotenv()  # load .env if present; real shell env vars take precedence (override=False default)
 
 _log = logging.getLogger(__name__)
 
