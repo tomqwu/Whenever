@@ -22,6 +22,15 @@ Whenever is a small Flask web app with three responsibilities, kept deliberately
                 └──────────────────────────────────────────────┘
 ```
 
+## Ollama: local and cloud modes
+
+The app supports both **local Ollama** (default, no auth) and **Ollama cloud** (`https://ollama.com`, Bearer auth):
+
+- **Local:** leave `OLLAMA_API_KEY` unset. `OLLAMA_HOST` defaults to `http://localhost:11434`. No auth header is sent.
+- **Cloud:** set `OLLAMA_HOST=https://ollama.com`, `OLLAMA_API_KEY=<key>`, and `OLLAMA_MODEL=<cloud model>` (e.g. `gpt-oss:120b`). The app sends `Authorization: Bearer <key>` on every Ollama request (`/api/chat` and `/api/tags`).
+
+The `_ollama_headers()` helper in `app.py` returns `{"Authorization": "Bearer <key>"}` when the key is set, or `{}` when unset — so local behavior is completely unchanged.
+
 ## Core principle: AI analyzes, APIs price
 
 The model **never produces a price**. All fares are fetched from flight APIs. The LLM only
@@ -75,8 +84,9 @@ the nonstop is "chosen"; otherwise the cheapest connection is chosen. Threshold 
 
 | Variable | Purpose | Default |
 |----------|---------|---------|
-| `OLLAMA_HOST` | Ollama base URL | `http://localhost:11434` |
-| `OLLAMA_MODEL` | model tag | `deepseek-v4pro` |
+| `OLLAMA_HOST` | Ollama base URL (local or `https://ollama.com` for cloud) | `http://localhost:11434` |
+| `OLLAMA_MODEL` | model tag (e.g. `deepseek-v4pro` local, `gpt-oss:120b` cloud) | `deepseek-v4pro` |
+| `OLLAMA_API_KEY` | Bearer API key for Ollama cloud (`https://ollama.com/settings/keys`); leave unset for local Ollama | — |
 | `CURRENCY` | output currency | `cad` |
 | `TRAVELPAYOUTS_TOKEN` | Travelpayouts API token | — |
 | `AMADEUS_CLIENT_ID` / `AMADEUS_CLIENT_SECRET` | Amadeus creds | — |
