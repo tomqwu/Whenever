@@ -49,6 +49,8 @@ TRAVELPAYOUTS_TOKEN = os.environ.get("TRAVELPAYOUTS_TOKEN")
 KIWI_API_KEY = os.environ.get("KIWI_API_KEY")
 CURRENCY = os.environ.get("CURRENCY", "cad").lower()
 FARE_CACHE_TTL = int(os.environ.get("FARE_CACHE_TTL", "3600"))
+# Dev-server port. Default 5001 to avoid macOS AirPlay Receiver, which holds 5000.
+PORT = int(os.environ.get("PORT", "5001"))
 
 def providers_configured():
     p = []
@@ -561,6 +563,6 @@ def build_recommendation(origin, results, adults, child_ages, families):
                 f"(AI summary unavailable: {e})")
 
 if __name__ == "__main__":
-    print(f"Whenever -> http://localhost:5000  (model={OLLAMA_MODEL}, "
-          f"live_fares={bool(AMADEUS_ID and AMADEUS_SECRET)})")
-    app.run(host="127.0.0.1", port=5000, debug=True)
+    print(f"Whenever -> http://localhost:{PORT}  (model={OLLAMA_MODEL}, "
+          f"providers={providers_configured() or 'none'})")
+    app.run(host="127.0.0.1", port=PORT, debug=True)
