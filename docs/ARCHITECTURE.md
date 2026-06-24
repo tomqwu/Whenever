@@ -68,7 +68,7 @@ Each provider returns a normalized dict:
 
 ```json
 { "cheapest_cad": 8298, "stops": 1, "nonstop_cad": 14756,
-  "source": "serpapi", "book": null }
+  "source": "travelpayouts", "book": "https://..." }
 ```
 
 **Provider priority (first match wins):**
