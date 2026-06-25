@@ -255,6 +255,7 @@ $('#run').onclick = async () => {
   LAST_PAYLOAD = null;
   $('#exportPdf').disabled = true;
   $('#exportCsv').disabled = true;
+  $('#copyLink').disabled = true;
   $('#run').disabled = true;
   $('#runHint').textContent = 'Searching ' + dests.length + ' cities…';
   $('#prog').style.width = '5%';
@@ -579,14 +580,19 @@ function _vNum(v, lo, hi) {
   if (!Number.isFinite(n)) return undefined;
   return Math.min(hi, Math.max(lo, n));
 }
+function isValidIsoDate(s) {
+  // Strict ISO YYYY-MM-DD validation done entirely in UTC so it never depends
+  // on the browser's local timezone. `new Date('YYYY-MM-DDT00:00:00')` parses as
+  // LOCAL midnight, and .toISOString() then shifts it to the previous UTC day in
+  // UTC+ zones (Tokyo/Berlin), which would wrongly reject valid shared dates.
+  if (typeof s !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
+  const [y, m, d] = s.split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  return dt.getUTCFullYear() === y && dt.getUTCMonth() === m - 1 && dt.getUTCDate() === d;
+}
 function _vDate(v) {
-  // Strict ISO YYYY-MM-DD; reject anything else (including impossible months/days).
-  if (typeof v !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(v)) return undefined;
-  const d = new Date(v + 'T00:00:00');
-  if (isNaN(d.getTime())) return undefined;
-  // Round-trip to reject things like 2026-13-40 that Date may roll over.
-  const iso = d.toISOString().slice(0, 10);
-  return iso === v ? v : undefined;
+  // Reject impossible months/days (e.g. 2026-13-40) without any local→UTC shift.
+  return isValidIsoDate(v) ? v : undefined;
 }
 function _vIata(v) {
   if (typeof v !== 'string' || !/^[A-Za-z]{3}$/.test(v)) return undefined;
