@@ -97,9 +97,9 @@ td.err{color:#b94a48;font-size:11px}
 
     <div class="row" style="margin-top:16px">
       <div class="field"><label>Earliest departure</label><input id="depStart" type="date" value="2026-12-12"></div>
-      <div class="field"><label># departure days</label><input id="depSpan" type="number" min="1" max="10" value="4"></div>
+      <div class="field"><label># departure days</label><input id="depSpan" type="number" min="1" max="10" value="2"></div>
       <div class="field"><label>Earliest return</label><input id="retStart" type="date" value="2027-01-04"></div>
-      <div class="field"><label># return days</label><input id="retSpan" type="number" min="1" max="10" value="4"></div>
+      <div class="field"><label># return days</label><input id="retSpan" type="number" min="1" max="10" value="2"></div>
       <div class="field"><label>Nonstop premium OK (%)</label><input id="thresh" type="number" value="25"></div>
     </div>
 
@@ -197,8 +197,8 @@ $('#run').onclick = async ()=>{
     adults: parseInt($('#adults').value)||1,
     child_ages: kidAges(),
     families: parseInt($('#families').value)||1,
-    dep_start: $('#depStart').value, dep_span: parseInt($('#depSpan').value)||4,
-    ret_start: $('#retStart').value, ret_span: parseInt($('#retSpan').value)||4,
+    dep_start: $('#depStart').value, dep_span: parseInt($('#depSpan').value)||2,
+    ret_start: $('#retStart').value, ret_span: parseInt($('#retSpan').value)||2,
     nonstop_threshold: parseFloat($('#thresh').value)||25,
   };
   $('#run').disabled=true; $('#runHint').textContent='Searching '+dests.length+' cities…';

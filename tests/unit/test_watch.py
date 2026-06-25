@@ -474,6 +474,42 @@ def test_check_all_watches_skips_inactive(db):
     assert call_count["n"] == 0
 
 
+# ---------------------------------------------------------------------------
+# Coverage: watch.py line 90 — created_at auto-filled when not provided
+# ---------------------------------------------------------------------------
+
+def test_add_watch_auto_fills_created_at(db):
+    """When created_at is omitted, add_watch fills it with the current UTC ISO time."""
+    wid = db.add_watch(
+        origin="YYZ", dest_iata="PEK", dest_city="Beijing",
+        dep_date="2026-12-14", ret_date="2027-01-04",
+        adults=2, threshold_pct=25.0,
+        # created_at intentionally omitted to exercise the auto-fill branch (line 90)
+    )
+    w = db.list_watches()[0]
+    # created_at must be a non-empty ISO 8601 string
+    assert w["created_at"], "created_at should have been auto-filled"
+    # Parseable as a datetime
+    parsed = datetime.datetime.fromisoformat(w["created_at"])
+    assert parsed.tzinfo is not None or len(w["created_at"]) >= 19
+
+
+# ---------------------------------------------------------------------------
+# Coverage: watch.py line 41 — WAL journal mode for file-based DBs
+# ---------------------------------------------------------------------------
+
+def test_watchdb_wal_mode_enabled_for_file_db(tmp_path):
+    """WatchDB opened on a real file should enable WAL journal mode (line 41)."""
+    db_path = str(tmp_path / "test_wal.db")
+    db = WatchDB(db_path)
+    try:
+        cur = db._conn.execute("PRAGMA journal_mode")
+        mode = cur.fetchone()[0]
+        assert mode == "wal", f"Expected WAL mode, got {mode!r}"
+    finally:
+        db.close()
+
+
 def test_check_all_watches_uses_now_iso(db):
     """Passing now_iso overrides the timestamp recorded in price_history."""
     _sample_watch(db, last_price=8000)
