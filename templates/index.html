@@ -230,17 +230,24 @@ let SUGG_ACTIVE = -1;   // index of keyboard-highlighted suggestion (-1 = none)
 let SUGG_TIMER = null;  // debounce timer handle
 let SUGGEST_SEQ = 0;    // monotonic request token — a response is applied only if
                         // it carries the latest token (stale responses are dropped)
+let EXPAND_SEQ = 0;     // monotonic token for /api/top-cities expansions — single-
+                        // flight guard so only the LATEST expansion applies its chips
 
 // expandCountry: run the seed-first /api/top-cities expansion and REPLACE CITIES
 // with that country's set (required chips on, optional off) — same as before.
+// Single-flight guarded: a slow expansion (e.g. a non-seed country via the LLM)
+// that resolves AFTER the user picked another country is dropped, so the slower
+// response can't apply last and show chips for the wrong country. (codex review)
 async function expandCountry(country){
   if(!country) return;
+  const seq = ++EXPAND_SEQ;   // this expansion's token (latest wins)
   try{
     const r = await (await fetch('/api/top-cities',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({country, n:6})})).json();
+    if(seq !== EXPAND_SEQ) return;   // a newer expansion superseded us — drop this
     CITIES = (r.cities||[]).map(c=>({...c,on:!c.optional}));
     drawChips();
-  }catch(e){ alert('Could not load cities: '+e); }
+  }catch(e){ if(seq === EXPAND_SEQ) alert('Could not load cities: '+e); }
 }
 
 // Fallback "Get top cities →" button: expands whatever country is typed. The
@@ -265,6 +272,12 @@ const sList = $('#suggestList');
 const sInput = $('#country');
 
 function closeSuggest(){
+  // Cancel any pending debounce timer so a queued fetchSuggest() can't fire AFTER
+  // we close. Without this, a timer scheduled before the close would still run,
+  // mint a FRESH token (++SUGGEST_SEQ inside fetchSuggest), pass stale() while the
+  // input still matches + is focused, and REOPEN the dropdown right after Escape/
+  // clear/blur/pick. (codex review)
+  if(SUGG_TIMER){ clearTimeout(SUGG_TIMER); SUGG_TIMER = null; }
   // Bump the request token so any /api/suggest response still in flight when we
   // close (Escape, clear, blur, outside-click, or a pick) is treated as stale and
   // dropped — a slow OLD response can no longer reopen this dropdown.

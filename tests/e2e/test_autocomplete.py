@@ -182,6 +182,77 @@ def test_fresh_response_still_renders(seed_live_server, page):
     assert page.is_visible("#suggestList")
 
 
+# --------------------------- debounce cancelled on close (codex review) ---------------------------
+
+def test_escape_before_debounce_does_not_reopen(seed_live_server, page):
+    """Type to schedule the 200ms SUGG_TIMER, press Escape BEFORE it fires, and
+    assert the dropdown does NOT reopen. Without clearTimeout in closeSuggest the
+    queued fetchSuggest would still run, mint a fresh token, pass stale() (input
+    still matches + focused), and reopen the dropdown right after the close.
+
+    Fully browser-side and deterministic: we drive the real input handler so the
+    debounce timer is genuinely scheduled, then Escape, then wait past the debounce
+    window plus a real /api/suggest round trip and assert the list stayed hidden.
+    """
+    page.goto(seed_live_server)
+    result = page.evaluate(
+        """async () => {
+            sInput.focus();
+            // Drive the real 'input' handler so SUGG_TIMER is genuinely scheduled.
+            sInput.value = 'chi';
+            sInput.dispatchEvent(new Event('input'));
+            const hadTimer = SUGG_TIMER !== null;   // a debounce timer is pending
+            // User dismisses with Escape before the 200ms timer fires.
+            closeSuggest();                          // Escape path -> closeSuggest()
+            const clearedTimer = SUGG_TIMER === null;  // timer was cancelled
+            // Wait well past the debounce window + a suggest round trip; if the old
+            // timer had survived it would have fired and reopened the dropdown.
+            await new Promise(r => setTimeout(r, 400));
+            return { hadTimer, clearedTimer, display: getComputedStyle(sList).display };
+        }"""
+    )
+    assert result["hadTimer"] is True, "debounce timer was not scheduled by input"
+    assert result["clearedTimer"] is True, "closeSuggest did not cancel SUGG_TIMER"
+    assert result["display"] == "none", "dropdown reopened after Escape (timer survived)"
+
+
+# --------------------------- single-flight country expansion (codex review) ---------------------------
+
+def test_slow_first_expansion_does_not_override_later(seed_live_server, page):
+    """Two country expansions where the FIRST is slower: the chips must reflect the
+    SECOND (latest) country, not the first. Without an EXPAND_SEQ guard the slower
+    first response would apply LAST and show chips for the wrong country.
+
+    Deterministic + non-blocking: fetch is stubbed entirely browser-side so the
+    'Alpha' response is delayed ~150ms and 'Beta' resolves immediately. We start
+    both expansions, then await both promises and assert only Beta's chips remain.
+    """
+    page.goto(seed_live_server)
+    result = page.evaluate(
+        """async () => {
+            const realFetch = window.fetch;
+            // Stub /api/top-cities: slow for Alpha, immediate for Beta. The body
+            // echoes a single city named after the requested country so we can tell
+            // which expansion's response actually applied.
+            window.fetch = (u, opts) => {
+                const country = JSON.parse(opts.body).country;
+                const payload = { ok: true, json: () => Promise.resolve(
+                    { cities: [{ city: country + 'City', iata: 'AAA' }] }) };
+                const delay = country === 'Alpha' ? 150 : 0;
+                return new Promise(res => setTimeout(() => res(payload), delay));
+            };
+            const p1 = expandCountry('Alpha');   // slow (non-seed-like) first pick
+            const p2 = expandCountry('Beta');    // user immediately picks another
+            await Promise.all([p1, p2]);
+            window.fetch = realFetch;
+            return CITIES.map(c => c.city);
+        }"""
+    )
+    assert result == ["BetaCity"], (
+        "stale first expansion overrode the latest country; got %r" % (result,)
+    )
+
+
 def test_suggestion_value_is_escaped(seed_live_server, page, monkeypatch):
     """An XSS-y suggestion value is rendered as text, never as live markup.
 
