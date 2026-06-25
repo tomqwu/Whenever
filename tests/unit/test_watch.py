@@ -55,6 +55,266 @@ def test_watchdb_creates_tables(db):
     assert "price_history" in tables
 
 
+def test_watchdb_creates_active_unique_index(db):
+    """The partial UNIQUE INDEX guarding active trip keys exists."""
+    cur = db._conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='index'"
+    )
+    names = {r[0] for r in cur.fetchall()}
+    assert "idx_watch_active_unique" in names
+
+
+def test_watchdb_duplicate_active_raises_integrityerror(db):
+    """A second identical active watch violates the partial unique index."""
+    import sqlite3
+    kwargs = dict(
+        origin="YYZ", dest_iata="PEK", dest_city="Beijing",
+        dep_date="2026-12-14", ret_date="2027-01-04",
+        adults=2, child_ages=[11, 9], threshold_pct=25.0,
+    )
+    db.add_watch(**kwargs)
+    with pytest.raises(sqlite3.IntegrityError):
+        db.add_watch(**kwargs)
+    assert len(db.list_watches(active_only=True)) == 1
+
+
+def test_watchdb_rewatch_after_remove(db):
+    """The partial index only constrains active rows: after remove_watch the
+    same trip can be inserted again as a new active row."""
+    kwargs = dict(
+        origin="YYZ", dest_iata="PEK", dest_city="Beijing",
+        dep_date="2026-12-14", ret_date="2027-01-04",
+        adults=2, child_ages=[11, 9], threshold_pct=25.0,
+    )
+    wid = db.add_watch(**kwargs)
+    db.remove_watch(wid)
+    wid2 = db.add_watch(**kwargs)   # must NOT raise
+    assert wid2 != wid
+    assert len(db.list_watches(active_only=True)) == 1
+
+
+def test_watchdb_child_count_distinguishes_active_rows(db):
+    """A count-only watch (children=2, child_ages=[]) and an adults-only watch
+    (children=0, child_ages=[]) for the same route/dates are DIFFERENT trips
+    (priced for different party sizes) and must both stay active — the unique
+    key includes the children COUNT, not just child_ages."""
+    common = dict(
+        origin="YYZ", dest_iata="PEK", dest_city="Beijing",
+        dep_date="2026-12-14", ret_date="2027-01-04",
+        adults=2, threshold_pct=25.0, created_at="2026-06-23T00:00:00",
+    )
+    db.add_watch(children=0, **common)   # adults only
+    db.add_watch(children=2, **common)   # two kids, ages unknown — must NOT collide
+    actives = db.list_watches(active_only=True)
+    assert len(actives) == 2
+    assert {w["children"] for w in actives} == {0, 2}
+
+
+def test_watchdb_dedupes_preexisting_active_duplicates_on_init(tmp_path):
+    """A DB that already holds duplicate active rows for a trip key (e.g. created
+    before this index existed) must NOT crash WatchDB init. Re-opening de-dupes:
+    the lowest id stays active, the rest are flagged inactive, and the unique
+    index gets created."""
+    import sqlite3
+    db_path = str(tmp_path / "dupes.db")
+
+    # First open creates the schema (and the unique index).
+    db1 = WatchDB(db_path)
+    # Insert two duplicate ACTIVE rows DIRECTLY, bypassing add_watch and the
+    # index guard, to simulate a pre-index DB. Drop the index so the raw inserts
+    # are allowed, mirroring a DB created before the index existed.
+    db1._conn.execute("DROP INDEX IF EXISTS idx_watch_active_unique")
+    for _ in range(2):
+        db1._conn.execute(
+            """INSERT INTO watches
+               (origin, dest_iata, dest_city, dep_date, ret_date,
+                adults, children, child_ages, threshold_pct, created_at, active)
+               VALUES ('YYZ','PEK','Beijing','2026-12-14','2027-01-04',
+                       2, 0, '[]', 25.0, '2026-06-23T00:00:00', 1)""",
+        )
+    db1._conn.commit()
+    # Two active duplicates now exist with no index.
+    assert len(db1.list_watches(active_only=True)) == 2
+    db1.close()
+
+    # Re-opening must NOT raise despite the pre-existing duplicates.
+    db2 = WatchDB(db_path)
+    try:
+        actives = db2.list_watches(active_only=True)
+        assert len(actives) == 1, "duplicates should be collapsed to one active row"
+        # The surviving active row is the lowest id; the other is now inactive.
+        all_rows = db2.list_watches(active_only=False)
+        assert len(all_rows) == 2
+        inactive = [r for r in all_rows if r["active"] == 0]
+        assert len(inactive) == 1
+        assert actives[0]["id"] == min(r["id"] for r in all_rows)
+        # The unique index now exists.
+        cur = db2._conn.execute("SELECT name FROM sqlite_master WHERE type='index'")
+        assert "idx_watch_active_unique" in {r[0] for r in cur.fetchall()}
+        # Idempotent: re-running the de-dup pass changes nothing.
+        db2._dedupe_active_watches()
+        assert len(db2.list_watches(active_only=True)) == 1
+    finally:
+        db2.close()
+
+
+def _insert_raw_active(conn, last_price):
+    """INSERT a raw active YYZ->PEK row with the given last_price (no index)."""
+    conn.execute(
+        """INSERT INTO watches
+           (origin, dest_iata, dest_city, dep_date, ret_date,
+            adults, children, child_ages, threshold_pct,
+            last_price, last_source, created_at, active)
+           VALUES ('YYZ','PEK','Beijing','2026-12-14','2027-01-04',
+                   2, 0, '[]', 25.0, ?, 'travelpayouts',
+                   '2026-06-23T00:00:00', 1)""",
+        (last_price,),
+    )
+
+
+def test_watchdb_dedupe_preserves_non_null_baseline_on_init(tmp_path):
+    """Upgrade safety: when duplicate active rows exist and the LOWER id has
+    last_price=NULL while a HIGHER id carries a real baseline, the de-dup keeps
+    the BASELINED row active — so the scheduler's next run can still detect a
+    drop instead of re-seeding a null baseline (Codex P2)."""
+    db_path = str(tmp_path / "baseline.db")
+    db1 = WatchDB(db_path)
+    db1._conn.execute("DROP INDEX IF EXISTS idx_watch_active_unique")
+    _insert_raw_active(db1._conn, None)    # lower id, NO baseline
+    _insert_raw_active(db1._conn, 8000)    # higher id, real baseline
+    db1._conn.commit()
+    assert len(db1.list_watches(active_only=True)) == 2
+    db1.close()
+
+    db2 = WatchDB(db_path)
+    try:
+        actives = db2.list_watches(active_only=True)
+        assert len(actives) == 1, "duplicates collapse to one active row"
+        # The survivor is the BASELINED row, not the lowest id.
+        assert actives[0]["last_price"] == 8000
+        all_rows = db2.list_watches(active_only=False)
+        assert actives[0]["id"] != min(r["id"] for r in all_rows)
+        # The unique index now exists.
+        cur = db2._conn.execute("SELECT name FROM sqlite_master WHERE type='index'")
+        assert "idx_watch_active_unique" in {r[0] for r in cur.fetchall()}
+        # Idempotent: re-running changes nothing.
+        db2._dedupe_active_watches()
+        actives2 = db2.list_watches(active_only=True)
+        assert len(actives2) == 1 and actives2[0]["last_price"] == 8000
+    finally:
+        db2.close()
+
+
+def test_watchdb_dedupe_all_null_keeps_lowest_id(tmp_path):
+    """When NO duplicate carries a baseline, fall back to keeping the lowest id
+    (its null baseline stays null)."""
+    db_path = str(tmp_path / "allnull.db")
+    db1 = WatchDB(db_path)
+    db1._conn.execute("DROP INDEX IF EXISTS idx_watch_active_unique")
+    _insert_raw_active(db1._conn, None)
+    _insert_raw_active(db1._conn, None)
+    db1._conn.commit()
+    db1.close()
+
+    db2 = WatchDB(db_path)
+    try:
+        actives = db2.list_watches(active_only=True)
+        all_rows = db2.list_watches(active_only=False)
+        assert len(actives) == 1
+        assert actives[0]["id"] == min(r["id"] for r in all_rows)
+        assert actives[0]["last_price"] is None
+    finally:
+        db2.close()
+
+
+def test_watchdb_dedupe_both_baselined_keeps_lowest_id(tmp_path):
+    """When MULTIPLE duplicates are baselined, keep the lowest-id baselined row
+    deterministically."""
+    db_path = str(tmp_path / "bothbase.db")
+    db1 = WatchDB(db_path)
+    db1._conn.execute("DROP INDEX IF EXISTS idx_watch_active_unique")
+    _insert_raw_active(db1._conn, 7000)    # lower id, baselined
+    _insert_raw_active(db1._conn, 8000)    # higher id, baselined
+    db1._conn.commit()
+    db1.close()
+
+    db2 = WatchDB(db_path)
+    try:
+        actives = db2.list_watches(active_only=True)
+        all_rows = db2.list_watches(active_only=False)
+        assert len(actives) == 1
+        assert actives[0]["id"] == min(r["id"] for r in all_rows)
+        assert actives[0]["last_price"] == 7000
+    finally:
+        db2.close()
+
+
+def test_watchdb_index_retry_after_dedup_succeeds(tmp_path, monkeypatch):
+    """If the FIRST de-dup pass is skipped (so the first CREATE UNIQUE INDEX hits
+    duplicates and raises), init's defensive retry runs de-dup again and the
+    index is created — init must not crash."""
+    # Build a DB with two active duplicates and NO index.
+    db_path = str(tmp_path / "retry.db")
+    seed = WatchDB(db_path)
+    seed._conn.execute("DROP INDEX IF EXISTS idx_watch_active_unique")
+    for _ in range(2):
+        seed._conn.execute(
+            """INSERT INTO watches
+               (origin, dest_iata, dest_city, dep_date, ret_date,
+                adults, children, child_ages, threshold_pct, created_at, active)
+               VALUES ('YYZ','PEK','Beijing','2026-12-14','2027-01-04',
+                       2, 0, '[]', 25.0, '2026-06-23T00:00:00', 1)""",
+        )
+    seed._conn.commit()
+    seed.close()
+
+    # Make the FIRST _dedupe_active_watches call a no-op so the first CREATE
+    # raises IntegrityError; subsequent calls run the real de-dup (retry path).
+    real_dedupe = WatchDB._dedupe_active_watches
+    calls = {"n": 0}
+
+    def flaky_dedupe(self):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return  # skip — leaves duplicates so the first CREATE INDEX fails
+        return real_dedupe(self)
+
+    monkeypatch.setattr(WatchDB, "_dedupe_active_watches", flaky_dedupe)
+    db2 = WatchDB(db_path)   # must NOT raise — retry de-dup fixes it
+    try:
+        assert len(db2.list_watches(active_only=True)) == 1
+        cur = db2._conn.execute("SELECT name FROM sqlite_master WHERE type='index'")
+        assert "idx_watch_active_unique" in {r[0] for r in cur.fetchall()}
+        assert calls["n"] >= 2  # first (no-op) + retry
+    finally:
+        db2.close()
+
+
+def test_watchdb_index_raises_clear_error_when_dedup_never_resolves(tmp_path, monkeypatch):
+    """If de-dup never removes the duplicates (both passes are no-ops), init
+    surfaces a clear IntegrityError naming the index rather than a bare one."""
+    import sqlite3
+    db_path = str(tmp_path / "stuck.db")
+    seed = WatchDB(db_path)
+    seed._conn.execute("DROP INDEX IF EXISTS idx_watch_active_unique")
+    for _ in range(2):
+        seed._conn.execute(
+            """INSERT INTO watches
+               (origin, dest_iata, dest_city, dep_date, ret_date,
+                adults, children, child_ages, threshold_pct, created_at, active)
+               VALUES ('YYZ','PEK','Beijing','2026-12-14','2027-01-04',
+                       2, 0, '[]', 25.0, '2026-06-23T00:00:00', 1)""",
+        )
+    seed._conn.commit()
+    seed.close()
+
+    # Every de-dup pass is a no-op: both CREATE attempts fail.
+    monkeypatch.setattr(WatchDB, "_dedupe_active_watches", lambda self: None)
+    with pytest.raises(sqlite3.IntegrityError) as exc:
+        WatchDB(db_path)
+    assert "idx_watch_active_unique" in str(exc.value)
+
+
 def test_watchdb_add_and_list(db):
     wid = _sample_watch(db)
     watches = db.list_watches()
@@ -133,6 +393,19 @@ def test_watchdb_update_price_with_null_price(db):
     # last_price in watches stays at 8000
     w = db.list_watches()[0]
     assert w["last_price"] == 8000
+
+
+def test_watchdb_set_baseline_seeds_without_history(db):
+    """set_baseline updates last_price/last_source and writes NO history row."""
+    wid = _sample_watch(db, last_price=None)
+    db.set_baseline(wid, 8000, "travelpayouts")
+    w = db.list_watches()[0]
+    assert w["last_price"] == 8000
+    assert w["last_source"] == "travelpayouts"
+    cur = db._conn.execute(
+        "SELECT COUNT(*) FROM price_history WHERE watch_id=?", (wid,)
+    )
+    assert cur.fetchone()[0] == 0
 
 
 def test_watchdb_multiple_history_rows(db):
@@ -281,7 +554,8 @@ def test_check_all_watches_kayak_fallback_encodes_child_ages(db):
     assert len(drops) == 1
     book = drops[0]["book"]
     assert book.startswith("https://www.kayak.com")
-    assert "children-11-9" in book
+    # Ages are canonicalized (sorted) on store, so the link carries 9-11.
+    assert "children-9-11" in book
 
 
 def test_check_all_watches_kayak_fallback_count_only_placeholder_ages(db):
@@ -316,7 +590,10 @@ def test_check_all_watches_kayak_fallback_no_children_adults_only(db):
 
 
 def test_watchdb_persists_and_parses_child_ages(db):
-    """child_ages is stored JSON-encoded and parsed back to a list; children=len."""
+    """child_ages is stored JSON-encoded and parsed back to a list; children=len.
+
+    Ages are canonicalized (sorted) on store, so [11, 9] persists as [9, 11].
+    """
     db.add_watch(
         origin="YYZ", dest_iata="PEK", dest_city="Beijing",
         dep_date="2026-12-14", ret_date="2027-01-04",
@@ -324,8 +601,63 @@ def test_watchdb_persists_and_parses_child_ages(db):
         created_at="2026-06-23T00:00:00",
     )
     w = db.list_watches()[0]
-    assert w["child_ages"] == [11, 9]
+    assert w["child_ages"] == [9, 11]
     assert w["children"] == 2
+    # The raw stored JSON text is canonical (sorted) so the unique index and
+    # the route's order-insensitive dedup agree on the key.
+    raw = db._conn.execute("SELECT child_ages FROM watches").fetchone()[0]
+    assert raw == "[9, 11]"
+
+
+def test_watchdb_canonicalizes_child_age_order_single_active_row(db):
+    """[11, 9] then [9, 11] for the SAME trip are the same party: the second
+    add collides with the unique index (same canonical stored text) instead of
+    surviving as an index-distinct duplicate."""
+    import sqlite3
+    kwargs = dict(
+        origin="YYZ", dest_iata="PEK", dest_city="Beijing",
+        dep_date="2026-12-14", ret_date="2027-01-04",
+        adults=2, threshold_pct=25.0, created_at="2026-06-23T00:00:00",
+    )
+    db.add_watch(child_ages=[11, 9], **kwargs)
+    with pytest.raises(sqlite3.IntegrityError):
+        db.add_watch(child_ages=[9, 11], **kwargs)
+    actives = db.list_watches(active_only=True)
+    assert len(actives) == 1
+    assert actives[0]["child_ages"] == [9, 11]
+
+
+def test_watchdb_dedupes_preexisting_age_order_variants_on_init(tmp_path):
+    """A pre-canonical DB holding [11,9] and [9,11] active rows for the same
+    trip (distinct to a raw-text index, same party in reality) must collapse to
+    one active row on init and let the unique index be created."""
+    db_path = str(tmp_path / "ages.db")
+
+    db1 = WatchDB(db_path)
+    # Drop the index and INSERT two active rows with DIFFERENT raw age order,
+    # simulating rows written before child_ages was canonicalized on store.
+    db1._conn.execute("DROP INDEX IF EXISTS idx_watch_active_unique")
+    for ages in ("[11, 9]", "[9, 11]"):
+        db1._conn.execute(
+            """INSERT INTO watches
+               (origin, dest_iata, dest_city, dep_date, ret_date,
+                adults, children, child_ages, threshold_pct, created_at, active)
+               VALUES ('YYZ','PEK','Beijing','2026-12-14','2027-01-04',
+                       2, 2, ?, 25.0, '2026-06-23T00:00:00', 1)""",
+            (ages,),
+        )
+    db1._conn.commit()
+    assert len(db1.list_watches(active_only=True)) == 2
+    db1.close()
+
+    db2 = WatchDB(db_path)
+    try:
+        actives = db2.list_watches(active_only=True)
+        assert len(actives) == 1, "order-variant duplicates collapse to one row"
+        cur = db2._conn.execute("SELECT name FROM sqlite_master WHERE type='index'")
+        assert "idx_watch_active_unique" in {r[0] for r in cur.fetchall()}
+    finally:
+        db2.close()
 
 
 def test_watchdb_explicit_children_count_without_ages(db):

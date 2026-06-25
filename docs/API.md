@@ -127,3 +127,72 @@ The `dest_index` field maps each cell back to the correct city in `meta.results`
 | Status | Condition |
 |--------|-----------|
 | 400 | Same validation as `/api/search`: missing/empty `origin`, `destinations`, or dates |
+
+---
+
+## Price watches
+
+Save a trip so the standalone scheduler (`python scheduler.py`, run via cron) can
+re-price it and alert on drops. Watches are stored in the SQLite DB at `WATCH_DB`
+(default `whenever_watches.db`).
+
+### `POST /api/watch`
+
+Save a trip to watch. The scheduler baseline (`last_price`/`last_source`) is
+**derived server-side** from a real fare lookup (`get_fare`) — per the
+REAL-DATA-ONLY guardrail, any client-supplied `last_price`/`last_source` is
+**ignored** (a tampered POST cannot inject a fabricated baseline and trigger
+bogus drop alerts). Because the user just searched the trip, that lookup is
+usually a cache HIT and returns the same real price. If the lookup yields no
+data, the baseline is left unset and the scheduler's first run seeds it from a
+real fetch.
+
+**Body**
+```json
+{
+  "origin": "YYZ",
+  "dest_iata": "PVG",
+  "dest_city": "Shanghai",
+  "dep_date": "2026-12-12",
+  "ret_date": "2027-01-04",
+  "adults": 2,
+  "child_ages": [11, 9],
+  "threshold_pct": 25.0
+}
+```
+
+`origin`, `dest_iata`, `dep_date`, `ret_date` are **required**; the rest are
+optional (`adults` defaults to 2, `threshold_pct` to 25.0). `last_price` /
+`last_source` may be sent but are ignored (the baseline is server-derived).
+
+**Response** `{ "id": 1, "ok": true }`
+
+**Errors**
+
+| Status | Condition |
+|--------|-----------|
+| 400 | Missing/empty `origin`, `dest_iata`, `dep_date`, or `ret_date` |
+
+---
+
+### `GET /api/watch`
+
+List saved (active) watches.
+
+**Response**
+```json
+{ "watches": [ {
+  "id": 1, "origin": "YYZ", "dest_iata": "PVG", "dest_city": "Shanghai",
+  "dep_date": "2026-12-12", "ret_date": "2027-01-04", "adults": 2,
+  "child_ages": [11, 9], "threshold_pct": 25.0,
+  "last_price": 8000, "last_source": "travelpayouts"
+} ] }
+```
+
+---
+
+### `DELETE /api/watch/<id>`
+
+Remove (deactivate) a watch by id.
+
+**Response** `{ "ok": true }`

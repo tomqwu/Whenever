@@ -39,7 +39,13 @@ class WatchDB:
         self._conn.row_factory = sqlite3.Row
         if db_path != ":memory:":
             self._conn.execute("PRAGMA journal_mode=WAL")
-        self._create_tables()
+        try:
+            self._create_tables()
+        except Exception:
+            # Don't leak the open connection if schema/index setup fails (e.g.
+            # an unresolvable duplicate-active-rows IntegrityError).
+            self.close()
+            raise
 
     def _create_tables(self):
         self._conn.executescript("""
@@ -69,6 +75,120 @@ class WatchDB:
                 book       TEXT
             );
         """)
+        # Canonicalize stored child_ages (sort) so order-variants like [11,9]
+        # and [9,11] share identical raw JSON text. A DB written before ages were
+        # sorted on store can hold both variants for the same trip; without this
+        # pass the de-dup GROUP BY (and the raw-text unique index) would treat
+        # them as distinct and let two active rows survive. Idempotent: a no-op
+        # when every row is already canonical.
+        self._canonicalize_child_ages()
+        # Before creating the partial UNIQUE INDEX, collapse any pre-existing
+        # duplicate active rows. A DB created before this index (or before
+        # `children` joined the key) can hold multiple active rows for the same
+        # trip key; CREATE UNIQUE INDEX would then raise IntegrityError and brick
+        # every code path that opens the DB. De-duping first is idempotent and a
+        # no-op on a fresh/empty DB.
+        self._dedupe_active_watches()
+        # At most one ACTIVE watch per trip key. This is the atomic backstop for
+        # the route's pre-check: two concurrent identical POSTs can both pass a
+        # list_watches() check before either inserts, but only one INSERT can
+        # satisfy this partial unique index — the second raises
+        # sqlite3.IntegrityError, which the route treats as "already exists".
+        # The key includes `children` (the passenger COUNT) so a count-only watch
+        # (children=2, child_ages=[]) is distinct from an adults-only one
+        # (children=0, child_ages=[]) — they are priced for different parties.
+        # Partial (WHERE active = 1) so removing a watch (active -> 0) frees the
+        # key and the same trip can be re-watched later.
+        try:
+            self._conn.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_watch_active_unique
+                    ON watches(origin, dest_iata, dep_date, ret_date,
+                               adults, children, child_ages)
+                    WHERE active = 1;
+            """)
+        except sqlite3.IntegrityError:
+            # A residual duplicate slipped through (e.g. a concurrent writer):
+            # de-dupe once more and retry. If it still fails, surface a clear,
+            # actionable error rather than a bare IntegrityError from init.
+            self._dedupe_active_watches()
+            try:
+                self._conn.execute("""
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_watch_active_unique
+                        ON watches(origin, dest_iata, dep_date, ret_date,
+                                   adults, children, child_ages)
+                        WHERE active = 1;
+                """)
+            except sqlite3.IntegrityError as exc:
+                raise sqlite3.IntegrityError(
+                    "Could not create idx_watch_active_unique: duplicate active "
+                    "watch rows remain after de-dup. Inspect the 'watches' table "
+                    f"for active duplicates on the trip key. ({exc})"
+                ) from exc
+        self._conn.commit()
+
+    def _canonicalize_child_ages(self):
+        """Rewrite any non-canonical stored child_ages JSON to sorted form.
+
+        add_watch sorts ages before storing, but a DB written before that change
+        can hold unsorted text (e.g. "[11, 9]"). Re-encoding to the canonical
+        sorted text ("[9, 11]") lets the de-dup pass and the raw-text unique
+        index see order-variants of the same party as one key. Idempotent: rows
+        already canonical are left untouched.
+        """
+        rows = self._conn.execute(
+            "SELECT id, child_ages FROM watches"
+        ).fetchall()
+        for row in rows:
+            raw = row["child_ages"]
+            ages = json.loads(raw or "[]")
+            canonical = json.dumps(sorted(ages))
+            if canonical != raw:
+                self._conn.execute(
+                    "UPDATE watches SET child_ages=? WHERE id=?",
+                    (canonical, row["id"]),
+                )
+        self._conn.commit()
+
+    def _dedupe_active_watches(self):
+        """Keep one active row per trip key; mark the rest inactive.
+
+        For each set of active rows sharing the unique-index key
+        (origin, dest_iata, dep_date, ret_date, adults, children, child_ages),
+        keep ONE row active and set active=0 on the others. Idempotent and safe
+        on every init: a fresh/empty DB or an already-deduped DB is a no-op.
+
+        BASELINE PRESERVATION: the survivor is chosen to keep a real price
+        baseline whenever the group has one. If any row in the group has a
+        non-null last_price, keep the lowest-id row AMONG THOSE baselined rows
+        (deterministic); only if NO row carries a baseline do we fall back to the
+        lowest id overall. This stops an upgrade from deactivating the sole row
+        that could report a price drop — e.g. when the oldest (lowest-id) row has
+        last_price IS NULL but a newer duplicate already recorded a real price.
+        Without this, the scheduler would just re-seed the kept null row and miss
+        a drop it would have caught before the upgrade.
+        """
+        # Rank rows within each trip-key group: baselined rows (last_price NOT
+        # NULL) sort ahead of unbaselined ones, then by id. The first row of each
+        # group (rank 1) is the one to keep; the rest are deactivated. This keeps
+        # the lowest id among baselined rows when any exist, else the lowest id.
+        self._conn.execute("""
+            UPDATE watches SET active = 0
+            WHERE active = 1
+              AND id NOT IN (
+                  SELECT id FROM (
+                      SELECT id,
+                             ROW_NUMBER() OVER (
+                                 PARTITION BY origin, dest_iata, dep_date,
+                                              ret_date, adults, children,
+                                              child_ages
+                                 ORDER BY (last_price IS NULL), id
+                             ) AS rn
+                      FROM watches
+                      WHERE active = 1
+                  )
+                  WHERE rn = 1
+              );
+        """)
         self._conn.commit()
 
     def add_watch(
@@ -94,7 +214,13 @@ class WatchDB:
         #   - If ages are supplied, they are authoritative (count = len(ages)).
         #   - Otherwise preserve the explicit `children` count (ages unknown),
         #     and store an empty ages list.
+        # Canonicalize ages by sorting before storage so the partial unique
+        # index (keyed on the raw child_ages JSON text) and the route's
+        # order-insensitive dedup pre-check agree: [11,9] and [9,11] for the
+        # same trip become the identical stored text "[9, 11]", collapsing to a
+        # single active row instead of two index-distinct duplicates.
         if child_ages:
+            child_ages = sorted(child_ages)
             children = len(child_ages)
         else:
             child_ages = []
@@ -150,6 +276,24 @@ class WatchDB:
                 "UPDATE watches SET last_price=?, last_source=? WHERE id=?",
                 (price, source, watch_id),
             )
+        self._conn.commit()
+
+    def set_baseline(
+        self,
+        watch_id: int,
+        last_price: Optional[int],
+        last_source: Optional[str],
+    ):
+        """Seed a watch's baseline (last_price/last_source) without history.
+
+        Unlike update_price, this records no price_history row — it is a manual
+        seed for a watch that was created before a fare was known, so the
+        scheduler's first run can detect a real drop against this baseline.
+        """
+        self._conn.execute(
+            "UPDATE watches SET last_price=?, last_source=? WHERE id=?",
+            (last_price, last_source, watch_id),
+        )
         self._conn.commit()
 
     def close(self):

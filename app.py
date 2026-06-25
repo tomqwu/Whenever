@@ -7,13 +7,14 @@ LLM via Ollama (default model: deepseek-v4pro). Fares come from Amadeus if
 credentials are set, otherwise from clearly-labeled AI estimates. Every price
 deep-links to a real Kayak search for booking.
 """
-import os, re, json, time, datetime as dt, logging, concurrent.futures
+import os, re, json, time, datetime as dt, logging, concurrent.futures, sqlite3
 from functools import lru_cache
 import requests
 import yaml
 from dotenv import load_dotenv
 from flask import Flask, request, jsonify, render_template, Response, stream_with_context
 import export
+import watch
 
 load_dotenv()  # load .env if present; real shell env vars take precedence (override=False default)
 
@@ -713,6 +714,7 @@ def api_search_stream():
             "adults": adults,
             "child_ages": child_ages,
             "families": families,
+            "nonstop_threshold": threshold_pct,
             "dep_dates": dep_dates,
             "ret_dates": ret_dates,
             "providers": providers_configured(),
@@ -817,6 +819,195 @@ def api_export_pdf():
         mimetype="application/pdf",
         headers={"Content-Disposition": 'attachment; filename="whenever-matrix.pdf"'},
     )
+
+# --------------------------- price watches ------------------------
+def _watch_db():
+    """Open a fresh WatchDB for the current request.
+
+    A new sqlite connection is opened (and closed) per request to avoid reusing
+    a single connection across Flask's worker threads. The path is resolved the
+    same way scheduler.py does: WATCH_DB env, else whenever_watches.db.
+    """
+    return watch.WatchDB(os.environ.get("WATCH_DB") or "whenever_watches.db")
+
+
+def _watch_to_json(row):
+    """Project a watch row dict to a JSON-friendly subset for the UI."""
+    return {
+        "id": row.get("id"),
+        "origin": row.get("origin"),
+        "dest_iata": row.get("dest_iata"),
+        "dest_city": row.get("dest_city"),
+        "dep_date": row.get("dep_date"),
+        "ret_date": row.get("ret_date"),
+        "adults": row.get("adults"),
+        "children": row.get("children") or 0,
+        "child_ages": row.get("child_ages") or [],
+        "threshold_pct": row.get("threshold_pct"),
+        "last_price": row.get("last_price"),
+        "last_source": row.get("last_source"),
+    }
+
+
+@app.route("/api/watch", methods=["POST"])
+def api_watch_add():
+    # request.get_json() can return None (no body) or a non-dict (client posts
+    # `null`, `[]`, a bare string/number); a subsequent b.get(...) would raise
+    # AttributeError -> 500. Reject anything that isn't a JSON object up front.
+    b = request.get_json(silent=True)
+    if not isinstance(b, dict):
+        return jsonify({"error": "watch payload required"}), 400
+    # Required text fields are .strip()ed below; a non-string value (e.g.
+    # {"origin": 123} or a list/bool) would make .strip() raise AttributeError
+    # -> 500. Validate each is a string up front and reject with a clean 400,
+    # consistent with the other field validations.
+    for _field in ("origin", "dest_iata", "dep_date", "ret_date"):
+        if not isinstance(b.get(_field), str):
+            return jsonify(
+                {"error": "origin, dest_iata, dep_date and ret_date must be strings"}
+            ), 400
+    origin = b["origin"].strip().upper()
+    dest_iata = b["dest_iata"].strip().upper()
+    dep_date = b["dep_date"].strip()
+    ret_date = b["ret_date"].strip()
+    if not origin or not dest_iata or not dep_date or not ret_date:
+        return jsonify({"error": "origin, dest_iata, dep_date and ret_date required"}), 400
+
+    dest_city = b.get("dest_city")
+
+    # Coerce/validate numeric fields BEFORE touching the DB. The body is raw
+    # JSON, so a stray non-numeric value (e.g. last_price "8,000") would
+    # otherwise persist as TEXT and later crash check_all_watches' int<str
+    # comparison, blocking every watch. Reject those with a clean 400.
+    try:
+        adults = int(b.get("adults", 2))
+    except (TypeError, ValueError):
+        return jsonify({"error": "adults must be numeric"}), 400
+    try:
+        threshold_pct = float(b.get("threshold_pct", 25.0))
+    except (TypeError, ValueError):
+        return jsonify({"error": "threshold_pct must be numeric"}), 400
+    # child_ages: must be a JSON array when present. A non-list (e.g. the string
+    # "11,9") would iterate per-character and persist nonsense ages, so reject it
+    # with a 400. Within a list, keep only values that coerce cleanly to int.
+    raw_child_ages = b.get("child_ages")
+    if raw_child_ages is not None and not isinstance(raw_child_ages, list):
+        return jsonify({"error": "child_ages must be a list"}), 400
+    child_ages = []
+    for a in (raw_child_ages or []):
+        try:
+            child_ages.append(int(a))
+        except (TypeError, ValueError):
+            continue
+    # REAL-DATA-ONLY guardrail: never trust a client-supplied last_price. A
+    # direct/tampered POST could inject a fabricated baseline and trigger bogus
+    # drop alerts. Re-derive the baseline server-side from a real fare lookup
+    # (get_fare). Because the user just searched this trip, the cell is usually
+    # a cache HIT, so this is cheap and returns the same real price. The client's
+    # last_price/last_source are ignored entirely.
+    fare = get_fare(origin, dest_iata, dep_date, ret_date, adults, len(child_ages))
+    cheapest = fare.get("cheapest_cad")
+    if cheapest is not None:
+        last_price = int(float(cheapest))
+        last_source = fare.get("source")
+    else:
+        # No real data available — leave the baseline unset; the scheduler's
+        # first run will seed it from a real fetch.
+        last_price = None
+        last_source = None
+
+    db = _watch_db()
+    try:
+        # Idempotent creation: reloading/repeating a search for an already-watched
+        # trip must not insert another active row (the scheduler would then re-price
+        # it and emit duplicate drop alerts).
+        sorted_ages = sorted(child_ages)
+        # This route only carries child_ages (no separate count), so the
+        # children COUNT it would store equals len(child_ages) — matching
+        # add_watch's reconciliation. Include it in the dedup key so a
+        # count-only watch (children=2, child_ages=[]) added elsewhere does NOT
+        # collide with an adults-only request (children=0, child_ages=[]).
+        children = len(child_ages)
+
+        def _matching_active():
+            """Return an existing active watch matching this trip key, or None."""
+            for existing in db.list_watches(active_only=True):
+                if (
+                    (existing.get("origin") or "").strip().upper() == origin
+                    and (existing.get("dest_iata") or "").strip().upper() == dest_iata
+                    and existing.get("dep_date") == dep_date
+                    and existing.get("ret_date") == ret_date
+                    and int(existing.get("adults") or 0) == adults
+                    and int(existing.get("children") or 0) == children
+                    and sorted(existing.get("child_ages") or []) == sorted_ages
+                ):
+                    return existing
+            return None
+
+        def _dedup_response(existing):
+            """Return the JSON response for a matching active watch.
+
+            If the existing watch has no baseline yet (last_price is None) and
+            the server-side get_fare lookup produced a real price, seed the
+            existing row's baseline so the scheduler can detect the first real
+            drop. The seed value comes from get_fare (real data), never from the
+            client. An already established baseline is never overwritten.
+            """
+            seeded = False
+            if existing.get("last_price") is None and last_price is not None:
+                db.set_baseline(existing["id"], last_price, last_source)
+                seeded = True
+            resp = {"id": existing["id"], "ok": True, "existing": True}
+            if seeded:
+                resp["seeded"] = True
+            return jsonify(resp)
+
+        # Fast path: a list_watches() pre-check returns the existing id directly.
+        existing = _matching_active()
+        if existing is not None:
+            return _dedup_response(existing)
+
+        # Atomic backstop: a partial UNIQUE INDEX (active rows only) guards the
+        # trip key at the SQLite level. Two concurrent identical POSTs can both
+        # pass the pre-check above, but only one INSERT survives — the other
+        # raises IntegrityError, which we resolve to the surviving row's id so
+        # the response is identical to the pre-check path (one row, existing=True).
+        try:
+            watch_id = db.add_watch(
+                origin=origin, dest_iata=dest_iata, dest_city=dest_city,
+                dep_date=dep_date, ret_date=ret_date, adults=adults,
+                child_ages=child_ages, threshold_pct=threshold_pct,
+                last_price=last_price, last_source=last_source,
+            )
+        except sqlite3.IntegrityError:
+            existing = _matching_active()
+            if existing is None:
+                raise
+            return _dedup_response(existing)
+    finally:
+        db.close()
+    return jsonify({"id": watch_id, "ok": True})
+
+
+@app.route("/api/watch", methods=["GET"])
+def api_watch_list():
+    db = _watch_db()
+    try:
+        rows = db.list_watches()
+    finally:
+        db.close()
+    return jsonify({"watches": [_watch_to_json(r) for r in rows]})
+
+
+@app.route("/api/watch/<int:watch_id>", methods=["DELETE"])
+def api_watch_remove(watch_id):
+    db = _watch_db()
+    try:
+        db.remove_watch(watch_id)
+    finally:
+        db.close()
+    return jsonify({"ok": True})
+
 
 def build_recommendation(origin, results, adults, child_ages, families):
     bests = [{"city": r["city"], "iata": r["iata"],

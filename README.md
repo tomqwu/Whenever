@@ -30,6 +30,7 @@ cd Whenever
 - **AI recommendation** → DeepSeek reads the grid and names the single best trip.
 - **Export results** → after a search, download the fare matrix as a PDF or CSV from the UI.
 - **Shareable searches** → Searches are shareable — after running, copy the link from the **Copy link** button to share a prefilled, auto-run search.
+- **Watch a trip** → after a search, tap **☆ Watch** on any priced city to save its best trip for price-drop monitoring; run `python scheduler.py` (e.g. via cron) to re-price all watches and alert when a fare drops.
 
 ## Prerequisites
 
