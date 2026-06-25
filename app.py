@@ -472,6 +472,28 @@ def date_range(start_iso, count):
         return []
     return [(d + dt.timedelta(days=i)).isoformat() for i in range(count)]
 
+def _build_cell(origin, code, dep, ret, adults, child_ages, fare, threshold):
+    """Build the cell dict for a single dep×ret combo.
+
+    fare: dict from get_fare() with keys cheapest_cad, stops, nonstop_cad, source, book.
+    threshold: float fraction (e.g. 0.25 for 25 %).
+    Returns dict with keys: dep, ret, cheapest_cad, stops, nonstop_cad, chosen, chosen_cad, source, book.
+    """
+    cheap = fare.get("cheapest_cad")
+    ns = fare.get("nonstop_cad")
+    chosen = "cheapest"
+    chosen_cad = cheap
+    if ns and cheap and ns <= cheap * (1 + threshold):
+        chosen, chosen_cad = "nonstop", ns
+    return {
+        "dep": dep, "ret": ret,
+        "cheapest_cad": cheap, "stops": fare.get("stops"),
+        "nonstop_cad": ns, "chosen": chosen, "chosen_cad": chosen_cad,
+        "source": fare.get("source"),
+        "book": fare.get("book") or kayak_link(origin, code, dep, ret, adults, child_ages),
+    }
+
+
 def run_search(origin, dests, adults, child_ages, dep_dates, ret_dates,
                threshold_pct=25, families=1):
     """Core best-value search shared by the web route and the CLI.
@@ -518,19 +540,7 @@ def run_search(origin, dests, adults, child_ages, dep_dates, ret_dates,
             row = []
             for ri, ret in enumerate(ret_dates):
                 f = fare_results[(di, dpi, ri)]
-                cheap = f.get("cheapest_cad")
-                ns = f.get("nonstop_cad")
-                chosen = "cheapest"
-                chosen_cad = cheap
-                if ns and cheap and ns <= cheap * (1 + threshold):
-                    chosen, chosen_cad = "nonstop", ns
-                row.append({
-                    "dep": dep, "ret": ret,
-                    "cheapest_cad": cheap, "stops": f.get("stops"),
-                    "nonstop_cad": ns, "chosen": chosen, "chosen_cad": chosen_cad,
-                    "source": f.get("source"),
-                    "book": f.get("book") or kayak_link(origin, code, dep, ret, adults, child_ages),
-                })
+                row.append(_build_cell(origin, code, dep, ret, adults, child_ages, f, threshold))
             grid.append(row)
         flat = [c for r in grid for c in r if c["chosen_cad"]]
         best = min(flat, key=lambda c: c["chosen_cad"]) if flat else None
