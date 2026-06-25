@@ -636,8 +636,16 @@ function restoreFromHash() {
   set('#thresh', _vNum(obj.nonstop_threshold, 0, 500));
 
   // child_ages: array of integers 0–17; drop non-numeric entries.
+  // A share link is URL-controlled, so a crafted hash could carry thousands of
+  // entries. Each rendered age becomes a DOM input and a passenger in the
+  // auto-run payload, so cap the restored set to a reasonable family size to
+  // keep opening any shared link from freezing the UI or ballooning the search.
+  const MAX_CHILDREN = 9;
   const ages = Array.isArray(obj.child_ages)
-    ? obj.child_ages.map(a => _vNum(a, 0, 17)).filter(a => a !== undefined)
+    ? obj.child_ages
+        .map(a => _vNum(a, 0, 17))
+        .filter(a => a !== undefined)
+        .slice(0, MAX_CHILDREN)
     : [];
   renderKids(ages);
 

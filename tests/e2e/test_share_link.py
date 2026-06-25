@@ -260,6 +260,33 @@ def test_share_hash_cities_capped_to_bound_auto_run(live_server, page):
     assert len(page.query_selector_all("#grids .cityblock")) <= 12
 
 
+def test_share_hash_child_ages_capped_to_bound_passengers(live_server, page):
+    """A crafted share link with thousands of child_ages must not render
+    thousands of kid inputs (UI freeze) or send a huge passenger list into the
+    auto-run search. restoreFromHash caps the restored set to MAX_CHILDREN (9),
+    so no more than 9 kid inputs are ever rendered regardless of hash size."""
+    import json, urllib.parse
+    share = {
+        "depCity": "Toronto", "depCode": "YYZ", "country": "China",
+        "cities": [{"city": "Beijing", "iata": "PEK"}],
+        "adults": 2,
+        # 5000 valid in-range ages — crafted to balloon the passenger list / UI.
+        "child_ages": [5] * 5000,
+        "families": 1,
+        "dep_start": "2026-12-12", "dep_span": 2,
+        "ret_start": "2027-01-04", "ret_span": 2,
+        "nonstop_threshold": 25,
+    }
+    hash_val = "#s=" + urllib.parse.quote(json.dumps(share))
+    page.goto(live_server + "/" + hash_val)
+    # Auto-run fires; wait for it to populate (proves the page did not hang).
+    page.wait_for_selector(".chip.on")
+    page.wait_for_selector("#summary .card")
+    page.wait_for_timeout(500)
+    # No more than MAX_CHILDREN (9) kid number-inputs rendered.
+    assert len(page.query_selector_all("#kids input[type=number]")) <= 9
+
+
 def test_share_hash_missing_origin_prefills_but_does_not_autorun(live_server, page):
     """A crafted/truncated share link with a VALID city but a MISSING/INVALID
     origin (depCode) must NOT auto-run: the auto-run is gated on all required
