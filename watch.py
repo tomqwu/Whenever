@@ -154,17 +154,39 @@ class WatchDB:
 
         For each set of active rows sharing the unique-index key
         (origin, dest_iata, dep_date, ret_date, adults, children, child_ages),
-        keep the lowest id active and set active=0 on the others. Idempotent and
-        safe on every init: a fresh/empty DB or an already-deduped DB is a no-op.
+        keep ONE row active and set active=0 on the others. Idempotent and safe
+        on every init: a fresh/empty DB or an already-deduped DB is a no-op.
+
+        BASELINE PRESERVATION: the survivor is chosen to keep a real price
+        baseline whenever the group has one. If any row in the group has a
+        non-null last_price, keep the lowest-id row AMONG THOSE baselined rows
+        (deterministic); only if NO row carries a baseline do we fall back to the
+        lowest id overall. This stops an upgrade from deactivating the sole row
+        that could report a price drop — e.g. when the oldest (lowest-id) row has
+        last_price IS NULL but a newer duplicate already recorded a real price.
+        Without this, the scheduler would just re-seed the kept null row and miss
+        a drop it would have caught before the upgrade.
         """
+        # Rank rows within each trip-key group: baselined rows (last_price NOT
+        # NULL) sort ahead of unbaselined ones, then by id. The first row of each
+        # group (rank 1) is the one to keep; the rest are deactivated. This keeps
+        # the lowest id among baselined rows when any exist, else the lowest id.
         self._conn.execute("""
             UPDATE watches SET active = 0
             WHERE active = 1
               AND id NOT IN (
-                  SELECT MIN(id) FROM watches
-                  WHERE active = 1
-                  GROUP BY origin, dest_iata, dep_date, ret_date,
-                           adults, children, child_ages
+                  SELECT id FROM (
+                      SELECT id,
+                             ROW_NUMBER() OVER (
+                                 PARTITION BY origin, dest_iata, dep_date,
+                                              ret_date, adults, children,
+                                              child_ages
+                                 ORDER BY (last_price IS NULL), id
+                             ) AS rn
+                      FROM watches
+                      WHERE active = 1
+                  )
+                  WHERE rn = 1
               );
         """)
         self._conn.commit()

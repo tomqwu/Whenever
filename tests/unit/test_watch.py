@@ -158,6 +158,97 @@ def test_watchdb_dedupes_preexisting_active_duplicates_on_init(tmp_path):
         db2.close()
 
 
+def _insert_raw_active(conn, last_price):
+    """INSERT a raw active YYZ->PEK row with the given last_price (no index)."""
+    conn.execute(
+        """INSERT INTO watches
+           (origin, dest_iata, dest_city, dep_date, ret_date,
+            adults, children, child_ages, threshold_pct,
+            last_price, last_source, created_at, active)
+           VALUES ('YYZ','PEK','Beijing','2026-12-14','2027-01-04',
+                   2, 0, '[]', 25.0, ?, 'travelpayouts',
+                   '2026-06-23T00:00:00', 1)""",
+        (last_price,),
+    )
+
+
+def test_watchdb_dedupe_preserves_non_null_baseline_on_init(tmp_path):
+    """Upgrade safety: when duplicate active rows exist and the LOWER id has
+    last_price=NULL while a HIGHER id carries a real baseline, the de-dup keeps
+    the BASELINED row active — so the scheduler's next run can still detect a
+    drop instead of re-seeding a null baseline (Codex P2)."""
+    db_path = str(tmp_path / "baseline.db")
+    db1 = WatchDB(db_path)
+    db1._conn.execute("DROP INDEX IF EXISTS idx_watch_active_unique")
+    _insert_raw_active(db1._conn, None)    # lower id, NO baseline
+    _insert_raw_active(db1._conn, 8000)    # higher id, real baseline
+    db1._conn.commit()
+    assert len(db1.list_watches(active_only=True)) == 2
+    db1.close()
+
+    db2 = WatchDB(db_path)
+    try:
+        actives = db2.list_watches(active_only=True)
+        assert len(actives) == 1, "duplicates collapse to one active row"
+        # The survivor is the BASELINED row, not the lowest id.
+        assert actives[0]["last_price"] == 8000
+        all_rows = db2.list_watches(active_only=False)
+        assert actives[0]["id"] != min(r["id"] for r in all_rows)
+        # The unique index now exists.
+        cur = db2._conn.execute("SELECT name FROM sqlite_master WHERE type='index'")
+        assert "idx_watch_active_unique" in {r[0] for r in cur.fetchall()}
+        # Idempotent: re-running changes nothing.
+        db2._dedupe_active_watches()
+        actives2 = db2.list_watches(active_only=True)
+        assert len(actives2) == 1 and actives2[0]["last_price"] == 8000
+    finally:
+        db2.close()
+
+
+def test_watchdb_dedupe_all_null_keeps_lowest_id(tmp_path):
+    """When NO duplicate carries a baseline, fall back to keeping the lowest id
+    (its null baseline stays null)."""
+    db_path = str(tmp_path / "allnull.db")
+    db1 = WatchDB(db_path)
+    db1._conn.execute("DROP INDEX IF EXISTS idx_watch_active_unique")
+    _insert_raw_active(db1._conn, None)
+    _insert_raw_active(db1._conn, None)
+    db1._conn.commit()
+    db1.close()
+
+    db2 = WatchDB(db_path)
+    try:
+        actives = db2.list_watches(active_only=True)
+        all_rows = db2.list_watches(active_only=False)
+        assert len(actives) == 1
+        assert actives[0]["id"] == min(r["id"] for r in all_rows)
+        assert actives[0]["last_price"] is None
+    finally:
+        db2.close()
+
+
+def test_watchdb_dedupe_both_baselined_keeps_lowest_id(tmp_path):
+    """When MULTIPLE duplicates are baselined, keep the lowest-id baselined row
+    deterministically."""
+    db_path = str(tmp_path / "bothbase.db")
+    db1 = WatchDB(db_path)
+    db1._conn.execute("DROP INDEX IF EXISTS idx_watch_active_unique")
+    _insert_raw_active(db1._conn, 7000)    # lower id, baselined
+    _insert_raw_active(db1._conn, 8000)    # higher id, baselined
+    db1._conn.commit()
+    db1.close()
+
+    db2 = WatchDB(db_path)
+    try:
+        actives = db2.list_watches(active_only=True)
+        all_rows = db2.list_watches(active_only=False)
+        assert len(actives) == 1
+        assert actives[0]["id"] == min(r["id"] for r in all_rows)
+        assert actives[0]["last_price"] == 7000
+    finally:
+        db2.close()
+
+
 def test_watchdb_index_retry_after_dedup_succeeds(tmp_path, monkeypatch):
     """If the FIRST de-dup pass is skipped (so the first CREATE UNIQUE INDEX hits
     duplicates and raises), init's defensive retry runs de-dup again and the
