@@ -610,6 +610,28 @@ function markWatched(btn) {
   btn.textContent = 'Watching ✓';
 }
 
+// resetWatchButton: undo markWatched, restoring the enabled "☆ Watch" state so
+// the same trip can be re-watched after its saved watch is removed.
+function resetWatchButton(btn) {
+  btn.classList.remove('watched');
+  btn.disabled = false;
+  btn.textContent = '☆ Watch';
+}
+
+// resetCardWatchForTrip: after a watch is removed, find any visible card Watch
+// button that matches the removed trip (by dest iata + dep/ret dates) and reset
+// it to the enabled "☆ Watch" state. No-op when no matching card is shown.
+function resetCardWatchForTrip(w) {
+  if (!w) return;
+  document.querySelectorAll('button.watch').forEach(btn => {
+    if (btn.dataset.iata === w.dest_iata &&
+        btn.dataset.dep === w.dep_date &&
+        btn.dataset.ret === w.ret_date) {
+      resetWatchButton(btn);
+    }
+  });
+}
+
 // wireWatchButtons: after a search completes, reveal + wire a Watch button on
 // every city card that has a priced best cell. Clicking POSTs that city's best
 // trip to /api/watch (the server derives the baseline from a real fare lookup)
@@ -626,6 +648,11 @@ function wireWatchButtons(metaInfo, bestByCityIdx) {
     // baseline only seeds correctly) when cheapest_cad is present.
     if (!best || best.cheapest_cad == null) return;
     btn.style.display = '';
+    // Record the trip identity so a later watch removal can re-enable this exact
+    // card button (matched by dest iata + dep/ret dates). (codex review)
+    btn.dataset.iata = r.iata;
+    btn.dataset.dep = best.dep;
+    btn.dataset.ret = best.ret;
     btn.onclick = async () => {
       const body = {
         origin: (metaInfo.origin || '').toUpperCase(),
@@ -664,6 +691,17 @@ function wireWatchButtons(metaInfo, bestByCityIdx) {
   });
 }
 
+// paxLabel: human passenger summary for a watch, using the stored `children`
+// COUNT (not just child_ages, which may be empty when ages were unknown) so a
+// family watch (children=2) is visibly distinct from an adults-only one. (codex)
+function paxLabel(w) {
+  const adults = Number(w.adults) || 0;
+  const children = Number(w.children) || 0;
+  const parts = [adults + (adults === 1 ? ' adult' : ' adults')];
+  if (children) parts.push(children + (children === 1 ? ' child' : ' children'));
+  return parts.join(', ');
+}
+
 // loadWatches: fetch saved watches and render the "Watched trips" list, each
 // with a ✕ remove button that DELETEs the watch. All values are escapeHtml'd.
 async function loadWatches() {
@@ -690,7 +728,8 @@ async function loadWatches() {
     item.innerHTML =
       '<span class="trip">' + escapeHtml(w.origin) + ' → ' +
         escapeHtml(w.dest_city || w.dest_iata) + ' <small>(' + escapeHtml(w.dest_iata) + ')</small> · ' +
-        escapeHtml(w.dep_date) + ' → ' + escapeHtml(w.ret_date) + '</span>' +
+        escapeHtml(w.dep_date) + ' → ' + escapeHtml(w.ret_date) + ' · ' +
+        escapeHtml(paxLabel(w)) + '</span>' +
       '<span class="wprice">' + price + '</span>' +
       '<button class="rm sec" data-id="' + escapeHtml(w.id) + '">✕</button>';
     const rm = item.querySelector('button.rm');
@@ -699,6 +738,8 @@ async function loadWatches() {
       try {
         const resp = await fetch('/api/watch/' + encodeURIComponent(w.id), { method: 'DELETE' });
         if (!resp.ok) { rm.disabled = false; return; }
+        // Re-enable any matching card Watch button so the trip is re-watchable.
+        resetCardWatchForTrip(w);  // (codex review)
         loadWatches();
       } catch (e) { rm.disabled = false; }
     };

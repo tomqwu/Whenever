@@ -108,3 +108,58 @@ def test_watch_remove_button(seed_live_server, page):
     page.wait_for_selector("#watchedList .watched-empty", timeout=15000)
     items = page.query_selector_all("#watchedList .watched-item")
     assert len(items) == 0
+
+
+def test_card_watch_button_reenabled_after_remove(seed_live_server, page):
+    """Removing a watched trip re-enables the matching card Watch button so the
+    same trip can be re-watched without re-running the search (codex review)."""
+    _run_search(page, seed_live_server)
+
+    # Watch card-0's best trip -> button flips to the disabled 'Watching ✓' state.
+    page.click("#card-watch-0")
+    page.wait_for_function(
+        "() => { const b = document.getElementById('card-watch-0'); "
+        "return b && b.disabled && b.classList.contains('watched'); }",
+        timeout=15000,
+    )
+    page.wait_for_selector("#watchedList .watched-item", timeout=15000)
+
+    # Remove it from the Watched trips list.
+    page.click("#watchedList .watched-item button.rm")
+
+    # The matching card Watch button returns to the enabled '☆ Watch' state.
+    page.wait_for_function(
+        "() => { const b = document.getElementById('card-watch-0'); "
+        "return b && !b.disabled && !b.classList.contains('watched') "
+        "&& b.textContent.indexOf('Watch') !== -1 "
+        "&& b.textContent.indexOf('Watching') === -1; }",
+        timeout=15000,
+    )
+
+    # And it is re-watchable: clicking again flips it back to 'Watching ✓' and
+    # re-creates the watched-trips item.
+    page.click("#card-watch-0")
+    page.wait_for_function(
+        "() => { const b = document.getElementById('card-watch-0'); "
+        "return b && b.disabled && b.classList.contains('watched'); }",
+        timeout=15000,
+    )
+    page.wait_for_selector("#watchedList .watched-item", timeout=15000)
+
+
+def test_watched_list_shows_passenger_party(seed_live_server, page):
+    """The watched-trips list shows passenger info using the `children` COUNT so a
+    family party is visible (and distinct from adults-only) (codex review)."""
+    _run_search(page, seed_live_server)
+    page.click("#card-watch-0")
+    page.wait_for_selector("#watchedList .watched-item", timeout=15000)
+
+    trip_text = page.inner_text("#watchedList .watched-item")
+    # The default search is 2 adults + 1 child, so the party must be shown.
+    assert "adults" in trip_text
+    data = page.evaluate("async () => (await (await fetch('/api/watch')).json())")
+    w = data["watches"][0]
+    assert "children" in w
+    if w["children"]:
+        label = "child" if w["children"] == 1 else "children"
+        assert label in trip_text

@@ -126,6 +126,37 @@ def test_list_watches_returns_saved(client, watch_db):
         assert key in w
 
 
+def test_list_watches_includes_children_count(client, watch_db):
+    """GET /api/watch exposes the stored `children` count so a count-only family
+    watch (children=2, child_ages=[]) is distinguishable from an adults-only one
+    (children=0, child_ages=[]) — they look identical on child_ages alone."""
+    # A count-only family watch: ages unknown, but 2 children priced.
+    watch_db.add_watch(
+        origin="YYZ", dest_iata="PVG", dest_city="Shanghai",
+        dep_date="2026-12-12", ret_date="2027-01-04",
+        adults=2, children=2, child_ages=[], threshold_pct=25.0,
+    )
+    # An adults-only watch for a different trip.
+    watch_db.add_watch(
+        origin="YYZ", dest_iata="PEK", dest_city="Beijing",
+        dep_date="2026-12-12", ret_date="2027-01-04",
+        adults=2, children=0, child_ages=[], threshold_pct=25.0,
+    )
+
+    watches = client.get("/api/watch").get_json()["watches"]
+    by_iata = {w["dest_iata"]: w for w in watches}
+
+    family, adults_only = by_iata["PVG"], by_iata["PEK"]
+    # `children` is present for every watch.
+    assert "children" in family and "children" in adults_only
+    # The two parties have identical child_ages but DIFFER on children count,
+    # so clients can tell a family watch from an adults-only one.
+    assert family["child_ages"] == adults_only["child_ages"] == []
+    assert family["children"] == 2
+    assert adults_only["children"] == 0
+    assert family["children"] != adults_only["children"]
+
+
 def test_list_watches_empty(client, watch_db):
     r = client.get("/api/watch")
     assert r.status_code == 200

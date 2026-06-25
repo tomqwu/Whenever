@@ -841,6 +841,7 @@ def _watch_to_json(row):
         "dep_date": row.get("dep_date"),
         "ret_date": row.get("ret_date"),
         "adults": row.get("adults"),
+        "children": row.get("children") or 0,
         "child_ages": row.get("child_ages") or [],
         "threshold_pct": row.get("threshold_pct"),
         "last_price": row.get("last_price"),
