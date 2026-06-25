@@ -253,6 +253,45 @@ def test_slow_first_expansion_does_not_override_later(seed_live_server, page):
     )
 
 
+def test_picking_city_invalidates_inflight_expansion(seed_live_server, page):
+    """A slow country expansion is in flight; the user then picks a CITY. The
+    picked city chip must REMAIN after the (now-stale) expansion resolves — the
+    expansion must not REPLACE CITIES and delete the just-added city.
+
+    Without ++EXPAND_SEQ in addCity(), the slow expansion still passes its
+    seq === EXPAND_SEQ guard and overwrites CITIES with the country's set,
+    silently dropping the user's pick.
+
+    Deterministic + non-blocking: /api/top-cities is stubbed browser-side to
+    resolve ~150ms late. We start the expansion, call addCity() (the real city
+    pick path), then await the stale expansion and assert the city survived.
+    """
+    page.goto(seed_live_server)
+    result = page.evaluate(
+        """async () => {
+            const realFetch = window.fetch;
+            // Stub /api/top-cities to resolve LATE with the country's own chips,
+            // exactly what a slow non-seed (LLM) expansion would return.
+            window.fetch = (u, opts) => {
+                const payload = { ok: true, json: () => Promise.resolve(
+                    { cities: [{ city: 'CountryCity', iata: 'CCC' }] }) };
+                return new Promise(res => setTimeout(() => res(payload), 150));
+            };
+            const p = expandCountry('Slowland');   // slow expansion in flight
+            addCity('Tokyo', 'HND');                // user picks a city meanwhile
+            await p;                                // stale expansion resolves
+            window.fetch = realFetch;
+            return CITIES.map(c => c.iata);
+        }"""
+    )
+    assert "HND" in result, (
+        "stale expansion deleted the user's just-picked city; got %r" % (result,)
+    )
+    assert "CCC" not in result, (
+        "stale expansion overwrote CITIES with the country set; got %r" % (result,)
+    )
+
+
 def test_suggestion_value_is_escaped(seed_live_server, page, monkeypatch):
     """An XSS-y suggestion value is rendered as text, never as live markup.
 

@@ -264,6 +264,12 @@ $('#loadCities').onclick = async ()=>{
 function addCity(city, iata){
   if(!iata) return;
   if(CITIES.some(c=>c.iata===iata)) return;  // already selected
+  // Invalidate any in-flight country expansion: bumping the token makes its
+  // seq === EXPAND_SEQ guard fail, so a slow /api/top-cities response that
+  // resolves after this pick can no longer REPLACE CITIES and delete the chip
+  // the user just added. A direct chip-set mutation outside an expansion must
+  // win over an expansion that was already in flight. (codex review)
+  ++EXPAND_SEQ;
   CITIES.push({city: city||iata, iata, on:true});
   drawChips();
 }
