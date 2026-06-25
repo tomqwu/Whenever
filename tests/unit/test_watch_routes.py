@@ -403,3 +403,88 @@ def test_add_watch_closes_db_on_error(client, monkeypatch):
     with pytest.raises(RuntimeError):
         client.post("/api/watch", json=_VALID_BODY)
     assert closed["v"] is True
+
+
+def test_add_watch_seeds_baseless_existing_on_repost(client, watch_db):
+    """An existing active watch with no baseline (last_price=None) gets seeded
+    when a LATER POST for the same trip includes a numeric last_price. The route
+    returns the existing id with seeded=True and the row now carries the price.
+    """
+    body_no_price = {k: v for k, v in _VALID_BODY.items() if k != "last_price"}
+    first = client.post("/api/watch", json=body_no_price)
+    first_id = first.get_json()["id"]
+    assert watch_db.list_watches()[0]["last_price"] is None
+
+    # Re-POST the SAME trip, now WITH a baseline.
+    r = client.post("/api/watch", json={**_VALID_BODY, "last_price": 8000})
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body["id"] == first_id
+    assert body["existing"] is True
+    assert body["seeded"] is True
+
+    rows = watch_db.list_watches(active_only=True)
+    assert len(rows) == 1
+    assert rows[0]["last_price"] == 8000
+    assert rows[0]["last_source"] == "travelpayouts"
+
+
+def test_add_watch_does_not_overwrite_established_baseline(client, watch_db):
+    """A seeded/established baseline is never overwritten by a later POST with a
+    different last_price; the route returns existing without seeded.
+    """
+    first_id = client.post("/api/watch", json=_VALID_BODY).get_json()["id"]
+    assert watch_db.list_watches()[0]["last_price"] == 8000
+
+    r = client.post("/api/watch", json={**_VALID_BODY, "last_price": 5000})
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body["id"] == first_id
+    assert body["existing"] is True
+    assert "seeded" not in body
+    assert watch_db.list_watches()[0]["last_price"] == 8000
+
+
+def test_add_watch_repost_without_price_leaves_baseless(client, watch_db):
+    """A repost that also omits last_price does not seed (nothing to seed with)."""
+    body_no_price = {k: v for k, v in _VALID_BODY.items() if k != "last_price"}
+    first_id = client.post("/api/watch", json=body_no_price).get_json()["id"]
+
+    r = client.post("/api/watch", json=body_no_price)
+    body = r.get_json()
+    assert body["id"] == first_id
+    assert body["existing"] is True
+    assert "seeded" not in body
+    assert watch_db.list_watches()[0]["last_price"] is None
+
+
+def test_add_watch_seeds_via_integrityerror_backstop(client, watch_db, monkeypatch):
+    """The IntegrityError backstop path also seeds a baseless existing row when
+    the incoming POST carries a last_price.
+    """
+    import sqlite3
+
+    first_id = watch_db.add_watch(
+        origin="YYZ", dest_iata="PVG", dest_city="Shanghai",
+        dep_date="2026-12-12", ret_date="2027-01-04", adults=2,
+        child_ages=[11, 9], threshold_pct=25.0,
+        last_price=None, last_source=None,
+    )
+
+    real_list = watch_db.list_watches
+    calls = {"n": 0}
+
+    def flaky_list(active_only=True):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return []          # pre-check misses -> INSERT -> IntegrityError
+        return real_list(active_only=active_only)
+
+    monkeypatch.setattr(watch_db, "list_watches", flaky_list)
+
+    r = client.post("/api/watch", json={**_VALID_BODY, "last_price": 8000})
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body["id"] == first_id
+    assert body["seeded"] is True
+    assert real_list(active_only=True)[0]["last_price"] == 8000

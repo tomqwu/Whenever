@@ -256,6 +256,24 @@ class WatchDB:
             )
         self._conn.commit()
 
+    def set_baseline(
+        self,
+        watch_id: int,
+        last_price: Optional[int],
+        last_source: Optional[str],
+    ):
+        """Seed a watch's baseline (last_price/last_source) without history.
+
+        Unlike update_price, this records no price_history row — it is a manual
+        seed for a watch that was created before a fare was known, so the
+        scheduler's first run can detect a real drop against this baseline.
+        """
+        self._conn.execute(
+            "UPDATE watches SET last_price=?, last_source=? WHERE id=?",
+            (last_price, last_source, watch_id),
+        )
+        self._conn.commit()
+
     def close(self):
         try:
             self._conn.close()

@@ -304,6 +304,19 @@ def test_watchdb_update_price_with_null_price(db):
     assert w["last_price"] == 8000
 
 
+def test_watchdb_set_baseline_seeds_without_history(db):
+    """set_baseline updates last_price/last_source and writes NO history row."""
+    wid = _sample_watch(db, last_price=None)
+    db.set_baseline(wid, 8000, "travelpayouts")
+    w = db.list_watches()[0]
+    assert w["last_price"] == 8000
+    assert w["last_source"] == "travelpayouts"
+    cur = db._conn.execute(
+        "SELECT COUNT(*) FROM price_history WHERE watch_id=?", (wid,)
+    )
+    assert cur.fetchone()[0] == 0
+
+
 def test_watchdb_multiple_history_rows(db):
     wid = _sample_watch(db, last_price=8000)
     db.update_price(wid, 7500, "kiwi", None, "2026-06-23T09:00:00")

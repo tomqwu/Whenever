@@ -927,10 +927,27 @@ def api_watch_add():
                     return existing
             return None
 
+        def _dedup_response(existing):
+            """Return the JSON response for a matching active watch.
+
+            If the existing watch has no baseline yet (last_price is None) and
+            this request carries a numeric last_price, seed the existing row's
+            baseline so the scheduler can detect the first real drop. An already
+            established baseline is never overwritten.
+            """
+            seeded = False
+            if existing.get("last_price") is None and last_price is not None:
+                db.set_baseline(existing["id"], last_price, last_source)
+                seeded = True
+            resp = {"id": existing["id"], "ok": True, "existing": True}
+            if seeded:
+                resp["seeded"] = True
+            return jsonify(resp)
+
         # Fast path: a list_watches() pre-check returns the existing id directly.
         existing = _matching_active()
         if existing is not None:
-            return jsonify({"id": existing["id"], "ok": True, "existing": True})
+            return _dedup_response(existing)
 
         # Atomic backstop: a partial UNIQUE INDEX (active rows only) guards the
         # trip key at the SQLite level. Two concurrent identical POSTs can both
@@ -948,7 +965,7 @@ def api_watch_add():
             existing = _matching_active()
             if existing is None:
                 raise
-            return jsonify({"id": existing["id"], "ok": True, "existing": True})
+            return _dedup_response(existing)
     finally:
         db.close()
     return jsonify({"id": watch_id, "ok": True})
