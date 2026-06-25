@@ -663,7 +663,10 @@ def api_search_stream():
 
         def _fetch(task):
             di, code, dep, ret = task
-            fare = get_fare(origin, code, dep, ret, adults, children)
+            try:
+                fare = get_fare(origin, code, dep, ret, adults, children)
+            except Exception:
+                fare = {"cheapest_cad": None, "stops": None, "nonstop_cad": None, "source": "no-data"}
             cell = _build_cell(origin, code, dep, ret, adults, child_ages, fare, threshold)
             return di, cell
 

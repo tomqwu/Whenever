@@ -200,3 +200,54 @@ def test_stream_cells_map_to_correct_dep_ret(client, monkeypatch):
             f"Cell dep={cell['dep']} ret={cell['ret']} expected cheapest_cad="
             f"{expected_price} but got {cell['cheapest_cad']}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Resilience: per-cell get_fare failure must NOT truncate the stream
+# ---------------------------------------------------------------------------
+
+def test_stream_tolerates_get_fare_exception(client, monkeypatch):
+    """If get_fare raises for every cell, the stream must still emit all cell
+    lines (with no-data sentinel values) AND end with recommendation + done.
+
+    This test verifies the fix introduced for the robustness finding: a raising
+    get_fare inside the ThreadPoolExecutor worker must not propagate through
+    fut.result() and truncate the stream mid-flight.
+    """
+
+    def always_raises(origin, dest, dep, ret, adults, children):
+        raise RuntimeError("provider down")
+
+    monkeypatch.setattr(appmod, "get_fare", always_raises)
+    monkeypatch.setattr(appmod, "build_recommendation", lambda *a, **k: "fallback rec")
+
+    payload = {
+        "origin": "YYZ",
+        "destinations": [{"city": "Shanghai", "iata": "PVG"}],
+        "dep_dates": ["2026-12-12"],
+        "ret_dates": ["2027-01-04"],
+    }
+    # 1 dest × 1 dep × 1 ret = 1 cell
+    resp, lines = _stream_lines(client, payload)
+    assert resp.status_code == 200, f"Expected 200, got {resp.status_code}"
+
+    types = [l["type"] for l in lines]
+
+    # Stream must end with recommendation then done — never truncated
+    assert "done" in types, f"Stream truncated — no 'done' line. types={types}"
+    assert "recommendation" in types, f"No 'recommendation' line. types={types}"
+    assert types[-1] == "done"
+    assert types[-2] == "recommendation"
+
+    # Must still emit exactly 1 cell line
+    cell_lines = [l for l in lines if l["type"] == "cell"]
+    assert len(cell_lines) == 1, f"Expected 1 cell line, got {len(cell_lines)}"
+
+    # Failing cell must carry no-data sentinel values
+    cell = cell_lines[0]
+    assert cell["cheapest_cad"] is None, f"Expected None cheapest_cad, got {cell['cheapest_cad']}"
+    assert cell["source"] == "no-data", f"Expected source='no-data', got {cell['source']}"
+
+    # Recommendation must still have been emitted with the monkeypatched text
+    rec = next(l for l in lines if l["type"] == "recommendation")
+    assert rec["text"] == "fallback rec"
