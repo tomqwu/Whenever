@@ -97,6 +97,35 @@ def test_suggest_exact_iata_ranked_high():
     assert out[0]["type"] == "city" and out[0]["iata"] == "HND"
 
 
+def test_suggest_exact_iata_outranks_country_prefix():
+    """An exact IATA match ranks AHEAD of a country whose name merely prefixes q.
+
+    DEN=Denver vs Denmark, VIE=Vienna vs Vietnam, CAN=Guangzhou vs Canada — in
+    every collision the airport must be the FIRST suggestion (so ArrowDown+Enter
+    selects the airport, not the country). (codex review)
+    """
+    for q, iata, city, country in [
+        ("den", "DEN", "Denver", "Denmark"),
+        ("vie", "VIE", "Vienna", "Vietnam"),
+        ("can", "CAN", "Guangzhou", "Canada"),
+    ]:
+        out = appmod.suggest_destinations(q)
+        assert out[0]["type"] == "city" and out[0]["iata"] == iata, \
+            f"{q}: expected {iata} ({city}) first, got {out[:3]}"
+        # the colliding country must still appear, just AFTER the exact IATA
+        first_country = next(
+            (i for i, s in enumerate(out) if s["type"] == "country"
+             and s["name"] == country), None)
+        assert first_country is None or first_country > 0, \
+            f"{q}: {country} country must not precede the exact IATA: {out[:3]}"
+
+
+def test_suggest_route_exact_iata_outranks_country(client):
+    """GET /api/suggest?q=DEN returns Denver (exact IATA) ahead of Denmark."""
+    sug = client.get("/api/suggest?q=DEN").get_json()["suggestions"]
+    assert sug[0]["type"] == "city" and sug[0]["iata"] == "DEN"
+
+
 def test_suggest_caps_at_ten():
     """A broad query is capped at 10 results."""
     out = appmod.suggest_destinations("a")

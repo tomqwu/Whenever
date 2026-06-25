@@ -310,6 +310,54 @@ def test_picking_city_invalidates_inflight_expansion(seed_live_server, page):
     )
 
 
+# ----------------- pick existing chip selects it (codex review) -----------------
+
+def test_pick_existing_city_turns_chip_on(seed_live_server, page):
+    """After a country expansion renders chips on:false, picking one of THOSE
+    cities from autocomplete must turn that existing chip ON (selected) rather
+    than being a no-op — otherwise Run would still have no destination.
+
+    Browser-side + deterministic: seed CITIES with an off chip (as a country
+    expansion would), call the real addCity() with that same IATA, and assert the
+    existing entry is now on (no duplicate appended).
+    """
+    page.goto(seed_live_server)
+    result = page.evaluate(
+        """() => {
+            // A country expansion renders its cities unchecked (on:false).
+            CITIES = [{ city: 'Hong Kong', iata: 'HKG', on: false }];
+            drawChips();
+            const beforeSeq = EXPAND_SEQ;
+            // User picks that same city from autocomplete (case-insensitive IATA).
+            addCity('Hong Kong', 'hkg');
+            return {
+                len: CITIES.length,
+                on: CITIES[0].on,
+                bumped: EXPAND_SEQ > beforeSeq,
+                chipClass: (document.querySelector('.chip') || {}).className || '',
+            };
+        }"""
+    )
+    assert result["len"] == 1, "picking an existing city must not append a duplicate"
+    assert result["on"] is True, "the existing chip must be turned ON (selected)"
+    assert result["bumped"] is True, "EXPAND_SEQ must be bumped to invalidate a pending expansion"
+    assert "on" in result["chipClass"].split(), "the rendered chip must carry class 'on'"
+
+
+def test_pick_new_city_still_added_selected(seed_live_server, page):
+    """A brand-new city pick is still APPENDED selected (on:true) — regression
+    guard that the existing-chip branch didn't break the normal add path."""
+    page.goto(seed_live_server)
+    result = page.evaluate(
+        """() => {
+            CITIES = [];
+            addCity('Tokyo', 'HND');
+            return CITIES.map(c => ({ iata: c.iata, on: c.on }));
+        }"""
+    )
+    assert result == [{"iata": "HND", "on": True}]
+
+
 def test_suggestion_value_is_escaped(seed_live_server, page, monkeypatch):
     """An XSS-y suggestion value is rendered as text, never as live markup.
 

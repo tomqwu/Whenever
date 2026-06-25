@@ -135,9 +135,12 @@ def suggest_destinations(q, limit=10):
 
     Matching (case-insensitive): countries whose name starts-with/contains ``q``;
     cities whose city name, IATA, or country contains ``q``. Ranking (lower score
-    first): country prefix < exact IATA < city/IATA prefix < country substring <
-    city substring. Ties break alphabetically for stable output. Capped at
-    ``limit`` results. Empty/blank ``q`` -> [].
+    first): exact IATA < country prefix < city/IATA prefix < country substring <
+    city substring. An exact IATA match wins over a country whose name merely
+    starts with ``q`` (e.g. ``DEN``=Denver ranks ahead of Denmark, ``VIE``=Vienna
+    ahead of Vietnam, ``CAN``=Guangzhou ahead of Canada). Ties break
+    alphabetically for stable output. Capped at ``limit`` results. Empty/blank
+    ``q`` -> [].
     """
     q = (q or "").strip().lower()
     if len(q) < 1:
@@ -147,7 +150,7 @@ def suggest_destinations(q, limit=10):
     for c in _SUGGEST_COUNTRIES:
         name = c["name"].lower()
         if name.startswith(q):
-            rank = 0
+            rank = 1
         elif q in name:
             rank = 3
         else:
@@ -159,7 +162,8 @@ def suggest_destinations(q, limit=10):
         iata = c["iata"].lower()
         country = c["country"].lower()
         if iata == q:
-            rank = 1
+            # Exact IATA beats a country whose name merely prefixes q (DEN/VIE/CAN).
+            rank = 0
         elif city.startswith(q) or iata.startswith(q):
             rank = 2
         elif q in city or q in iata or q in country:

@@ -263,10 +263,20 @@ $('#loadCities').onclick = async ()=>{
   $('#loadCities').disabled=false; $('#loadCities').textContent='Get top cities →';
 };
 
-// addCity: APPEND one city chip (on:true) if not already present (dedup by IATA).
+// addCity: SELECT one city chip. If the city already exists (e.g. a country
+// expansion rendered it on:false), turn that existing chip ON instead of
+// returning a no-op — otherwise picking it from autocomplete would be ignored
+// and Run would still have no selected destination. Otherwise APPEND it
+// (on:true). Dedup by IATA, case-insensitive.
 function addCity(city, iata){
   if(!iata) return;
-  if(CITIES.some(c=>c.iata===iata)) return;  // already selected
+  const existing = CITIES.find(c=>c.iata.toLowerCase()===iata.toLowerCase());
+  if(existing){
+    existing.on = true;   // select the already-present chip (codex review)
+    ++EXPAND_SEQ;         // invalidate any in-flight expansion, as below
+    drawChips();
+    return;
+  }
   // Invalidate any in-flight country expansion: bumping the token makes its
   // seq === EXPAND_SEQ guard fail, so a slow /api/top-cities response that
   // resolves after this pick can no longer REPLACE CITIES and delete the chip
