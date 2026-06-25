@@ -658,7 +658,7 @@ def api_search_stream():
 
         # --- cell lines (as completed) ---
         # Accumulate cells in order for the final recommendation.
-        # cells_by_dest[di] collects (dep, ret, cell_dict) tuples.
+        # cells_by_dest[di] collects bare cell dicts (as returned by _build_cell).
         cells_by_dest: dict = {di: [] for di in range(len(dests))}
 
         def _fetch(task):

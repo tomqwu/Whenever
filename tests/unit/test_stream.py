@@ -148,3 +148,55 @@ def test_stream_line_order(client, monkeypatch):
     assert types[-1] == "done"
     assert types[-2] == "recommendation"
     assert all(t == "cell" for t in types[1:-2])
+
+
+def test_stream_cells_map_to_correct_dep_ret(client, monkeypatch):
+    """Each cell line must carry the price assigned to its exact (dep, ret) pair.
+
+    The mock returns a distinct cheapest_cad for every (dep, ret) combination by
+    encoding the dep/ret dates into the price.  This proves that out-of-order
+    completion does not mix up cells across grid slots.
+    """
+    # 1 destination, 2 dep_dates x 2 ret_dates => 4 distinct cells
+    dep_dates = ["2026-12-10", "2026-12-11"]
+    ret_dates = ["2027-01-03", "2027-01-04"]
+
+    # Build an expected price table: price = 1000 + dep_day*10 + ret_day
+    # dep_day: 10 or 11; ret_day: 3 or 4 -> prices 1103, 1104, 1113, 1114
+    def _price_for(dep, ret):
+        dep_day = int(dep.split("-")[2])   # 10 or 11
+        ret_day = int(ret.split("-")[2])   # 3 or 4
+        return 1000 + dep_day * 10 + ret_day
+
+    def fake_get_fare(origin, dest, dep, ret, adults, children):
+        price = _price_for(dep, ret)
+        return {
+            "cheapest_cad": price,
+            "stops": 1,
+            "nonstop_cad": None,
+            "source": "test",
+            "book": None,
+        }
+
+    monkeypatch.setattr(appmod, "get_fare", fake_get_fare)
+    monkeypatch.setattr(appmod, "build_recommendation", lambda *a, **k: "rec")
+
+    payload = {
+        "origin": "YYZ",
+        "destinations": [{"city": "Tokyo", "iata": "NRT"}],
+        "dep_dates": dep_dates,
+        "ret_dates": ret_dates,
+    }
+    resp, lines = _stream_lines(client, payload)
+    assert resp.status_code == 200
+
+    cell_lines = [l for l in lines if l.get("type") == "cell"]
+    assert len(cell_lines) == 4
+
+    # Verify each cell carries the price that was assigned to its (dep, ret)
+    for cell in cell_lines:
+        expected_price = _price_for(cell["dep"], cell["ret"])
+        assert cell["cheapest_cad"] == expected_price, (
+            f"Cell dep={cell['dep']} ret={cell['ret']} expected cheapest_cad="
+            f"{expected_price} but got {cell['cheapest_cad']}"
+        )
