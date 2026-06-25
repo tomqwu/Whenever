@@ -53,17 +53,14 @@ def test_watch_button_saves_trip(seed_live_server, page):
     assert "PEK" in trip_text and "Beijing" in trip_text
 
 
-def test_watch_seeds_baseline_with_cheapest_not_chosen(seed_live_server, page):
-    """The baseline POSTed to /api/watch must be cheapest_cad, never chosen_cad.
+def test_watch_baseline_is_derived_server_side(seed_live_server, page):
+    """The baseline is derived SERVER-SIDE from get_fare, never from the client.
 
-    The mocked backend prices every cell at cheapest_cad=8000 / nonstop_cad=8500
-    with a 25% nonstop threshold, so the deterministic best cell is a NONSTOP
-    pick (chosen='nonstop', chosen_cad=8500). check_all_watches re-fetches and
-    compares against cheapest_cad (8000), so seeding the baseline with the
-    premium chosen_cad (8500) would make an UNCHANGED fare look like an
-    8500→8000 drop on the very first scheduler run. The baseline must therefore
-    be 8000 (cheapest), captured here straight off the POST request body, and
-    confirmed again via GET /api/watch.
+    Per the REAL-DATA-ONLY guardrail the POST body no longer carries a client
+    last_price/last_source — the route re-derives the baseline by calling
+    get_fare itself. The mocked backend's get_fare returns cheapest_cad=8000 /
+    source="test", so the persisted record (GET /api/watch) reflects 8000/test
+    even though the client sends no price.
     """
     _run_search(page, seed_live_server)
 
@@ -86,17 +83,17 @@ def test_watch_seeds_baseline_with_cheapest_not_chosen(seed_live_server, page):
     finally:
         page.unroute("**/api/watch", _capture)
 
-    # Asserted off the intercepted request body: cheapest (8000), not 8500.
+    # The client must NOT send a baseline — it is server-derived now.
     assert posted.get("body") is not None, "POST /api/watch body was not captured"
-    assert posted["body"]["last_price"] == 8000
-    assert posted["body"]["last_price"] != 8500  # not the chosen/nonstop price
-    assert posted["body"]["last_source"] == "test"
+    assert "last_price" not in posted["body"]
+    assert "last_source" not in posted["body"]
 
-    # And confirmed through the persisted record (GET /api/watch).
+    # The persisted baseline comes from the server-side get_fare (8000/test).
     data = page.evaluate("async () => (await (await fetch('/api/watch')).json())")
     watches = data["watches"]
     assert len(watches) == 1
     assert watches[0]["last_price"] == 8000
+    assert watches[0]["last_source"] == "test"
 
 
 def test_watch_remove_button(seed_live_server, page):

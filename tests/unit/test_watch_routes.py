@@ -26,6 +26,25 @@ def watch_db(monkeypatch):
     db._conn.close()
 
 
+@pytest.fixture(autouse=True)
+def stub_fare(monkeypatch):
+    """Stub app.get_fare so the route's server-side baseline lookup is deterministic.
+
+    The REAL-DATA-ONLY guardrail makes /api/watch derive the baseline by calling
+    get_fare itself (never trusting the client). Default to a real-data-shaped hit
+    (8000 / travelpayouts) and record calls so tests can assert the real-data path
+    ran. Tests can mutate ``calls`` and the return value.
+    """
+    state = {"calls": [], "result": {"cheapest_cad": 8000, "source": "travelpayouts"}}
+
+    def fake_get_fare(origin, dest, dep, ret, adults, children):
+        state["calls"].append((origin, dest, dep, ret, adults, children))
+        return state["result"]
+
+    monkeypatch.setattr(appmod, "get_fare", fake_get_fare)
+    return state
+
+
 _VALID_BODY = {
     "origin": "YYZ",
     "dest_iata": "PVG",
@@ -35,8 +54,11 @@ _VALID_BODY = {
     "adults": 2,
     "child_ages": [11, 9],
     "threshold_pct": 25.0,
-    "last_price": 8000,
-    "last_source": "travelpayouts",
+    # last_price/last_source are intentionally present (and intentionally bogus
+    # in guardrail tests) to prove the server IGNORES them and re-derives the
+    # baseline from get_fare.
+    "last_price": 1,
+    "last_source": "client-spoofed",
 }
 
 
@@ -55,6 +77,8 @@ def test_add_watch_creates_row(client, watch_db):
     assert row["dest_city"] == "Shanghai"
     assert row["dep_date"] == "2026-12-12"
     assert row["ret_date"] == "2027-01-04"
+    # Baseline is the server-side get_fare value (8000/travelpayouts), NOT the
+    # bogus client-supplied last_price (1 / "client-spoofed") in _VALID_BODY.
     assert row["last_price"] == 8000
     assert row["last_source"] == "travelpayouts"
     # Ages are canonicalized (sorted) on store so uniqueness is order-insensitive.
@@ -71,7 +95,8 @@ def test_add_watch_minimal_body(client, watch_db):
     rows = watch_db.list_watches()
     assert len(rows) == 1
     assert rows[0]["adults"] == 2          # default
-    assert rows[0]["last_price"] is None
+    # Baseline derived server-side from the get_fare stub (real-data path).
+    assert rows[0]["last_price"] == 8000
     assert rows[0]["dest_city"] is None
 
 
@@ -117,44 +142,49 @@ def test_delete_watch_removes_it(client, watch_db):
     assert watch_db.list_watches() == []   # active_only -> removed
 
 
-def test_add_watch_non_numeric_last_price_400(client, watch_db):
-    """A non-numeric last_price (e.g. "8,000") is rejected with 400 and no row.
+def test_add_watch_ignores_fabricated_client_price(client, watch_db, stub_fare):
+    """REAL-DATA-ONLY guardrail: a fabricated client last_price is IGNORED.
 
-    Persisting TEXT in last_price would later crash check_all_watches' int<str
-    comparison and block every watch check, so the route must refuse it.
+    _VALID_BODY carries last_price=1 / last_source="client-spoofed". The route
+    must instead derive the baseline from its own get_fare lookup (8000/test)
+    and never let the client value reach watches.last_price.
     """
-    body = {**_VALID_BODY, "last_price": "8,000"}
-    r = client.post("/api/watch", json=body)
-    assert r.status_code == 400
-    assert r.get_json()["error"] == "last_price must be numeric"
-    assert watch_db.list_watches() == []   # nothing persisted on a 400
+    stub_fare["result"] = {"cheapest_cad": 8000, "source": "test"}
+    r = client.post("/api/watch", json={**_VALID_BODY, "last_price": 1,
+                                        "last_source": "client-spoofed"})
+    assert r.status_code == 200
+    row = watch_db.list_watches()[0]
+    assert row["last_price"] == 8000          # from get_fare, NOT the client's 1
+    assert row["last_source"] == "test"       # from get_fare, NOT "client-spoofed"
+    assert isinstance(row["last_price"], int)
+    assert not isinstance(row["last_price"], bool)
+    # The real-data path actually ran for this exact trip.
+    assert stub_fare["calls"] == [("YYZ", "PVG", "2026-12-12", "2027-01-04", 2, 2)]
 
 
-@pytest.mark.parametrize("value", [8000, 8000.0, "8000", "8000.5"])
-def test_add_watch_numeric_last_price_stored_as_int(client, watch_db, value):
-    """A numeric last_price is coerced to and stored as a Python int."""
-    r = client.post("/api/watch", json={**_VALID_BODY, "last_price": value})
+def test_add_watch_get_fare_no_data_leaves_baseline_unset(client, watch_db, stub_fare):
+    """When get_fare returns the no-data sentinel (cheapest_cad None), the
+    baseline is left UNSET (None) so the scheduler's first run can seed it from a
+    real fetch — even if the client sent a price.
+    """
+    stub_fare["result"] = {"cheapest_cad": None, "source": "amadeus"}
+    r = client.post("/api/watch", json={**_VALID_BODY, "last_price": 1})
+    assert r.status_code == 200
+    row = watch_db.list_watches()[0]
+    assert row["last_price"] is None
+    assert row["last_source"] is None
+    assert stub_fare["calls"]                 # get_fare was still consulted
+
+
+def test_add_watch_baseline_from_get_fare_float_coerced_to_int(client, watch_db, stub_fare):
+    """A float cheapest_cad from get_fare is coerced to a stored int baseline."""
+    stub_fare["result"] = {"cheapest_cad": 8000.5, "source": "kiwi"}
+    r = client.post("/api/watch", json=_VALID_BODY)
     assert r.status_code == 200
     row = watch_db.list_watches()[0]
     assert row["last_price"] == 8000
     assert isinstance(row["last_price"], int)
-    assert not isinstance(row["last_price"], bool)
-
-
-def test_add_watch_omitted_last_price_is_none(client, watch_db):
-    """last_price omitted -> stored as None (no baseline)."""
-    body = dict(_VALID_BODY)
-    body.pop("last_price")
-    r = client.post("/api/watch", json=body)
-    assert r.status_code == 200
-    assert watch_db.list_watches()[0]["last_price"] is None
-
-
-def test_add_watch_null_last_price_is_none(client, watch_db):
-    """Explicit null last_price -> stored as None."""
-    r = client.post("/api/watch", json={**_VALID_BODY, "last_price": None})
-    assert r.status_code == 200
-    assert watch_db.list_watches()[0]["last_price"] is None
+    assert row["last_source"] == "kiwi"
 
 
 def test_add_watch_bad_adults_400(client, watch_db):
@@ -405,18 +435,22 @@ def test_add_watch_closes_db_on_error(client, monkeypatch):
     assert closed["v"] is True
 
 
-def test_add_watch_seeds_baseless_existing_on_repost(client, watch_db):
-    """An existing active watch with no baseline (last_price=None) gets seeded
-    when a LATER POST for the same trip includes a numeric last_price. The route
-    returns the existing id with seeded=True and the row now carries the price.
+def test_add_watch_seeds_baseless_existing_from_get_fare(client, watch_db, stub_fare):
+    """An existing active watch with no baseline (last_price=None) gets seeded on
+    a LATER POST for the same trip — from the SERVER-SIDE get_fare lookup, NOT
+    the client. The route returns the existing id with seeded=True.
     """
-    body_no_price = {k: v for k, v in _VALID_BODY.items() if k != "last_price"}
-    first = client.post("/api/watch", json=body_no_price)
+    # First POST: get_fare has no data, so the row is created baseless.
+    stub_fare["result"] = {"cheapest_cad": None, "source": "amadeus"}
+    first = client.post("/api/watch", json=_VALID_BODY)
     first_id = first.get_json()["id"]
     assert watch_db.list_watches()[0]["last_price"] is None
 
-    # Re-POST the SAME trip, now WITH a baseline.
-    r = client.post("/api/watch", json={**_VALID_BODY, "last_price": 8000})
+    # Re-POST the SAME trip; now get_fare returns a real price (7000). The client
+    # still sends a bogus last_price=1, which must be ignored.
+    stub_fare["result"] = {"cheapest_cad": 7000, "source": "test"}
+    r = client.post("/api/watch", json={**_VALID_BODY, "last_price": 1,
+                                        "last_source": "client-spoofed"})
     assert r.status_code == 200
     body = r.get_json()
     assert body["id"] == first_id
@@ -425,18 +459,19 @@ def test_add_watch_seeds_baseless_existing_on_repost(client, watch_db):
 
     rows = watch_db.list_watches(active_only=True)
     assert len(rows) == 1
-    assert rows[0]["last_price"] == 8000
-    assert rows[0]["last_source"] == "travelpayouts"
+    assert rows[0]["last_price"] == 7000        # from get_fare, NOT the client's 1
+    assert rows[0]["last_source"] == "test"     # from get_fare, NOT "client-spoofed"
 
 
-def test_add_watch_does_not_overwrite_established_baseline(client, watch_db):
-    """A seeded/established baseline is never overwritten by a later POST with a
-    different last_price; the route returns existing without seeded.
+def test_add_watch_does_not_overwrite_established_baseline(client, watch_db, stub_fare):
+    """An established baseline is never overwritten by a later POST, even when
+    get_fare now returns a different price; the route returns existing w/o seeded.
     """
     first_id = client.post("/api/watch", json=_VALID_BODY).get_json()["id"]
     assert watch_db.list_watches()[0]["last_price"] == 8000
 
-    r = client.post("/api/watch", json={**_VALID_BODY, "last_price": 5000})
+    stub_fare["result"] = {"cheapest_cad": 5000, "source": "test"}
+    r = client.post("/api/watch", json=_VALID_BODY)
     assert r.status_code == 200
     body = r.get_json()
     assert body["id"] == first_id
@@ -445,12 +480,12 @@ def test_add_watch_does_not_overwrite_established_baseline(client, watch_db):
     assert watch_db.list_watches()[0]["last_price"] == 8000
 
 
-def test_add_watch_repost_without_price_leaves_baseless(client, watch_db):
-    """A repost that also omits last_price does not seed (nothing to seed with)."""
-    body_no_price = {k: v for k, v in _VALID_BODY.items() if k != "last_price"}
-    first_id = client.post("/api/watch", json=body_no_price).get_json()["id"]
+def test_add_watch_repost_no_data_leaves_baseless(client, watch_db, stub_fare):
+    """A repost where get_fare still has no data does not seed (nothing real)."""
+    stub_fare["result"] = {"cheapest_cad": None, "source": "amadeus"}
+    first_id = client.post("/api/watch", json=_VALID_BODY).get_json()["id"]
 
-    r = client.post("/api/watch", json=body_no_price)
+    r = client.post("/api/watch", json=_VALID_BODY)
     body = r.get_json()
     assert body["id"] == first_id
     assert body["existing"] is True
@@ -458,9 +493,9 @@ def test_add_watch_repost_without_price_leaves_baseless(client, watch_db):
     assert watch_db.list_watches()[0]["last_price"] is None
 
 
-def test_add_watch_seeds_via_integrityerror_backstop(client, watch_db, monkeypatch):
-    """The IntegrityError backstop path also seeds a baseless existing row when
-    the incoming POST carries a last_price.
+def test_add_watch_seeds_via_integrityerror_backstop(client, watch_db, monkeypatch, stub_fare):
+    """The IntegrityError backstop path also seeds a baseless existing row from
+    the server-side get_fare lookup (never the client price).
     """
     import sqlite3
 
@@ -482,9 +517,12 @@ def test_add_watch_seeds_via_integrityerror_backstop(client, watch_db, monkeypat
 
     monkeypatch.setattr(watch_db, "list_watches", flaky_list)
 
-    r = client.post("/api/watch", json={**_VALID_BODY, "last_price": 8000})
+    stub_fare["result"] = {"cheapest_cad": 8000, "source": "test"}
+    r = client.post("/api/watch", json={**_VALID_BODY, "last_price": 1})
     assert r.status_code == 200
     body = r.get_json()
     assert body["id"] == first_id
     assert body["seeded"] is True
-    assert real_list(active_only=True)[0]["last_price"] == 8000
+    seeded_row = real_list(active_only=True)[0]
+    assert seeded_row["last_price"] == 8000     # from get_fare, not the client's 1
+    assert seeded_row["last_source"] == "test"

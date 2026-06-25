@@ -889,15 +889,22 @@ def api_watch_add():
             child_ages.append(int(a))
         except (TypeError, ValueError):
             continue
-    # last_price seeds the baseline so the scheduler's first run can detect a
-    # drop. Store an int (or None) — never the raw body value.
-    last_price = b.get("last_price")
-    if last_price is not None:
-        try:
-            last_price = int(float(last_price))
-        except (TypeError, ValueError):
-            return jsonify({"error": "last_price must be numeric"}), 400
-    last_source = b.get("last_source")
+    # REAL-DATA-ONLY guardrail: never trust a client-supplied last_price. A
+    # direct/tampered POST could inject a fabricated baseline and trigger bogus
+    # drop alerts. Re-derive the baseline server-side from a real fare lookup
+    # (get_fare). Because the user just searched this trip, the cell is usually
+    # a cache HIT, so this is cheap and returns the same real price. The client's
+    # last_price/last_source are ignored entirely.
+    fare = get_fare(origin, dest_iata, dep_date, ret_date, adults, len(child_ages))
+    cheapest = fare.get("cheapest_cad")
+    if cheapest is not None:
+        last_price = int(float(cheapest))
+        last_source = fare.get("source")
+    else:
+        # No real data available — leave the baseline unset; the scheduler's
+        # first run will seed it from a real fetch.
+        last_price = None
+        last_source = None
 
     db = _watch_db()
     try:
@@ -931,9 +938,10 @@ def api_watch_add():
             """Return the JSON response for a matching active watch.
 
             If the existing watch has no baseline yet (last_price is None) and
-            this request carries a numeric last_price, seed the existing row's
-            baseline so the scheduler can detect the first real drop. An already
-            established baseline is never overwritten.
+            the server-side get_fare lookup produced a real price, seed the
+            existing row's baseline so the scheduler can detect the first real
+            drop. The seed value comes from get_fare (real data), never from the
+            client. An already established baseline is never overwritten.
             """
             seeded = False
             if existing.get("last_price") is None and last_price is not None:
