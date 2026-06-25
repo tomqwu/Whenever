@@ -243,7 +243,7 @@ def test_streaming_no_fare_card_finalized(nofare_live_server, page):
         timeout=15000,
     )
     assert page.inner_text("#card-price-1") == "—"
-    assert page.inner_text("#card-meta-1") == "no fares"
+    assert page.inner_text("#card-meta-1") == "no fares found"
     assert page.inner_text("#card-group-1") == "—"
 
     # No grid cell anywhere may still show the '…' loading placeholder.
@@ -251,10 +251,13 @@ def test_streaming_no_fare_card_finalized(nofare_live_server, page):
         "#grids td.loading", "els => els.length")
     assert loading_left == 0, f"{loading_left} cells still loading after done"
 
-    # The no-fare city's cells must render the n/a (err) style.
+    # The no-fare city's cells must render the calm no-data style (—), not the
+    # alarming red err/n/a style (#39).
     pek_na = page.eval_on_selector_all(
-        "#blk-1 td.err", "els => els.length")
-    assert pek_na > 0, "Expected Beijing cells to render as n/a"
+        "#blk-1 td.nodata", "els => els.length")
+    assert pek_na > 0, "Expected Beijing cells to render as calm no-data dashes"
+    assert page.eval_on_selector_all("#grids td.err", "els => els.length") == 0, \
+        "No-data cells must not use the alarming .err style"
 
     # Footer provenance must be restored (no flight API configured in tests).
     foot = page.inner_text("#foot")
