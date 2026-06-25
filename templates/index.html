@@ -224,6 +224,7 @@ $('#run').onclick = async () => {
   const bestByCityIdx = {};  // dest_index -> best cell so far
   let metaInfo = null;        // captured meta line (providers, pax, etc.)
   let sawNoData = false;      // true if any cell returned no fares
+  let succeeded = false;      // true once the stream finished cleanly
 
   try {
     const response = await fetch('/api/search/stream', {
@@ -301,11 +302,19 @@ $('#run').onclick = async () => {
             td.outerHTML = _cellHtml(evt, thr);
           }
         }
-        // Update best tracking for summary card
+        // Update best tracking for summary card. Cells arrive in as_completed
+        // order, so we apply the SAME deterministic tie-break the backend uses
+        // (lowest chosen_cad, then earliest position by dep index, then ret
+        // index) so the card + highlight match /api/search exactly on ties.
         if (evt.chosen_cad != null) {
+          const depIdx = metaInfo ? metaInfo.dep_dates.indexOf(evt.dep) : -1;
+          const retIdx = metaInfo ? metaInfo.ret_dates.indexOf(evt.ret) : -1;
           const prev = bestByCityIdx[di];
-          if (!prev || evt.chosen_cad < prev.chosen_cad) {
-            bestByCityIdx[di] = evt;
+          const isBetter = !prev || evt.chosen_cad < prev.chosen_cad ||
+            (evt.chosen_cad === prev.chosen_cad &&
+              (depIdx < prev.depIdx || (depIdx === prev.depIdx && retIdx < prev.retIdx)));
+          if (isBetter) {
+            bestByCityIdx[di] = Object.assign({ depIdx: depIdx, retIdx: retIdx }, evt);
             const priceEl = document.getElementById('card-price-' + di);
             const metaEl = document.getElementById('card-meta-' + di);
             const groupEl = document.getElementById('card-group-' + di);
@@ -322,10 +331,13 @@ $('#run').onclick = async () => {
         const rec = $('#rec');
         rec.style.display = 'block';
         rec.innerHTML = '<h3>Best-value pick</h3>' + (evt.text || '');
-        // Apply best-cell highlights
+        // Apply best-cell highlights to the deterministic best cell (matches
+        // backend tie-break). Clear any prior .best for this city first so the
+        // outline lands on the chosen cell, not an earlier-arriving tie.
         Object.entries(bestByCityIdx).forEach(([di, b]) => {
           const tbl = document.getElementById('tbl-' + di);
           if (tbl && b) {
+            tbl.querySelectorAll('td.best').forEach(td => td.classList.remove('best'));
             const td = tbl.querySelector('td[data-k="' + b.dep + '|' + b.ret + '"]');
             if (td) td.classList.add('best');
           }
@@ -333,6 +345,7 @@ $('#run').onclick = async () => {
 
       } else if (evt.type === 'done') {
         finalizeStream();
+        succeeded = true;
         $('#prog').style.width = '100%';
         setTimeout(() => { $('#prog').style.width = '0%'; }, 600);
       }
@@ -387,6 +400,11 @@ $('#run').onclick = async () => {
   } finally {
     $('#run').disabled = false;
     $('#runHint').textContent = '';
+    // Reset the progress bar on ALL exit paths (success, error, or a 400
+    // validation failure that took the early return). On success the `done`
+    // handler runs its own 100%→0% fade, so only reset here when the stream
+    // did NOT finish cleanly — otherwise we'd clobber that animation.
+    if (!succeeded) $('#prog').style.width = '0%';
   }
 };
 

@@ -81,6 +81,79 @@ def test_streaming_search_progress_bar(seed_live_server, page):
     assert width in ("0%", ""), f"Expected progress bar reset to 0%, got {width!r}"
 
 
+def test_streaming_best_tiebreak_matches_backend(seed_live_server, page):
+    """When every cell for a city ties on chosen_cad (the seed fixture returns a
+    constant fare), the summary card + the highlighted .best cell must resolve
+    to the SAME deterministic cell the backend picks: lowest chosen_cad, then
+    earliest dep index, then earliest ret index. With span 2x2 all four cells
+    tie, so the backend's min() over the dep-major flat grid picks the first
+    cell (earliest dep x earliest ret). Cells stream in as_completed order, so a
+    naive 'first to arrive' frontend could land elsewhere; assert it does not."""
+    page.goto(seed_live_server)
+    page.click("#loadCities")
+    page.wait_for_selector(".chip")
+    page.click("#run")
+
+    # Wait for the recommendation (stream complete + highlights applied).
+    page.wait_for_selector("#rec", state="visible", timeout=15000)
+    page.wait_for_function(
+        "() => document.querySelector('#grids td.best') !== null",
+        timeout=15000,
+    )
+
+    # The deterministic best cell = first dep (2026-12-12) x first ret
+    # (2027-01-04). For every city table, the single .best cell must be that key
+    # and the summary card meta must name those same two dates.
+    expected_key = "2026-12-12|2027-01-04"
+    best_keys = page.eval_on_selector_all(
+        "#grids td.best", "els => els.map(e => e.getAttribute('data-k'))")
+    assert best_keys, "Expected at least one highlighted .best cell"
+    assert all(k == expected_key for k in best_keys), \
+        f"Tied best highlight did not match backend cell {expected_key!r}: {best_keys!r}"
+
+    # Exactly one .best per city table (prior tie highlights must be cleared).
+    per_table = page.eval_on_selector_all(
+        "#grids table",
+        "tbls => tbls.map(t => t.querySelectorAll('td.best').length)")
+    assert all(n == 1 for n in per_table), \
+        f"Each city should have exactly one .best cell, got {per_table!r}"
+
+    # Summary card meta for the first city must reference the deterministic dates.
+    card_meta = page.inner_text("#card-meta-0")
+    assert "Dec" in card_meta and "12" in card_meta, \
+        f"Summary card best should name the earliest dep date: {card_meta!r}"
+    assert "Jan" in card_meta and "4" in card_meta, \
+        f"Summary card best should name the earliest ret date: {card_meta!r}"
+
+
+def test_streaming_progress_resets_on_400(seed_live_server, page):
+    """A failed (400) stream search must leave #prog reset to width 0 — the
+    early non-ok return previously skipped the only reset, leaving the bar
+    stuck. Clearing the departure date forces an empty dep_dates -> backend
+    400, exercising the !response.ok early-return path."""
+    page.goto(seed_live_server)
+    page.click("#loadCities")
+    page.wait_for_selector(".chip")
+
+    # The non-ok path calls alert(); auto-dismiss so the handler proceeds.
+    page.on("dialog", lambda d: d.dismiss())
+
+    # Clear the departure date -> dep_dates is empty -> backend returns 400.
+    page.fill("#depStart", "")
+    page.click("#run")
+
+    # The run button is re-enabled in finally, signalling the handler returned.
+    page.wait_for_function(
+        "() => { const b = document.querySelector('#run'); return b && !b.disabled; }",
+        timeout=15000,
+    )
+
+    # Progress bar must be reset to 0 on this failure path.
+    width = page.eval_on_selector("#prog", "el => el.style.width")
+    assert width in ("0%", ""), \
+        f"Expected #prog reset to 0% after a 400 failure, got {width!r}"
+
+
 def test_streaming_no_fare_card_finalized(nofare_live_server, page):
     """A city with no fares for every cell must finalize to '— / no fares / —'
     (never left on the '…' placeholder) once the stream completes."""
