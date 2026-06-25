@@ -190,6 +190,16 @@ SERPAPI_KEY = os.environ.get("SERPAPI_KEY")
 # RapidAPI flights-sky (Skyscanner data) — preferred provider (richest data).
 RAPIDAPI_KEY = os.environ.get("RAPIDAPI_KEY")
 RAPIDAPI_HOST = os.environ.get("RAPIDAPI_HOST", "flights-sky.p.rapidapi.com")
+# Skyscanner (flights-sky) async poll budget. The search session completes
+# asynchronously, so we poll search-incomplete until context.status == "complete".
+# Longer-but-BOUNDED: ~12 polls x 1.5s ~= 18s of waiting (enough for most routes,
+# incl. long-haul) so we don't needlessly fall back to serpapi and lose Skyscanner's
+# richer duration/airlines/layovers data. Still bounded — worst case is roughly
+# attempts*interval plus one per-poll request timeout — so a genuinely hung session
+# degrades to no-data in seconds-to-~tens-of-seconds, never minutes.
+SKYSCANNER_POLL_ATTEMPTS = int(os.environ.get("SKYSCANNER_POLL_ATTEMPTS", "12"))
+SKYSCANNER_POLL_INTERVAL = float(os.environ.get("SKYSCANNER_POLL_INTERVAL", "1.5"))
+SKYSCANNER_POLL_TIMEOUT = int(os.environ.get("SKYSCANNER_POLL_TIMEOUT", "8"))
 CURRENCY = os.environ.get("CURRENCY", "cad").lower()
 FARE_CACHE_TTL = int(os.environ.get("FARE_CACHE_TTL", "3600"))
 SEARCH_CONCURRENCY = int(os.environ.get("SEARCH_CONCURRENCY", "8"))
@@ -739,14 +749,19 @@ def skyscanner_fare(origin, dest, dep, ret, adults, children):
             return None
         poll_url = f"{base}/web/flights/search-incomplete"
         completed = False
-        for _ in range(8):
-            time.sleep(0.6)
+        # Longer-but-bounded budget: SKYSCANNER_POLL_ATTEMPTS x SKYSCANNER_POLL_INTERVAL
+        # (default ~12 x 1.5s ~= 18s) gives most routes — incl. long-haul — time to
+        # reach "complete" instead of falling back to serpapi. Still bounded: a short
+        # per-poll request timeout plus break-on-Timeout means a hung session can't run
+        # for minutes.
+        for _ in range(SKYSCANNER_POLL_ATTEMPTS):
+            time.sleep(SKYSCANNER_POLL_INTERVAL)
             # Short poll timeout so a hung/slow session can't tie up a search
-            # worker for ~8x30s; without it one fare cell could stall for minutes.
+            # worker for attempts x 30s; without it one fare cell could stall for minutes.
             pr = _skyscanner_get(
                 poll_url,
                 params={"sessionId": session_id},
-                timeout=8,
+                timeout=SKYSCANNER_POLL_TIMEOUT,
             )
             if pr is None:
                 # A request-level timeout/network error returns None. Don't keep

@@ -1150,6 +1150,94 @@ def test_skyscanner_fare_search_uses_capped_timeout(monkeypatch, fake_resp):
     assert search_timeout["t"] == 15
 
 
+def test_skyscanner_fare_poll_attempts_is_configurable(monkeypatch, fake_resp):
+    """The poll loop honours SKYSCANNER_POLL_ATTEMPTS: with attempts=3 and a session
+    that never completes, at most 3 poll requests are made (bounded by config)."""
+    monkeypatch.setattr(appmod, "RAPIDAPI_KEY", "k")
+    monkeypatch.setattr(appmod, "SKYSCANNER_POLL_ATTEMPTS", 3)
+    monkeypatch.setattr(appmod, "SKYSCANNER_POLL_INTERVAL", 0.0)
+    sleeps = []
+    monkeypatch.setattr(appmod.time, "sleep", lambda s, *a, **k: sleeps.append(s))
+    poll_count = {"n": 0}
+
+    def fake_get(url, headers=None, params=None, timeout=None):
+        if url.endswith("/web/flights/search-roundtrip"):
+            return fake_resp(
+                {"data": {"context": {"status": "incomplete", "sessionId": "sid"}}},
+                status=200)
+        poll_count["n"] += 1
+        return fake_resp({"data": {"context": {"status": "incomplete"}}}, status=200)
+
+    monkeypatch.setattr(appmod.requests, "get", fake_get)
+    res = appmod.skyscanner_fare("YYZ", "LAX", "2026-08-07", "2026-08-09", 1, 0)
+
+    assert res is None
+    assert poll_count["n"] == 3  # exactly SKYSCANNER_POLL_ATTEMPTS, not the old 8
+    # sleeps use the configured interval
+    assert sleeps == [0.0, 0.0, 0.0]
+
+
+def test_skyscanner_fare_poll_interval_is_used(monkeypatch, fake_resp):
+    """The poll loop sleeps SKYSCANNER_POLL_INTERVAL between attempts."""
+    monkeypatch.setattr(appmod, "RAPIDAPI_KEY", "k")
+    monkeypatch.setattr(appmod, "SKYSCANNER_POLL_ATTEMPTS", 4)
+    monkeypatch.setattr(appmod, "SKYSCANNER_POLL_INTERVAL", 2.5)
+    sleeps = []
+    monkeypatch.setattr(appmod.time, "sleep", lambda s, *a, **k: sleeps.append(s))
+    complete = _sky_complete_payload()
+    poll_count = {"n": 0}
+
+    def fake_get(url, headers=None, params=None, timeout=None):
+        if url.endswith("/web/flights/search-roundtrip"):
+            return fake_resp(
+                {"data": {"context": {"status": "incomplete", "sessionId": "sid"}}},
+                status=200)
+        poll_count["n"] += 1
+        # complete on the 2nd poll → stops early
+        if poll_count["n"] >= 2:
+            return fake_resp(complete, status=200)
+        return fake_resp({"data": {"context": {"status": "incomplete"}}}, status=200)
+
+    monkeypatch.setattr(appmod.requests, "get", fake_get)
+    res = appmod.skyscanner_fare("YYZ", "LAX", "2026-08-07", "2026-08-09", 1, 0)
+
+    assert res is not None
+    # Completed on poll 2 → only 2 polls, only 2 sleeps, each the configured interval.
+    assert poll_count["n"] == 2
+    assert sleeps == [2.5, 2.5]
+
+
+def test_skyscanner_fare_poll_timeout_is_configurable(monkeypatch, fake_resp):
+    """The poll request timeout honours SKYSCANNER_POLL_TIMEOUT (default 8)."""
+    monkeypatch.setattr(appmod, "RAPIDAPI_KEY", "k")
+    monkeypatch.setattr(appmod, "SKYSCANNER_POLL_TIMEOUT", 11)
+    monkeypatch.setattr(appmod, "SKYSCANNER_POLL_INTERVAL", 0.0)
+    monkeypatch.setattr(appmod.time, "sleep", lambda *_a, **_k: None)
+    complete = _sky_complete_payload()
+    poll_timeouts = []
+
+    def fake_get(url, headers=None, params=None, timeout=None):
+        if url.endswith("/web/flights/search-roundtrip"):
+            return fake_resp(
+                {"data": {"context": {"status": "incomplete", "sessionId": "sid"}}},
+                status=200)
+        poll_timeouts.append(timeout)
+        return fake_resp(complete, status=200)
+
+    monkeypatch.setattr(appmod.requests, "get", fake_get)
+    res = appmod.skyscanner_fare("YYZ", "LAX", "2026-08-07", "2026-08-09", 1, 0)
+
+    assert res is not None
+    assert poll_timeouts == [11]
+
+
+def test_skyscanner_fare_poll_config_defaults():
+    """The shipped defaults are the longer-but-bounded budget (12 x 1.5s, 8s timeout)."""
+    assert appmod.SKYSCANNER_POLL_ATTEMPTS == 12
+    assert appmod.SKYSCANNER_POLL_INTERVAL == 1.5
+    assert appmod.SKYSCANNER_POLL_TIMEOUT == 8
+
+
 def test_skyscanner_tried_first_in_provider_chain(monkeypatch):
     """skyscanner_fare is called FIRST — before serpapi, amadeus, travelpayouts, kiwi."""
     call_order = []
