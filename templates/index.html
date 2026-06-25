@@ -627,6 +627,11 @@ function restoreFromHash() {
   renderKids(ages);
 
   // cities: keep only entries with a valid 3-letter IATA; city coerced + capped.
+  // A share link is URL-controlled, so a crafted hash could list hundreds of
+  // valid codes. Each restored city auto-runs cities × dep_span × ret_span fare
+  // lookups, so cap the restored set to a small bound (matches the China seed
+  // size) to keep opening any shared link from queuing excessive backend work.
+  const MAX_SHARE_CITIES = 12;
   if (Array.isArray(obj.cities)) {
     const cities = obj.cities
       .map(c => {
@@ -635,7 +640,8 @@ function restoreFromHash() {
         if (iata === undefined) return null;
         return { city: _vStr(c.city, 80) || iata, iata: iata, on: true };
       })
-      .filter(Boolean);
+      .filter(Boolean)
+      .slice(0, MAX_SHARE_CITIES);
     if (cities.length > 0) {
       CITIES = cities;
       drawChips();

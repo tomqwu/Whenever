@@ -141,6 +141,37 @@ def test_oversized_hash_falls_back_gracefully(live_server, page):
     assert page.query_selector(".chip") is not None
 
 
+def test_share_hash_cities_capped_to_bound_auto_run(live_server, page):
+    """A crafted share link with many valid city codes must not auto-run an
+    unbounded search. restoreFromHash caps the restored set to MAX_SHARE_CITIES
+    (12), so no more than 12 chips/city blocks are ever restored regardless of
+    how many codes the URL hash carries."""
+    import json, urllib.parse
+    # 50 distinct valid 3-letter IATA codes (AAA, AAB, ... 50 entries).
+    codes = []
+    for i in range(50):
+        a = chr(ord("A") + (i // 26) % 26)
+        b = chr(ord("A") + i % 26)
+        codes.append("A" + a + b)
+    share = {
+        "depCity": "Toronto", "depCode": "YYZ", "country": "China",
+        "cities": [{"city": "City" + c, "iata": c} for c in codes],
+        "adults": 2, "child_ages": [], "families": 1,
+        "dep_start": "2026-12-12", "dep_span": 2,
+        "ret_start": "2027-01-04", "ret_span": 2,
+        "nonstop_threshold": 25,
+    }
+    hash_val = "#s=" + urllib.parse.quote(json.dumps(share))
+    page.goto(live_server + "/" + hash_val)
+    # Auto-run fires; wait for it to populate.
+    page.wait_for_selector(".chip.on")
+    page.wait_for_selector("#summary .card")
+    page.wait_for_timeout(500)
+    # No more than MAX_SHARE_CITIES (12) cities restored / rendered.
+    assert len(page.query_selector_all(".chip")) <= 12
+    assert len(page.query_selector_all("#grids .cityblock")) <= 12
+
+
 def test_share_hash_city_xss_is_neutralized(live_server, page):
     """A crafted share link with an <img onerror> city must NOT execute."""
     import json, urllib.parse
