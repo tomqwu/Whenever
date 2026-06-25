@@ -5,6 +5,7 @@ They describe the required contract; each will fail (ImportError or
 AssertionError) until app.py gains the rate-limiting code.
 """
 import time
+import threading
 import pytest
 import app as appmod
 
@@ -170,6 +171,7 @@ def test_search_bucket_429_has_retry_after_header(client, monkeypatch):
 def test_different_ips_have_independent_buckets(client, monkeypatch):
     """Two different client IPs each get their own rate bucket."""
     monkeypatch.setattr(appmod, "RATE_LIMIT_ENABLED", True)
+    monkeypatch.setattr(appmod, "TRUST_PROXY", True)
     monkeypatch.setattr(appmod, "SEARCH_RATE_PER_MIN", 1)
     monkeypatch.setattr(appmod, "RATE_LIMIT_WINDOW", 60)
     monkeypatch.setattr(appmod, "run_search", lambda **kw: {"cells": [], "recommendation": None})
@@ -190,8 +192,9 @@ def test_different_ips_have_independent_buckets(client, monkeypatch):
 
 
 def test_xff_first_hop_used(client, monkeypatch):
-    """Only the first IP in X-Forwarded-For is used as client identity."""
+    """Only the first IP in X-Forwarded-For is used as client identity (TRUST_PROXY)."""
     monkeypatch.setattr(appmod, "RATE_LIMIT_ENABLED", True)
+    monkeypatch.setattr(appmod, "TRUST_PROXY", True)
     monkeypatch.setattr(appmod, "SEARCH_RATE_PER_MIN", 1)
     monkeypatch.setattr(appmod, "RATE_LIMIT_WINDOW", 60)
     monkeypatch.setattr(appmod, "run_search", lambda **kw: {"cells": [], "recommendation": None})
@@ -206,6 +209,102 @@ def test_xff_first_hop_used(client, monkeypatch):
     r2 = client.post("/api/search", json=_SEARCH_BODY,
                       headers={"X-Forwarded-For": "10.0.0.1, 192.168.0.1"})
     assert r2.status_code == 429
+
+
+# ---------------------------------------------------------------------------
+# TRUST_PROXY: X-Forwarded-For is ignored by default (anti-spoofing)
+# ---------------------------------------------------------------------------
+
+def test_xff_ignored_by_default_keyed_on_remote_addr(client, monkeypatch):
+    """With TRUST_PROXY False (default), a spoofed X-Forwarded-For is ignored:
+    two requests carrying DIFFERENT spoofed XFF but the same test-client
+    remote_addr share the SAME bucket, so the limit still applies and an
+    attacker cannot rotate XFF to bypass 429s."""
+    monkeypatch.setattr(appmod, "RATE_LIMIT_ENABLED", True)
+    monkeypatch.setattr(appmod, "TRUST_PROXY", False)
+    monkeypatch.setattr(appmod, "SEARCH_RATE_PER_MIN", 1)
+    monkeypatch.setattr(appmod, "RATE_LIMIT_WINDOW", 60)
+    monkeypatch.setattr(appmod, "run_search", lambda **kw: {"cells": [], "recommendation": None})
+    appmod._rate_state.clear()
+
+    # First request with one spoofed XFF — consumes the single slot.
+    r1 = client.post("/api/search", json=_SEARCH_BODY,
+                     headers={"X-Forwarded-For": "1.2.3.4"})
+    assert r1.status_code == 200
+
+    # Second request rotates the spoofed XFF to a totally different value, but
+    # since the header is ignored both are keyed on remote_addr (127.0.0.1):
+    # the limit still bites.
+    r2 = client.post("/api/search", json=_SEARCH_BODY,
+                     headers={"X-Forwarded-For": "9.9.9.9"})
+    assert r2.status_code == 429
+
+    # Confirm the bucket key is the socket peer, not the spoofed header.
+    assert ("127.0.0.1", "search") in appmod._rate_state
+    assert ("1.2.3.4", "search") not in appmod._rate_state
+    assert ("9.9.9.9", "search") not in appmod._rate_state
+
+
+def test_xff_used_as_key_when_trust_proxy_true(client, monkeypatch):
+    """With TRUST_PROXY True, the XFF first hop IS the key: distinct XFF first
+    hops get distinct buckets (behind a trusted proxy)."""
+    monkeypatch.setattr(appmod, "RATE_LIMIT_ENABLED", True)
+    monkeypatch.setattr(appmod, "TRUST_PROXY", True)
+    monkeypatch.setattr(appmod, "SEARCH_RATE_PER_MIN", 1)
+    monkeypatch.setattr(appmod, "RATE_LIMIT_WINDOW", 60)
+    monkeypatch.setattr(appmod, "run_search", lambda **kw: {"cells": [], "recommendation": None})
+    appmod._rate_state.clear()
+
+    # First XFF identity hits its limit.
+    assert client.post("/api/search", json=_SEARCH_BODY,
+                       headers={"X-Forwarded-For": "1.2.3.4"}).status_code == 200
+    assert client.post("/api/search", json=_SEARCH_BODY,
+                       headers={"X-Forwarded-For": "1.2.3.4"}).status_code == 429
+
+    # A distinct XFF first hop is a distinct bucket and still succeeds.
+    assert client.post("/api/search", json=_SEARCH_BODY,
+                       headers={"X-Forwarded-For": "5.6.7.8"}).status_code == 200
+    assert ("1.2.3.4", "search") in appmod._rate_state
+    assert ("5.6.7.8", "search") in appmod._rate_state
+
+
+# ---------------------------------------------------------------------------
+# Concurrency: lock makes check/append atomic
+# ---------------------------------------------------------------------------
+
+def test_rate_lock_is_a_lock():
+    """A module-level threading lock guards the count-and-record sequence."""
+    assert isinstance(appmod._rate_lock, type(threading.Lock()))
+
+
+def test_concurrent_same_ip_respects_limit(client, monkeypatch):
+    """Many threads hitting a limited endpoint with the same IP: the number of
+    200s never exceeds the limit because the lock makes check/append atomic."""
+    limit = 5
+    monkeypatch.setattr(appmod, "RATE_LIMIT_ENABLED", True)
+    monkeypatch.setattr(appmod, "TRUST_PROXY", False)
+    monkeypatch.setattr(appmod, "SEARCH_RATE_PER_MIN", limit)
+    monkeypatch.setattr(appmod, "RATE_LIMIT_WINDOW", 60)
+    monkeypatch.setattr(appmod, "run_search", lambda **kw: {"cells": [], "recommendation": None})
+    appmod._rate_state.clear()
+
+    results = []
+    barrier = threading.Barrier(20)
+
+    def hit():
+        barrier.wait()  # release all threads as simultaneously as possible
+        r = client.post("/api/search", json=_SEARCH_BODY)
+        results.append(r.status_code)
+
+    threads = [threading.Thread(target=hit) for _ in range(20)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    ok = results.count(200)
+    assert ok == limit, f"expected exactly {limit} successes, got {ok}: {results}"
+    assert results.count(429) == 20 - limit
 
 
 # ---------------------------------------------------------------------------

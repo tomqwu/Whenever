@@ -7,7 +7,7 @@ LLM via Ollama (default model: qwen3:8b). Fares come from Amadeus if
 credentials are set, otherwise from clearly-labeled AI estimates. Every price
 deep-links to a real Kayak search for booking.
 """
-import os, re, json, time, datetime as dt, logging, concurrent.futures, sqlite3
+import os, re, json, time, datetime as dt, logging, concurrent.futures, sqlite3, threading
 from functools import lru_cache, wraps
 import requests
 import yaml
@@ -220,6 +220,9 @@ PORT = int(os.environ.get("PORT", "5001"))
 #                       (/api/search, /api/search/stream, /api/export/*).
 # API_RATE_PER_MIN    — max requests per window for the "api" bucket
 #                       (/api/top-cities, /api/suggest, /api/resolve, /api/watch*).
+# TRUST_PROXY         — set true ONLY behind a trusted proxy that sets
+#                       X-Forwarded-For; otherwise XFF is ignored and the bucket
+#                       keys on the real socket peer (unspoofable). Default false.
 # / and /api/health are exempt.
 def _parse_bool_env(name, default=True):
     v = os.environ.get(name, "").strip().lower()
@@ -232,8 +235,20 @@ RATE_LIMIT_WINDOW: int = int(os.environ.get("RATE_LIMIT_WINDOW", "60"))
 SEARCH_RATE_PER_MIN: int = int(os.environ.get("SEARCH_RATE_PER_MIN", "10"))
 API_RATE_PER_MIN: int = int(os.environ.get("API_RATE_PER_MIN", "60"))
 
+# Whether to trust the client-supplied X-Forwarded-For header for client-IP
+# identity.  Default FALSE: a client can rotate/spoof XFF to bypass 429s or burn
+# another user's quota, so by default we key on the real socket peer
+# (request.remote_addr).  Set TRUST_PROXY=true ONLY when the app sits behind a
+# trusted reverse proxy that sets X-Forwarded-For itself.
+TRUST_PROXY: bool = os.environ.get("TRUST_PROXY", "").lower() in ("1", "true", "yes")
+
 # Module-level sliding-window state: (client_ip, bucket_name) -> [timestamp, ...]
 _rate_state: dict = {}
+
+# Guards the prune -> check -> append sequence so the count-and-record is atomic
+# under a threaded WSGI server (two same-IP requests can't both pass the limit
+# check before either appends).
+_rate_lock = threading.Lock()
 
 
 def _rate_time() -> float:
@@ -242,10 +257,18 @@ def _rate_time() -> float:
 
 
 def _client_ip() -> str:
-    """Return the first-hop client IP from X-Forwarded-For or REMOTE_ADDR."""
-    xff = request.headers.get("X-Forwarded-For", "")
-    if xff:
-        return xff.split(",")[0].strip()
+    """Return the client IP used as the rate-limit bucket key.
+
+    By default (TRUST_PROXY=False) the client-supplied X-Forwarded-For header is
+    ignored entirely and the real socket peer (request.remote_addr) is used, so
+    a client cannot rotate/spoof XFF to bypass limits.  Only when TRUST_PROXY is
+    True (app behind a trusted proxy that sets XFF) do we use the FIRST hop of
+    X-Forwarded-For.
+    """
+    if TRUST_PROXY:
+        xff = request.headers.get("X-Forwarded-For", "")
+        if xff:
+            return xff.split(",")[0].strip()
     return request.remote_addr or "127.0.0.1"
 
 
@@ -269,21 +292,26 @@ def rate_limited(bucket: str, limit_fn):
             window = RATE_LIMIT_WINDOW
             limit = limit_fn()
 
-            # Prune timestamps outside the sliding window
-            ts_list = _rate_state.get(key, [])
-            ts_list = [t for t in ts_list if now - t < window]
+            # Guard prune -> check -> append so the count-and-record is atomic:
+            # under a threaded WSGI server two same-IP requests must not both
+            # pass the limit check before either appends.  Only the fast dict
+            # ops are held under the lock.
+            with _rate_lock:
+                # Prune timestamps outside the sliding window
+                ts_list = _rate_state.get(key, [])
+                ts_list = [t for t in ts_list if now - t < window]
 
-            if len(ts_list) >= limit:
-                # Compute seconds until the oldest timestamp ages out
-                oldest = ts_list[0]
-                retry_after = max(1, int(oldest + window - now) + 1)
-                resp = jsonify({"error": "rate limit exceeded, slow down"})
-                resp.status_code = 429
-                resp.headers["Retry-After"] = str(retry_after)
-                return resp
+                if len(ts_list) >= limit:
+                    # Compute seconds until the oldest timestamp ages out
+                    oldest = ts_list[0]
+                    retry_after = max(1, int(oldest + window - now) + 1)
+                    resp = jsonify({"error": "rate limit exceeded, slow down"})
+                    resp.status_code = 429
+                    resp.headers["Retry-After"] = str(retry_after)
+                    return resp
 
-            ts_list.append(now)
-            _rate_state[key] = ts_list
+                ts_list.append(now)
+                _rate_state[key] = ts_list
             return fn(*args, **kwargs)
         return wrapper
     return decorator

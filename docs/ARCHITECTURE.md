@@ -140,6 +140,7 @@ the nonstop is "chosen"; otherwise the cheapest connection is chosen. Threshold 
 | `RATE_LIMIT_WINDOW` | Sliding-window size in seconds for rate limiting. | `60` |
 | `SEARCH_RATE_PER_MIN` | Max requests per window for the **search** bucket (`/api/search`, `/api/search/stream`, `/api/export/csv`, `/api/export/pdf`). Exceeding this returns HTTP 429 + `Retry-After`. | `10` |
 | `API_RATE_PER_MIN` | Max requests per window for the **api** bucket (`/api/top-cities`, `/api/suggest`, `/api/resolve`, `/api/watch` POST/GET, `/api/watch/<id>` DELETE). | `60` |
+| `TRUST_PROXY` | Whether to trust the client-supplied `X-Forwarded-For` header for client-IP identity. Set to `1`/`true`/`yes` **only** when the app sits behind a trusted reverse proxy that sets `X-Forwarded-For` itself. Default **false**: XFF is ignored entirely and the rate-limit bucket keys on the real socket peer (`REMOTE_ADDR`), so a client cannot rotate/spoof the header to bypass 429s or burn another user's quota. | `false` |
 
 ## Price Watch
 
@@ -233,8 +234,9 @@ A lightweight in-memory per-IP sliding-window rate limiter (no new dependencies)
 **Exempt:** `/` and `/api/health`.
 
 **Behavior:**
-- Client IP = first hop of `X-Forwarded-For`, or `REMOTE_ADDR`.
+- Client IP = the real socket peer (`REMOTE_ADDR`) by default. The client-supplied `X-Forwarded-For` header is **ignored** unless `TRUST_PROXY` is set true (app behind a trusted proxy that sets XFF), in which case the **first hop** of `X-Forwarded-For` is used. This prevents a client from rotating/spoofing XFF to evade rate limits.
 - Sliding window: timestamps older than `RATE_LIMIT_WINDOW` seconds are pruned on each request.
+- The prune → check → append sequence runs under a module-level `threading.Lock` (`_rate_lock`) so the count-and-record is atomic under a threaded WSGI server (two same-IP requests cannot both pass the limit check before either records).
 - If the count ≥ the bucket limit, returns `HTTP 429` with JSON `{"error": "rate limit exceeded, slow down"}` and a `Retry-After` header (seconds until the oldest timestamp ages out).
 - For `/api/search/stream`, the 429 is returned **before** any streaming begins (the decorator runs first).
 - Memory hygiene: pruning on every call keeps per-IP bucket lists bounded to at most `limit` entries.
