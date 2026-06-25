@@ -107,6 +107,7 @@ td.err{color:#b94a48;font-size:11px}
       <button id="run">Find best value</button>
       <button id="exportPdf" class="sec" disabled>&#8203;&#11015; PDF</button>
       <button id="exportCsv" class="sec" disabled>&#8203;&#11015; CSV</button>
+      <button id="copyLink" class="sec" disabled>&#128279; Copy link</button>
       <span class="hint" id="runHint"></span>
     </div>
   </div>
@@ -123,12 +124,27 @@ const $ = s => document.querySelector(s);
 let CITIES = [];   // [{city,iata,on}]
 let LAST = null;
 let LAST_PAYLOAD = null;  // last submitted search payload, used by export buttons
+let SHARE_SNAPSHOT = null;  // immutable share state captured at search start, written to the URL hash on `done`
 
 function fmtDate(iso){
   const d = new Date(iso+'T00:00:00');
   return d.toLocaleDateString('en-CA',{month:'short',day:'numeric'});
 }
 function money(v){ return v==null?'—':'$'+Math.round(v).toLocaleString('en-CA'); }
+
+// escapeHtml: HTML-escape a value so no untrusted string (from the server,
+// the model, or a URL-derived share hash) can reach the DOM as live markup.
+// Escapes & < > " ' — the five chars that matter inside element text and
+// double/single-quoted attributes. Coerces non-strings to string first.
+function escapeHtml(s) {
+  if (s == null) return '';
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
 
 // mdInline: safely render basic markdown from model output into HTML.
 // 1. HTML-escape first (XSS safety) so no raw tags from model can execute.
@@ -137,8 +153,8 @@ function money(v){ return v==null?'—':'$'+Math.round(v).toLocaleString('en-CA'
 // 4. Strip any leftover stray **.
 function mdInline(s) {
   if (!s) return '';
-  // Step 1: HTML-escape
-  const esc = s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  // Step 1: HTML-escape (shared helper — see escapeHtml above / #34)
+  const esc = escapeHtml(s);
   // Step 2: **bold** → <strong>bold</strong>
   const bolded = esc.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
   // Step 3: newlines → <br>
@@ -167,10 +183,10 @@ async function health(){
     const s=$('#status');
     const prov = (h.providers||[]);
     let modelPart = h.ollama
-      ? `Local model <b>${h.model}</b> connected (analyzes results)`
-      : `<span class="warn">Ollama not reachable</span> — run <code>ollama serve</code> &amp; pull <b>${h.model}</b>`;
+      ? `Local model <b>${escapeHtml(h.model)}</b> connected (analyzes results)`
+      : `<span class="warn">Ollama not reachable</span> — run <code>ollama serve</code> &amp; pull <b>${escapeHtml(h.model)}</b>`;
     let farePart = prov.length
-      ? `flight data: <b>${prov.join(', ')}</b>`
+      ? `flight data: <b>${escapeHtml(prov.join(', '))}</b>`
       : `<span class="warn">no flight API configured</span> — set TRAVELPAYOUTS_TOKEN or Amadeus keys to fetch real prices`;
     s.innerHTML = modelPart + ' · ' + farePart;
   }catch(e){ $('#status').innerHTML='<span class="warn">Backend not reachable.</span>'; }
@@ -209,13 +225,14 @@ $('#depCity').addEventListener('change', async ()=>{
 });
 
 function _cellHtml(c, thr) {
-  if (c.cheapest_cad == null) return '<td class="err" data-k="' + c.dep + '|' + c.ret + '">n/a</td>';
+  const key = escapeHtml(c.dep + '|' + c.ret);
+  if (c.cheapest_cad == null) return '<td class="err" data-k="' + key + '">n/a</td>';
   const pickNS = c.nonstop_cad && c.cheapest_cad && c.nonstop_cad <= c.cheapest_cad * thr;
   const cls = pickNS ? 'pick-ns' : '';
-  let inner = '<a class="price" href="' + c.book + '" target="_blank" rel="noopener">' + money(c.cheapest_cad) + '</a>' +
+  let inner = '<a class="price" href="' + escapeHtml(c.book) + '" target="_blank" rel="noopener">' + money(c.cheapest_cad) + '</a>' +
     '<div class="stops">' + (c.stops != null ? c.stops + ' stop' + (c.stops === 1 ? '' : 's') : '') + '</div>';
   if (c.nonstop_cad) inner += '<div class="ns">ns ' + money(c.nonstop_cad) + '</div>';
-  return '<td class="' + cls + '" data-k="' + c.dep + '|' + c.ret + '">' + inner + '</td>';
+  return '<td class="' + cls + '" data-k="' + key + '">' + inner + '</td>';
 }
 
 $('#run').onclick = async () => {
@@ -233,12 +250,31 @@ $('#run').onclick = async () => {
     ret_start: $('#retStart').value, ret_span: parseInt($('#retSpan').value) || 2,
     nonstop_threshold: parseFloat($('#thresh').value) || 25,
   };
+  // Snapshot the share state NOW, at search start, from the current DOM/CITIES.
+  // The results being streamed correspond to this submitted request, so the
+  // Copy-link hash must encode this exact state even if the user edits the form
+  // or toggles chips mid-stream. Written to the URL hash on `done` (never re-read).
+  SHARE_SNAPSHOT = {
+    depCity: $('#depCity').value.trim(),
+    depCode: $('#depCode').value.trim().toUpperCase(),
+    country: $('#country').value.trim(),
+    cities: dests.map(c => ({ city: c.city, iata: c.iata })),
+    adults: parseInt($('#adults').value) || 1,
+    child_ages: kidAges(),
+    families: fams,
+    dep_start: $('#depStart').value,
+    dep_span: parseInt($('#depSpan').value) || 2,
+    ret_start: $('#retStart').value,
+    ret_span: parseInt($('#retSpan').value) || 2,
+    nonstop_threshold: parseFloat($('#thresh').value) || 25,
+  };
   // Clear any stale export state: a new search invalidates the previous result.
   // LAST_PAYLOAD/export buttons are only re-armed on the `done` event below, so
   // if this search 400s/aborts/throws the buttons stay disabled.
   LAST_PAYLOAD = null;
   $('#exportPdf').disabled = true;
   $('#exportCsv').disabled = true;
+  $('#copyLink').disabled = true;
   $('#run').disabled = true;
   $('#runHint').textContent = 'Searching ' + dests.length + ' cities…';
   $('#prog').style.width = '5%';
@@ -290,7 +326,7 @@ $('#run').onclick = async () => {
           const card = document.createElement('div');
           card.className = 'card';
           card.id = 'card-' + di;
-          card.innerHTML = '<div class="city">' + r.city + ' <small>(' + r.iata + ')</small></div>' +
+          card.innerHTML = '<div class="city">' + escapeHtml(r.city) + ' <small>(' + escapeHtml(r.iata) + ')</small></div>' +
             '<div class="price" id="card-price-' + di + '">…</div>' +
             '<div class="meta" id="card-meta-' + di + '">searching…</div>' +
             '<div class="meta">group ×' + fams + ': <span id="card-group-' + di + '">…</span></div>';
@@ -300,14 +336,14 @@ $('#run').onclick = async () => {
           const blk = document.createElement('div');
           blk.className = 'cityblock';
           blk.id = 'blk-' + di;
-          let html = '<h2>' + r.city + ' <small>(' + r.iata + ')</small></h2>' +
+          let html = '<h2>' + escapeHtml(r.city) + ' <small>(' + escapeHtml(r.iata) + ')</small></h2>' +
             '<table id="tbl-' + di + '"><thead><tr><th>dep \\ ret</th>' +
-            evt.ret_dates.map(d => '<th>' + fmtDate(d) + '</th>').join('') +
+            evt.ret_dates.map(d => '<th>' + escapeHtml(fmtDate(d)) + '</th>').join('') +
             '</tr></thead><tbody>';
           evt.dep_dates.forEach(dep => {
-            html += '<tr><td class="rowh">' + fmtDate(dep) + '</td>';
+            html += '<tr><td class="rowh">' + escapeHtml(fmtDate(dep)) + '</td>';
             evt.ret_dates.forEach(ret => {
-              html += '<td class="loading" data-k="' + dep + '|' + ret + '">…</td>';
+              html += '<td class="loading" data-k="' + escapeHtml(dep + '|' + ret) + '">…</td>';
             });
             html += '</tr>';
           });
@@ -378,6 +414,11 @@ $('#run').onclick = async () => {
         LAST_PAYLOAD = payload;
         $('#exportPdf').disabled = false;
         $('#exportCsv').disabled = false;
+        // Write share state to the URL hash from the immutable snapshot captured
+        // at search start — never re-read the live DOM/CITIES here, or an edit
+        // made mid-stream would encode a search different from the results shown.
+        history.replaceState(null, '', '#s=' + encodeURIComponent(JSON.stringify(SHARE_SNAPSHOT)));
+        $('#copyLink').disabled = false;
       }
     }
 
@@ -404,7 +445,7 @@ $('#run').onclick = async () => {
         const prov = (metaInfo.providers || []);
         const pax = (metaInfo.adults || 0) + (metaInfo.child_ages || []).length;
         $('#foot').innerHTML = (prov.length
-            ? 'Live flight data via <b>' + prov.join(', ') + '</b>. The model analyzes these real fares — it does not generate prices. '
+            ? 'Live flight data via <b>' + escapeHtml(prov.join(', ')) + '</b>. The model analyzes these real fares — it does not generate prices. '
             : '<span class="estimate-flag">no flight API</span> Set TRAVELPAYOUTS_TOKEN (or Amadeus keys) so the app can fetch real prices. ') +
           (sawNoData ? '<span class="warn">Some cells returned no fares from the API. </span>' : '') +
           'Per family of ' + pax + '. Prices CAD · click any price to open the booking.';
@@ -449,9 +490,9 @@ function render(data){
   data.results.forEach(r=>{
     const b=r.best;
     const card=document.createElement('div'); card.className='card';
-    card.innerHTML = `<div class="city">${r.city} <small>(${r.iata})</small></div>`+
+    card.innerHTML = `<div class="city">${escapeHtml(r.city)} <small>(${escapeHtml(r.iata)})</small></div>`+
       `<div class="price">${b?money(b.chosen_cad):'—'}</div>`+
-      `<div class="meta">${b?fmtDate(b.dep)+' → '+fmtDate(b.ret)+' · '+(b.chosen==='nonstop'?'nonstop':b.stops+' stop(s)'):'no fares'}</div>`+
+      `<div class="meta">${b?escapeHtml(fmtDate(b.dep))+' → '+escapeHtml(fmtDate(b.ret))+' · '+(b.chosen==='nonstop'?'nonstop':b.stops+' stop(s)'):'no fares'}</div>`+
       `<div class="meta">group ×${fams}: ${b?money(b.chosen_cad*fams):'—'}</div>`;
     sum.appendChild(card);
   });
@@ -460,10 +501,10 @@ function render(data){
   const rets = data.ret_dates;
   data.results.forEach(r=>{
     const blk=document.createElement('div'); blk.className='cityblock';
-    let html=`<h2>${r.city} <small>(${r.iata})</small></h2><table><thead><tr><th>dep \\ ret</th>`+
-      rets.map(d=>`<th>${fmtDate(d)}</th>`).join('')+'</tr></thead><tbody>';
+    let html=`<h2>${escapeHtml(r.city)} <small>(${escapeHtml(r.iata)})</small></h2><table><thead><tr><th>dep \\ ret</th>`+
+      rets.map(d=>`<th>${escapeHtml(fmtDate(d))}</th>`).join('')+'</tr></thead><tbody>';
     r.grid.forEach(row=>{
-      html+=`<tr><td class="rowh">${fmtDate(row[0].dep)}</td>`;
+      html+=`<tr><td class="rowh">${escapeHtml(fmtDate(row[0].dep))}</td>`;
       row.forEach(c=>{ html += _cellHtml(c, thr); });
       html+='</tr>';
     });
@@ -474,7 +515,7 @@ function render(data){
   const prov = (data.providers||[]);
   const noData = data.results.some(r=>r.grid.some(row=>row.some(c=>c.source==='no-data')));
   $('#foot').innerHTML = (prov.length
-      ? 'Live flight data via <b>'+prov.join(', ')+'</b>. The model analyzes these real fares — it does not generate prices. '
+      ? 'Live flight data via <b>'+escapeHtml(prov.join(', '))+'</b>. The model analyzes these real fares — it does not generate prices. '
       : '<span class="estimate-flag">no flight API</span> Set TRAVELPAYOUTS_TOKEN (or Amadeus keys) so the app can fetch real prices. ')+
     (noData?'<span class="warn">Some cells returned no fares from the API. </span>':'')+
     'Per family of '+(data.adults+data.child_ages.length)+'. Prices CAD · click any price to open the booking.';
@@ -524,8 +565,130 @@ async function triggerExport(endpoint, defaultFilename, btnEl, loadingLabel) {
 $('#exportPdf').onclick = () => triggerExport('/api/export/pdf', 'whenever-matrix.pdf', $('#exportPdf'), 'Preparing PDF…');
 $('#exportCsv').onclick = () => triggerExport('/api/export/csv', 'whenever-matrix.csv', $('#exportCsv'), 'Preparing CSV…');
 
+$('#copyLink').onclick = () => {
+  navigator.clipboard.writeText(location.href).then(() => {
+    const btn = $('#copyLink');
+    const orig = btn.textContent;
+    btn.textContent = 'Copied!';
+    setTimeout(() => { btn.textContent = orig; }, 1500);
+  });
+};
+
+// Schema helpers for restoreFromHash: defense-in-depth coercion of a
+// URL-controlled share payload. Each returns a sanitized value or undefined
+// when the input is malformed; callers skip undefined fields.
+function _vStr(v, max) {
+  if (v == null) return undefined;
+  const s = String(v);
+  return s.length > max ? s.slice(0, max) : s;
+}
+function _vNum(v, lo, hi) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return undefined;
+  return Math.min(hi, Math.max(lo, n));
+}
+function isValidIsoDate(s) {
+  // Strict ISO YYYY-MM-DD validation done entirely in UTC so it never depends
+  // on the browser's local timezone. `new Date('YYYY-MM-DDT00:00:00')` parses as
+  // LOCAL midnight, and .toISOString() then shifts it to the previous UTC day in
+  // UTC+ zones (Tokyo/Berlin), which would wrongly reject valid shared dates.
+  if (typeof s !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
+  const [y, m, d] = s.split('-').map(Number);
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  return dt.getUTCFullYear() === y && dt.getUTCMonth() === m - 1 && dt.getUTCDate() === d;
+}
+function _vDate(v) {
+  // Reject impossible months/days (e.g. 2026-13-40) without any local→UTC shift.
+  return isValidIsoDate(v) ? v : undefined;
+}
+function _vIata(v) {
+  if (typeof v !== 'string' || !/^[A-Za-z]{3}$/.test(v)) return undefined;
+  return v.toUpperCase();
+}
+
+function restoreFromHash() {
+  const hash = location.hash;
+  if (!hash.startsWith('#s=')) return;
+  let obj;
+  try {
+    obj = JSON.parse(decodeURIComponent(hash.slice(3)));
+  } catch (_) { return; }
+  if (!obj || typeof obj !== 'object') return;
+
+  const set = (id, val) => { if ($(id) && val !== undefined) $(id).value = val; };
+  // Validate the required auto-run fields once and reuse the results both to
+  // prefill the form and to decide whether the auto-run is safe. A crafted or
+  // truncated share link may carry a valid city but a missing origin/dates;
+  // in that case we still prefill whatever is valid but must NOT auto-run
+  // against the real flight APIs with page defaults left in place.
+  const depCode = _vIata(obj.depCode);
+  const depStart = _vDate(obj.dep_start);
+  const retStart = _vDate(obj.ret_start);
+  set('#depCity', _vStr(obj.depCity, 80));
+  set('#depCode', depCode);
+  set('#country', _vStr(obj.country, 80));
+  set('#adults', _vNum(obj.adults, 1, 20));
+  set('#families', _vNum(obj.families, 1, 50));
+  set('#depStart', depStart);
+  set('#depSpan', _vNum(obj.dep_span, 1, 14));
+  set('#retStart', retStart);
+  set('#retSpan', _vNum(obj.ret_span, 1, 14));
+  set('#thresh', _vNum(obj.nonstop_threshold, 0, 500));
+
+  // child_ages: array of integers 0–17; drop non-numeric entries.
+  // A share link is URL-controlled, so a crafted hash could carry thousands of
+  // entries. Each rendered age becomes a DOM input and a passenger in the
+  // auto-run payload, so cap the restored set to a reasonable family size to
+  // keep opening any shared link from freezing the UI or ballooning the search.
+  const MAX_CHILDREN = 9;
+  const ages = Array.isArray(obj.child_ages)
+    ? obj.child_ages
+        .map(a => _vNum(a, 0, 17))
+        .filter(a => a !== undefined)
+        .slice(0, MAX_CHILDREN)
+    : [];
+  renderKids(ages);
+
+  // cities: keep only entries with a valid 3-letter IATA; city coerced + capped.
+  // A share link is URL-controlled, so a crafted hash could list hundreds of
+  // valid codes. Each restored city auto-runs cities × dep_span × ret_span fare
+  // lookups, so cap the restored set to a small bound (matches the China seed
+  // size) to keep opening any shared link from queuing excessive backend work.
+  const MAX_SHARE_CITIES = 12;
+  if (Array.isArray(obj.cities)) {
+    const cities = obj.cities
+      .map(c => {
+        if (!c || typeof c !== 'object') return null;
+        const iata = _vIata(c.iata);
+        if (iata === undefined) return null;
+        return { city: _vStr(c.city, 80) || iata, iata: iata, on: true };
+      })
+      .filter(Boolean)
+      .slice(0, MAX_SHARE_CITIES);
+    if (cities.length > 0) {
+      CITIES = cities;
+      drawChips();
+      // Only auto-run when every required search field validated: a valid
+      // origin (depCode), at least one valid city, and both start dates. If any
+      // is missing/invalid we leave the partially-prefilled form for the user
+      // to complete and run manually, rather than searching page defaults.
+      if (depCode !== undefined && depStart !== undefined && retStart !== undefined) {
+        $('#run').click();
+      }
+    }
+  }
+}
+
 renderKids([11,9]);
 health();
+restoreFromHash();
+// In-page shared links: when an already-open app navigates to a URL that differs
+// only in the #s= fragment, the browser does a same-document hash navigation with
+// no script reload, so re-apply the incoming share state. This is safe from loops
+// because the search's own hash write uses history.replaceState (see above), which
+// does NOT fire 'hashchange'; restoreFromHash is idempotent and falls back quietly
+// on a malformed/empty hash.
+window.addEventListener('hashchange', restoreFromHash);
 </script>
 </body>
 </html>

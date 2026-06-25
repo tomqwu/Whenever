@@ -1,0 +1,387 @@
+"""E2E tests for the shareable search link feature."""
+
+
+def test_share_hash_written_after_search(live_server, page):
+    page.goto(live_server)
+    # Load cities
+    page.click("#loadCities")
+    page.wait_for_selector(".chip")
+    # Run search
+    page.click("#run")
+    page.wait_for_selector("#summary .card")
+    # The URL hash + Copy-link state are written on the later `done` event, not
+    # on `meta` (which fires the first card). Wait for the done-driven state
+    # (Copy-link enabled) before asserting the hash, or we race replaceState.
+    page.wait_for_selector("#copyLink:not([disabled])")
+    # URL hash must contain share param
+    assert "#s=" in page.url
+    # Copy link button must be enabled
+    assert not page.is_disabled("#copyLink")
+
+
+def test_load_from_hash_prefills_and_autoruns(live_server, page):
+    import json, urllib.parse
+    share = {
+        "depCity": "Toronto", "depCode": "YYZ", "country": "China",
+        "cities": [{"city": "Beijing", "iata": "PEK"}, {"city": "Shanghai", "iata": "PVG"}],
+        "adults": 2, "child_ages": [11, 9], "families": 3,
+        "dep_start": "2026-12-12", "dep_span": 2,
+        "ret_start": "2027-01-04", "ret_span": 2,
+        "nonstop_threshold": 25,
+    }
+    hash_val = "#s=" + urllib.parse.quote(json.dumps(share))
+    page.goto(live_server + "/" + hash_val)
+    # Form must be prefilled
+    assert page.input_value("#depCode") == "YYZ"
+    assert page.input_value("#country") == "China"
+    # Chips must be rendered as selected (class 'on')
+    page.wait_for_selector(".chip.on")
+    chip_texts = [el.inner_text() for el in page.query_selector_all(".chip.on")]
+    chip_text_joined = " ".join(chip_texts)
+    assert "Beijing" in chip_text_joined
+    # Date inputs must be prefilled to the shared values. Before the
+    # timezone-safe validator this round-tripped through local→UTC and got
+    # rejected in UTC+ zones, leaving the inputs at their defaults.
+    assert page.input_value("#depStart") == "2026-12-12"
+    assert page.input_value("#retStart") == "2027-01-04"
+    # Auto-run must fire: #summary populates without user clicking
+    page.wait_for_selector("#summary .card")
+    summary_text = page.inner_text("#summary")
+    assert "Beijing" in summary_text or "Shanghai" in summary_text
+
+
+def test_in_page_hashchange_restores_share(live_server, page):
+    """An already-open app that navigates IN-PAGE to a new #s= fragment (a
+    same-document hash navigation, no script reload) must re-apply the incoming
+    share state via the 'hashchange' listener: form prefills + auto-run fires.
+    The search's own hash write uses history.replaceState (no 'hashchange'), so
+    the restore must run exactly once and not loop."""
+    import json, urllib.parse
+    # 1. Load the page with NO hash → default form, no auto-run.
+    page.goto(live_server)
+    page.wait_for_selector("#depCode")
+    assert page.input_value("#depCode") == "YYZ"
+    assert page.input_value("#country") == "China"
+    # No shared search has run yet (default country field, summary empty of cards).
+    assert page.query_selector("#summary .card") is None
+
+    # Instrument: count how many times the auto-run search is kicked off so we can
+    # prove the hashchange restore fires once and does not loop.
+    page.evaluate(
+        "window.__runClicks = 0;"
+        "document.getElementById('run')"
+        ".addEventListener('click', () => { window.__runClicks++; });"
+    )
+
+    # 2. Navigate IN-PAGE to a #s= share hash (same document, no reload).
+    share = {
+        "depCity": "Toronto", "depCode": "YVR", "country": "Japan",
+        "cities": [{"city": "Tokyo", "iata": "NRT"}],
+        "adults": 2, "child_ages": [], "families": 1,
+        "dep_start": "2026-12-12", "dep_span": 2,
+        "ret_start": "2027-01-04", "ret_span": 2,
+        "nonstop_threshold": 25,
+    }
+    hash_val = "#s=" + urllib.parse.quote(json.dumps(share))
+    page.evaluate("h => { location.hash = h; }", hash_val)
+
+    # 3. The form must prefill from the NEW hash without a reload.
+    page.wait_for_function("() => document.getElementById('depCode').value === 'YVR'")
+    assert page.input_value("#depCode") == "YVR"
+    assert page.input_value("#country") == "Japan"
+    page.wait_for_selector(".chip.on")
+    chip_texts = " ".join(el.inner_text() for el in page.query_selector_all(".chip.on"))
+    assert "Tokyo" in chip_texts
+
+    # 4. Auto-run fires from the new hash: #summary populates.
+    page.wait_for_selector("#summary .card")
+    summary_text = page.inner_text("#summary")
+    assert "Tokyo" in summary_text
+
+    # 5. No loop: the replaceState hash write must NOT fire 'hashchange', so the
+    #    restore-driven auto-run ran exactly once.
+    page.wait_for_selector("#copyLink:not([disabled])")
+    page.wait_for_timeout(500)
+    assert page.evaluate("window.__runClicks") == 1
+
+
+def test_share_date_validator_is_timezone_safe(browser, live_server):
+    """Loading a share hash with custom dates under a UTC+ timezone must still
+    prefill the date inputs. With the old `new Date(s+'T00:00:00').toISOString()`
+    round-trip, local midnight in Asia/Tokyo shifts to the previous UTC day and
+    the valid date was wrongly rejected (inputs stayed at defaults)."""
+    import json, urllib.parse
+    context = browser.new_context(timezone_id="Asia/Tokyo")
+    page = context.new_page()
+    try:
+        share = {
+            "depCity": "Toronto", "depCode": "YYZ", "country": "China",
+            "cities": [{"city": "Beijing", "iata": "PEK"}],
+            "adults": 2, "child_ages": [], "families": 1,
+            "dep_start": "2026-12-12", "dep_span": 2,
+            "ret_start": "2027-01-04", "ret_span": 2,
+            "nonstop_threshold": 25,
+        }
+        hash_val = "#s=" + urllib.parse.quote(json.dumps(share))
+        page.goto(live_server + "/" + hash_val)
+        # Dates restored despite the UTC+ timezone.
+        assert page.input_value("#depStart") == "2026-12-12"
+        assert page.input_value("#retStart") == "2027-01-04"
+        # The validator accepts valid dates and rejects impossible ones,
+        # regardless of timezone (direct check of the in-page helper).
+        assert page.evaluate("isValidIsoDate('2026-12-12')") is True
+        assert page.evaluate("isValidIsoDate('2027-01-04')") is True
+        assert page.evaluate("isValidIsoDate('2026-13-40')") is False
+        assert page.evaluate("isValidIsoDate('2026-02-30')") is False
+        assert page.evaluate("isValidIsoDate('not-a-date')") is False
+    finally:
+        context.close()
+
+
+def test_copy_link_disabled_until_new_search_done(live_server, page):
+    """Copy-link must follow LAST_PAYLOAD like the export buttons: a new search
+    disables it at the start and only re-enables it on the fresh `done`."""
+    page.goto(live_server)
+    page.click("#loadCities")
+    page.wait_for_selector(".chip")
+    # First search: Copy-link becomes enabled on done.
+    page.click("#run")
+    page.wait_for_selector("#summary .card")
+    page.wait_for_selector("#copyLink:not([disabled])")
+    assert not page.is_disabled("#copyLink")
+    # Start a second search: Copy-link must be disabled immediately and stay
+    # disabled until the new done re-enables it.
+    page.click("#run")
+    assert page.is_disabled("#copyLink")
+    page.wait_for_selector("#copyLink:not([disabled])")
+    assert not page.is_disabled("#copyLink")
+
+
+def test_share_hash_snapshots_search_start_not_edited_form(live_server, page):
+    """The share hash must encode the search that was SUBMITTED (and whose
+    results are displayed), not the live form. Editing a field while the search
+    streams must NOT change the hash written on `done`. Regression: the hash was
+    built at `done` from the mutable DOM/CITIES, so a mid-stream edit encoded a
+    different search than the results shown."""
+    import json, urllib.parse
+    page.goto(live_server)
+    page.click("#loadCities")
+    page.wait_for_selector(".chip")
+    # Submit the search with the default origin/country (YYZ / China).
+    page.click("#run")
+    # Mutate the form AFTER submitting, while/after the search streams. These
+    # edits must NOT leak into the share hash.
+    page.fill("#depCode", "LHR")
+    page.fill("#country", "Japan")
+    page.fill("#depCity", "London")
+    # Wait for the done-driven state (Copy-link enabled) before reading the hash.
+    page.wait_for_selector("#summary .card")
+    page.wait_for_selector("#copyLink:not([disabled])")
+    assert "#s=" in page.url
+    # Decode the hash and confirm it reflects the ORIGINAL submitted values, not
+    # the post-submit edits.
+    encoded = page.url.split("#s=", 1)[1]
+    share = json.loads(urllib.parse.unquote(encoded))
+    assert share["depCode"] == "YYZ"
+    assert share["country"] == "China"
+    assert share["depCity"] == "Toronto"
+    # The submitted cities (from CITIES at search start) are encoded, not anything
+    # the edited form might imply.
+    assert share["cities"] == [{"city": "Shanghai", "iata": "PVG"}]
+
+
+def test_malformed_hash_loads_default_form(live_server, page):
+    page.goto(live_server + "/#s=not-json")
+    page.wait_for_timeout(500)
+    # Default depCode still YYZ (no crash)
+    assert page.input_value("#depCode") == "YYZ"
+    # No JS exceptions — page still works: can click run after loading chips
+    page.click("#loadCities")
+    page.wait_for_selector(".chip")
+    assert page.query_selector(".chip") is not None
+
+
+def test_oversized_hash_falls_back_gracefully(live_server, page):
+    import json, urllib.parse
+    # Oversized / malformed payload: junk types everywhere, huge city name,
+    # bad IATA. Must drop the bad cities and keep the page usable.
+    share = {
+        "depCity": "X" * 100000,
+        "depCode": "not-a-code",
+        "country": {"nope": True},
+        "cities": [
+            {"city": "Bad", "iata": "TOOLONG"},
+            {"city": "Bad2", "iata": 123},
+            "not-an-object",
+        ],
+        "adults": "lots",
+        "dep_start": "2026-13-99",
+    }
+    hash_val = "#s=" + urllib.parse.quote(json.dumps(share))
+    page.goto(live_server + "/" + hash_val)
+    page.wait_for_timeout(500)
+    # Invalid depCode dropped → default YYZ retained.
+    assert page.input_value("#depCode") == "YYZ"
+    # All cities had invalid IATA → none restored → no auto-run / no crash.
+    # Page still works: load real chips.
+    page.click("#loadCities")
+    page.wait_for_selector(".chip")
+    assert page.query_selector(".chip") is not None
+
+
+def test_share_hash_cities_capped_to_bound_auto_run(live_server, page):
+    """A crafted share link with many valid city codes must not auto-run an
+    unbounded search. restoreFromHash caps the restored set to MAX_SHARE_CITIES
+    (12), so no more than 12 chips/city blocks are ever restored regardless of
+    how many codes the URL hash carries."""
+    import json, urllib.parse
+    # 50 distinct valid 3-letter IATA codes (AAA, AAB, ... 50 entries).
+    codes = []
+    for i in range(50):
+        a = chr(ord("A") + (i // 26) % 26)
+        b = chr(ord("A") + i % 26)
+        codes.append("A" + a + b)
+    share = {
+        "depCity": "Toronto", "depCode": "YYZ", "country": "China",
+        "cities": [{"city": "City" + c, "iata": c} for c in codes],
+        "adults": 2, "child_ages": [], "families": 1,
+        "dep_start": "2026-12-12", "dep_span": 2,
+        "ret_start": "2027-01-04", "ret_span": 2,
+        "nonstop_threshold": 25,
+    }
+    hash_val = "#s=" + urllib.parse.quote(json.dumps(share))
+    page.goto(live_server + "/" + hash_val)
+    # Auto-run fires; wait for it to populate.
+    page.wait_for_selector(".chip.on")
+    page.wait_for_selector("#summary .card")
+    page.wait_for_timeout(500)
+    # No more than MAX_SHARE_CITIES (12) cities restored / rendered.
+    assert len(page.query_selector_all(".chip")) <= 12
+    assert len(page.query_selector_all("#grids .cityblock")) <= 12
+
+
+def test_share_hash_child_ages_capped_to_bound_passengers(live_server, page):
+    """A crafted share link with thousands of child_ages must not render
+    thousands of kid inputs (UI freeze) or send a huge passenger list into the
+    auto-run search. restoreFromHash caps the restored set to MAX_CHILDREN (9),
+    so no more than 9 kid inputs are ever rendered regardless of hash size."""
+    import json, urllib.parse
+    share = {
+        "depCity": "Toronto", "depCode": "YYZ", "country": "China",
+        "cities": [{"city": "Beijing", "iata": "PEK"}],
+        "adults": 2,
+        # 5000 valid in-range ages — crafted to balloon the passenger list / UI.
+        "child_ages": [5] * 5000,
+        "families": 1,
+        "dep_start": "2026-12-12", "dep_span": 2,
+        "ret_start": "2027-01-04", "ret_span": 2,
+        "nonstop_threshold": 25,
+    }
+    hash_val = "#s=" + urllib.parse.quote(json.dumps(share))
+    page.goto(live_server + "/" + hash_val)
+    # Auto-run fires; wait for it to populate (proves the page did not hang).
+    page.wait_for_selector(".chip.on")
+    page.wait_for_selector("#summary .card")
+    page.wait_for_timeout(500)
+    # No more than MAX_CHILDREN (9) kid number-inputs rendered.
+    assert len(page.query_selector_all("#kids input[type=number]")) <= 9
+
+
+def test_share_hash_missing_origin_prefills_but_does_not_autorun(live_server, page):
+    """A crafted/truncated share link with a VALID city but a MISSING/INVALID
+    origin (depCode) must NOT auto-run: the auto-run is gated on all required
+    fields (origin + >=1 city + both start dates). The valid fields are still
+    prefilled, but no search request is fired against the real flight APIs."""
+    import json, urllib.parse
+    # Record any hit to the search stream endpoint so we can prove none happened.
+    search_hits = []
+    page.on("request", lambda req: search_hits.append(req.url)
+            if "/api/search/stream" in req.url else None)
+    share = {
+        "depCity": "Toronto", "depCode": "bad-code", "country": "China",
+        "cities": [{"city": "Beijing", "iata": "PEK"}],
+        "adults": 2, "child_ages": [11, 9], "families": 3,
+        "dep_start": "2026-12-12", "dep_span": 2,
+        "ret_start": "2027-01-04", "ret_span": 2,
+        "nonstop_threshold": 25,
+    }
+    hash_val = "#s=" + urllib.parse.quote(json.dumps(share))
+    page.goto(live_server + "/" + hash_val)
+    # The valid city is still restored + prefilled.
+    page.wait_for_selector(".chip.on")
+    chip_texts = " ".join(el.inner_text() for el in page.query_selector_all(".chip.on"))
+    assert "Beijing" in chip_texts
+    # Valid fields prefilled: country + dates restored.
+    assert page.input_value("#country") == "China"
+    assert page.input_value("#depStart") == "2026-12-12"
+    assert page.input_value("#retStart") == "2027-01-04"
+    # Invalid origin dropped → default YYZ retained (NOT the crafted value).
+    assert page.input_value("#depCode") == "YYZ"
+    # Give any (wrongly) fired auto-run time to reach the network / render.
+    page.wait_for_timeout(700)
+    # No auto-run: results stay empty and no search request was made.
+    assert page.query_selector("#summary .card") is None
+    assert page.query_selector("#grids .cityblock") is None
+    assert search_hits == []
+
+
+def test_share_hash_invalid_dates_prefill_but_do_not_autorun(live_server, page):
+    """A share link with a valid origin + city but an INVALID/missing start date
+    must NOT auto-run (both start dates are required). Valid fields still
+    prefill; no search request is fired."""
+    import json, urllib.parse
+    search_hits = []
+    page.on("request", lambda req: search_hits.append(req.url)
+            if "/api/search/stream" in req.url else None)
+    share = {
+        "depCity": "Toronto", "depCode": "YYZ", "country": "China",
+        "cities": [{"city": "Beijing", "iata": "PEK"}],
+        "adults": 2, "child_ages": [], "families": 1,
+        "dep_start": "2026-13-99",  # impossible date → rejected by validator
+        "dep_span": 2,
+        # ret_start omitted entirely → also missing
+        "ret_span": 2,
+        "nonstop_threshold": 25,
+    }
+    hash_val = "#s=" + urllib.parse.quote(json.dumps(share))
+    page.goto(live_server + "/" + hash_val)
+    # Valid city + origin still prefilled.
+    page.wait_for_selector(".chip.on")
+    assert page.input_value("#depCode") == "YYZ"
+    chip_texts = " ".join(el.inner_text() for el in page.query_selector_all(".chip.on"))
+    assert "Beijing" in chip_texts
+    page.wait_for_timeout(700)
+    # No auto-run because the start dates did not validate.
+    assert page.query_selector("#summary .card") is None
+    assert search_hits == []
+
+
+def test_share_hash_city_xss_is_neutralized(live_server, page):
+    """A crafted share link with an <img onerror> city must NOT execute."""
+    import json, urllib.parse
+    payload = "<img src=x onerror=window.__xss=1>"
+    share = {
+        "depCity": "Toronto", "depCode": "YYZ", "country": "China",
+        # Valid IATA so the city is restored + auto-run renders it into the grid.
+        "cities": [{"city": payload, "iata": "PEK"}],
+        "adults": 2, "child_ages": [11, 9], "families": 1,
+        "dep_start": "2026-12-12", "dep_span": 2,
+        "ret_start": "2027-01-04", "ret_span": 2,
+        "nonstop_threshold": 25,
+    }
+    hash_val = "#s=" + urllib.parse.quote(json.dumps(share))
+    page.goto(live_server + "/" + hash_val)
+    # Auto-run renders the malicious city into summary card + <h2> heading.
+    page.wait_for_selector("#summary .card")
+    page.wait_for_timeout(500)
+    # 1. No script executed: the onerror handler never fired.
+    assert not page.evaluate("window.__xss")
+    # 2. No live <img> element was injected from the payload.
+    assert page.query_selector('img[src="x"]') is None
+    assert page.query_selector("#summary img") is None
+    assert page.query_selector("#grids img") is None
+    # 3. The value renders as inert text — the literal string is present in the
+    #    rendered card/heading text content.
+    summary_text = page.inner_text("#summary")
+    grids_text = page.inner_text("#grids")
+    assert payload in summary_text or payload in grids_text

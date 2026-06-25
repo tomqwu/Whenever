@@ -29,6 +29,7 @@ cd Whenever
 - **Clickable prices** → every fare deep-links to Kayak/Google Flights to book.
 - **AI recommendation** → DeepSeek reads the grid and names the single best trip.
 - **Export results** → after a search, download the fare matrix as a PDF or CSV from the UI.
+- **Shareable searches** → Searches are shareable — after running, copy the link from the **Copy link** button to share a prefilled, auto-run search.
 
 ## Prerequisites
 
