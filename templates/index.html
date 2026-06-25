@@ -635,8 +635,8 @@ $('#run').onclick = async () => {
             if (metaEl) {
               // textContent is auto-escaped, so use the RAW airline names / layover
               // text here (fmtAirlines/fmtLayovers escape for innerHTML paths).
-              const air = (Array.isArray(evt.airlines) && evt.airlines.length)
-                ? evt.airlines.filter((a,i,s)=>a&&s.indexOf(a)===i).join(' · ') : '';
+              const air = (Array.isArray(evt.chosen_airlines) && evt.chosen_airlines.length)
+                ? evt.chosen_airlines.filter((a,i,s)=>a&&s.indexOf(a)===i).join(' · ') : '';
               const lay = (Array.isArray(evt.chosen_layovers) && evt.chosen_layovers.length)
                 ? 'via ' + evt.chosen_layovers.map(lo => {
                     const iata = (lo && lo.iata) ? lo.iata : '?';
@@ -758,7 +758,7 @@ function render(data){
   data.results.forEach(r=>{
     const b=r.best;
     const card=document.createElement('div'); card.className='card';
-    const bAir = b ? fmtAirlines(b.airlines) : '';
+    const bAir = b ? fmtAirlines(b.chosen_airlines) : '';
     const bLay = b ? fmtLayovers(b.chosen_layovers) : '';
     card.innerHTML = `<div class="city">${escapeHtml(r.city)} <small>(${escapeHtml(r.iata)})</small></div>`+
       `<div class="price">${b?money(b.chosen_cad):'—'}</div>`+

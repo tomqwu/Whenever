@@ -103,10 +103,14 @@ def test_streaming_search_renders_airlines_and_layovers(seed_live_server, page):
     assert any("via NRT (1h 20m)" in t for t in lay_texts), \
         f"Expected 'via NRT (1h 20m)' in a cell, got: {lay_texts!r}"
 
-    # The summary card meta names the airline(s) too.
+    # The summary card meta names the CHOSEN pick's carrier. The stub's chosen pick
+    # is the nonstop (8500 within 25% of 8000), so the card shows chosen_airlines
+    # (the nonstop's 'WestJet') — NOT the cheapest connecting fare's carriers (codex P2).
     card_meta = page.inner_text("#card-meta-0")
-    assert "Air Canada" in card_meta, \
-        f"Expected airline in summary card meta, got: {card_meta!r}"
+    assert "WestJet" in card_meta, \
+        f"Expected nonstop carrier in summary card meta, got: {card_meta!r}"
+    assert "Air Canada" not in card_meta, \
+        f"Cheapest connecting carrier must not appear in card meta, got: {card_meta!r}"
 
 
 def test_streaming_search_run_button_re_enabled(seed_live_server, page):

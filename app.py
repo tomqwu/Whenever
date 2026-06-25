@@ -496,6 +496,7 @@ def amadeus_fare(origin, dest, dep, ret, adults, children):
         "duration_min": duration(cheapest),
         "nonstop_duration_min": duration(ns) if ns else None,
         "airlines": _amadeus_airlines(cheapest),
+        "nonstop_airlines": _amadeus_airlines(ns) if ns else None,
         "layovers": _amadeus_layovers(cheapest),
     }
 
@@ -552,6 +553,9 @@ def travelpayouts_fare(origin, dest, dep, ret, adults, children):
         # detail. airlines -> [code] (or [] when absent); layovers -> None (the
         # provider can't supply connection airports/durations).
         "airlines": [cheapest["airline"]] if cheapest.get("airline") else [],
+        # Travelpayouts gives a single airline code per result with no itinerary
+        # detail, so we can't attribute carriers to the nonstop pick specifically.
+        "nonstop_airlines": None,
         "layovers": None,
     }
 
@@ -702,6 +706,7 @@ def kiwi_fare(origin, dest, dep, ret, adults, children):
         "duration_min": cheapest[4],
         "nonstop_duration_min": ns[4] if ns else None,
         "airlines": _kiwi_airlines(cheapest[5]),
+        "nonstop_airlines": _kiwi_airlines(ns[5]) if ns else None,
         "layovers": _kiwi_layovers(cheapest[5]),
     }
 
@@ -944,6 +949,7 @@ def skyscanner_fare(origin, dest, dep, ret, adults, children):
         "duration_min": _skyscanner_item_duration(cheapest),
         "nonstop_duration_min": _skyscanner_item_duration(ns) if ns else None,
         "airlines": _skyscanner_airlines(cheapest),
+        "nonstop_airlines": _skyscanner_airlines(ns) if ns else None,
         "layovers": _skyscanner_layovers(cheapest),
         "source": "skyscanner",
         "book": book,
@@ -1054,6 +1060,9 @@ def serpapi_fare(origin, dest, dep, ret, adults, children):
         "duration_min": duration_min,
         "nonstop_duration_min": nonstop_duration_min,
         "airlines": airlines,
+        # No confirmed round-trip nonstop for serpapi (see nonstop_cad above), so
+        # there is no nonstop itinerary to attribute carriers to.
+        "nonstop_airlines": None,
         "layovers": layovers,
     }
 
@@ -1069,7 +1078,8 @@ def _get_fare_uncached(origin, dest, dep, ret, adults, children):
             continue
     return {"cheapest_cad": None, "stops": None, "nonstop_cad": None,
             "source": "no-data", "duration_min": None,
-            "nonstop_duration_min": None, "airlines": None, "layovers": None}
+            "nonstop_duration_min": None, "airlines": None,
+            "nonstop_airlines": None, "layovers": None}
 
 
 def get_fare(origin, dest, dep, ret, adults, children):
@@ -1165,7 +1175,8 @@ def _build_cell(origin, code, dep, ret, adults, child_ages, fare, threshold):
     duration_min, nonstop_duration_min.
     threshold: float fraction (e.g. 0.25 for 25 %).
     Returns dict with keys: dep, ret, cheapest_cad, stops, nonstop_cad, chosen,
-    chosen_cad, source, duration_min, nonstop_duration_min, chosen_duration_min, book.
+    chosen_cad, source, duration_min, nonstop_duration_min, chosen_duration_min,
+    airlines, nonstop_airlines, chosen_airlines, layovers, chosen_layovers, book.
     """
     cheap = fare.get("cheapest_cad")
     ns = fare.get("nonstop_cad")
@@ -1196,6 +1207,13 @@ def _build_cell(origin, code, dep, ret, adults, child_ages, fare, threshold):
     airlines = fare.get("airlines")
     layovers = fare.get("layovers")
     chosen_layovers = [] if chosen == "nonstop" else layovers
+    # chosen_airlines pairs with the CHOSEN pick (codex P2): when the nonstop line
+    # is selected its carriers come from the nonstop itinerary (nonstop_airlines),
+    # otherwise the cheapest itinerary's airlines. Keeps the chosen/best summary +
+    # recommendation from showing the connecting fare's carriers next to the nonstop
+    # price/stops/duration. (None when the provider gives no nonstop carrier detail.)
+    nonstop_airlines = fare.get("nonstop_airlines")
+    chosen_airlines = nonstop_airlines if chosen == "nonstop" else airlines
     return {
         "dep": dep, "ret": ret,
         "cheapest_cad": cheap, "stops": stops,
@@ -1206,6 +1224,8 @@ def _build_cell(origin, code, dep, ret, adults, child_ages, fare, threshold):
         "nonstop_duration_min": nonstop_duration_min,
         "chosen_duration_min": chosen_duration_min,
         "airlines": airlines,
+        "nonstop_airlines": nonstop_airlines,
+        "chosen_airlines": chosen_airlines,
         "layovers": layovers,
         "chosen_layovers": chosen_layovers,
         "book": fare.get("book") or kayak_link(origin, code, dep, ret, adults, child_ages),
@@ -1442,7 +1462,7 @@ def api_search_stream():
                 fare = {"cheapest_cad": None, "stops": None, "nonstop_cad": None,
                         "source": "no-data", "duration_min": None,
                         "nonstop_duration_min": None, "airlines": None,
-                        "layovers": None}
+                        "nonstop_airlines": None, "layovers": None}
             cell = _build_cell(origin, code, dep, ret, adults, child_ages, fare, threshold)
             return di, cell
 
@@ -1474,7 +1494,9 @@ def api_search_stream():
                     "chosen_stops": None,
                     "duration_min": None, "nonstop_duration_min": None,
                     "chosen_duration_min": None,
-                    "airlines": None, "layovers": None, "chosen_layovers": None,
+                    "airlines": None, "nonstop_airlines": None,
+                    "chosen_airlines": None,
+                    "layovers": None, "chosen_layovers": None,
                     "book": kayak_link(origin, code, dep, ret, adults, child_ages),
                 }) for ret in ret_dates]
                 for dep in dep_dates
@@ -1755,7 +1777,7 @@ def build_recommendation(origin, results, adults, child_ages, families):
               "stops": r["best"].get("chosen_stops") if r["best"] else None,
               "duration_min": r["best"].get("chosen_duration_min") if r["best"] else None,
               "duration": _fmt_duration(r["best"].get("chosen_duration_min")) if r["best"] else None,
-              "airlines": r["best"].get("airlines") if r["best"] else None,
+              "airlines": r["best"].get("chosen_airlines") if r["best"] else None,
               "layovers": _layover_summary(r["best"].get("chosen_layovers")) if r["best"] else None}
              for r in results]
     summary = (f"From {origin}, {adults} adults + {len(child_ages)} kids, "

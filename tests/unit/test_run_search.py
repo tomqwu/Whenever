@@ -8,7 +8,7 @@ DEST_XXX = {"city": "NoWhere", "iata": "XXX"}
 
 def _fake_fare(cheapest, stops=1, nonstop=None, source="test", book=None,
                duration_min=None, nonstop_duration_min=None,
-               airlines=None, layovers=None):
+               airlines=None, nonstop_airlines=None, layovers=None):
     return {
         "cheapest_cad": cheapest,
         "stops": stops,
@@ -18,6 +18,7 @@ def _fake_fare(cheapest, stops=1, nonstop=None, source="test", book=None,
         "duration_min": duration_min,
         "nonstop_duration_min": nonstop_duration_min,
         "airlines": airlines,
+        "nonstop_airlines": nonstop_airlines,
         "layovers": layovers,
     }
 
@@ -369,6 +370,8 @@ def test_build_cell_carries_airlines_and_layovers_cheapest():
     cell = appmod._build_cell("YYZ", "PVG", "2026-12-12", "2027-01-04", 2, [], fare, 0.25)
     assert cell["chosen"] == "cheapest"
     assert cell["airlines"] == ["Air Canada", "ANA"]
+    # chosen=cheapest, so chosen_airlines mirrors the cheapest itinerary's airlines.
+    assert cell["chosen_airlines"] == ["Air Canada", "ANA"]
     # layovers (cheapest line) and chosen_layovers both carry the connection.
     assert cell["layovers"] == [{"iata": "NRT", "duration_min": 80}]
     assert cell["chosen_layovers"] == [{"iata": "NRT", "duration_min": 80}]
@@ -379,7 +382,7 @@ def test_build_cell_nonstop_chosen_layovers_empty():
     the cell's layovers still describes the displayed CHEAPEST line; airlines kept."""
     fare = _fake_fare(8000, stops=1, nonstop=8500,
                       duration_min=875, nonstop_duration_min=600,
-                      airlines=["Air Canada"],
+                      airlines=["Air Canada"], nonstop_airlines=["United"],
                       layovers=[{"iata": "NRT", "duration_min": 80}])
     cell = appmod._build_cell("YYZ", "PVG", "2026-12-12", "2027-01-04", 2, [], fare, 0.25)
     assert cell["chosen"] == "nonstop"
@@ -388,11 +391,36 @@ def test_build_cell_nonstop_chosen_layovers_empty():
     assert cell["airlines"] == ["Air Canada"]
 
 
+def test_build_cell_chosen_airlines_nonstop_pick():
+    """When chosen=nonstop, chosen_airlines is the NONSTOP itinerary's carriers (codex
+    P2): the cheapest's airlines (['A']) describes the cheapest line, but the chosen/best
+    summary must show the nonstop's carriers (['B']) so they match its price/stops."""
+    fare = _fake_fare(8000, stops=1, nonstop=8500,
+                      duration_min=875, nonstop_duration_min=600,
+                      airlines=["A"], nonstop_airlines=["B"])
+    cell = appmod._build_cell("YYZ", "PVG", "2026-12-12", "2027-01-04", 2, [], fare, 0.25)
+    assert cell["chosen"] == "nonstop"
+    assert cell["airlines"] == ["A"]              # cheapest (connecting) line
+    assert cell["nonstop_airlines"] == ["B"]
+    assert cell["chosen_airlines"] == ["B"]       # nonstop pick's own carriers
+
+
+def test_build_cell_chosen_airlines_equals_airlines_for_cheapest():
+    """A cheapest-chosen cell has chosen_airlines == airlines (same itinerary)."""
+    fare = _fake_fare(8000, stops=1, nonstop=None,
+                      airlines=["A"], nonstop_airlines=None)
+    cell = appmod._build_cell("YYZ", "PVG", "2026-12-12", "2027-01-04", 2, [], fare, 0.25)
+    assert cell["chosen"] == "cheapest"
+    assert cell["chosen_airlines"] == cell["airlines"] == ["A"]
+
+
 def test_build_cell_airlines_layovers_none_passthrough():
     """A provider that supplies neither (None) yields cell airlines/layovers None."""
     fare = {"cheapest_cad": 8000, "stops": 1, "nonstop_cad": None, "source": "x"}
     cell = appmod._build_cell("YYZ", "PVG", "2026-12-12", "2027-01-04", 2, [], fare, 0.25)
     assert cell["airlines"] is None
+    assert cell["nonstop_airlines"] is None
+    assert cell["chosen_airlines"] is None
     assert cell["layovers"] is None
     assert cell["chosen_layovers"] is None
 
@@ -422,6 +450,7 @@ def test_build_recommendation_summary_includes_airlines_and_layovers(monkeypatch
                  "chosen": "cheapest", "stops": 1, "chosen_stops": 1,
                  "duration_min": 875, "chosen_duration_min": 875,
                  "airlines": ["Air Canada", "ANA"],
+                 "chosen_airlines": ["Air Canada", "ANA"],
                  "chosen_layovers": [{"iata": "NRT", "duration_min": 80}]},
     }]
     appmod.build_recommendation("YYZ", results, 2, [], 1)
@@ -450,6 +479,28 @@ def test_build_recommendation_airlines_layovers_null_in_summary(monkeypatch):
     p = captured["prompt"]
     assert '"airlines": null' in p
     assert '"layovers": null' in p
+
+
+def test_build_recommendation_summary_uses_chosen_airlines(monkeypatch):
+    """For a nonstop-chosen best, the per-city summary pairs chosen_airlines (the
+    nonstop's carriers, 'United') with chosen_stops=0 — NOT the cheapest connecting
+    carriers ('Air Canada') — so carrier/stops in the summary are never mixed (codex P2)."""
+    captured = {}
+    monkeypatch.setattr(appmod, "ollama_chat",
+                        lambda prompt, *a, **k: captured.setdefault("prompt", prompt) or "ok")
+    results = [{
+        "city": "Shanghai", "iata": "PVG",
+        "best": {"chosen_cad": 8500, "dep": "2026-12-12", "ret": "2027-01-04",
+                 "chosen": "nonstop", "stops": 1, "chosen_stops": 0,
+                 "duration_min": 875, "chosen_duration_min": 600,
+                 "airlines": ["Air Canada"], "chosen_airlines": ["United"],
+                 "chosen_layovers": []},
+    }]
+    appmod.build_recommendation("YYZ", results, 2, [], 1)
+    p = captured["prompt"]
+    assert "United" in p              # nonstop pick's carrier surfaces
+    assert "Air Canada" not in p      # cheapest (connecting) carrier does NOT
+    assert '"stops": 0' in p          # paired with the nonstop's 0 stops
 
 
 def test_build_recommendation_no_best_airlines_layovers_null(monkeypatch):

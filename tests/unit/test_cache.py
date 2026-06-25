@@ -13,7 +13,8 @@ _ARGS = ("YYZ", "PVG", "2026-12-12", "2027-01-04", 2, 0)
 _REAL_FARE = {"cheapest_cad": 4200, "stops": 1, "nonstop_cad": None, "source": "travelpayouts"}
 _NO_DATA = {"cheapest_cad": None, "stops": None, "nonstop_cad": None,
             "source": "no-data", "duration_min": None,
-            "nonstop_duration_min": None, "airlines": None, "layovers": None}
+            "nonstop_duration_min": None, "airlines": None,
+            "nonstop_airlines": None, "layovers": None}
 
 
 def _patch_uncached(monkeypatch, return_value, counter=None):

@@ -196,7 +196,10 @@ def render_pdf(result: dict) -> bytes:
             )
             best_dur = _fmt_dur(best.get("chosen_duration_min"))
             dur_label = f", {best_dur}" if best_dur else ""
-            air_label = _fmt_airlines(best.get("airlines"))
+            # The best line shows the CHOSEN pick, so its carriers are
+            # chosen_airlines (the nonstop's when the nonstop line was selected),
+            # paired with chosen_stops/chosen_duration above — never the cheapest's.
+            air_label = _fmt_airlines(best.get("chosen_airlines"))
             air_label = f", {air_label}" if air_label else ""
             # The best line shows the CHOSEN pick, so its layovers are chosen_layovers
             # ([] when the nonstop line was selected).

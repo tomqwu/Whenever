@@ -57,6 +57,8 @@ def test_amadeus_fare_picks_cheapest_and_nonstop(monkeypatch, fake_resp):
     assert res == {"cheapest_cad": 8000, "stops": 1, "nonstop_cad": 14000,
                    "source": "amadeus", "duration_min": 600,
                    "nonstop_duration_min": 240, "airlines": [],
+                   # bare-{} nonstop segments carry no carrierCode → [] (not fabricated)
+                   "nonstop_airlines": [],
                    "layovers": [{"iata": None, "duration_min": None},
                                 {"iata": None, "duration_min": None}]}
 
@@ -98,6 +100,8 @@ def test_travelpayouts_scales_and_builds_book_link(monkeypatch, fake_resp):
     # duration_min = cheapest itinerary (900); nonstop_duration_min = chosen nonstop (600)
     assert res["duration_min"] == 900
     assert res["nonstop_duration_min"] == 600
+    # travelpayouts gives no per-itinerary carrier detail → nonstop_airlines None
+    assert res["nonstop_airlines"] is None
 
 
 def test_travelpayouts_non_200(monkeypatch, fake_resp):
@@ -149,19 +153,20 @@ def test_get_fare_no_data(monkeypatch):
     assert res == {"cheapest_cad": None, "stops": None, "nonstop_cad": None,
                    "source": "no-data", "duration_min": None,
                    "nonstop_duration_min": None, "airlines": None,
-                   "layovers": None}
+                   "nonstop_airlines": None, "layovers": None}
 
 
 # ---------------------------------------------------------------------------
 # kiwi_fare tests
 # ---------------------------------------------------------------------------
 
-def _kiwi_itinerary(price, route_segments, duration=None):
+def _kiwi_itinerary(price, route_segments, duration=None, airlines=None):
     """Build a minimal Tequila-shaped itinerary dict.
 
     route_segments: list of (return_flag,) tuples, e.g.
       [(0,), (0,), (1,), (1,)] = 2 outbound + 2 return segments (each 1 stop per direction)
     duration: optional Tequila `duration` value (dict/seconds) for duration_min.
+    airlines: optional top-level Tequila `airlines` carrier-code list.
     """
     itin = {
         "price": price,
@@ -170,6 +175,8 @@ def _kiwi_itinerary(price, route_segments, duration=None):
     }
     if duration is not None:
         itin["duration"] = duration
+    if airlines is not None:
+        itin["airlines"] = airlines
     return itin
 
 
@@ -183,9 +190,11 @@ def test_kiwi_fare_happy_path(monkeypatch, fake_resp):
     """Happy path: two itineraries (1-stop cheapest + nonstop pricier) normalize correctly."""
     monkeypatch.setattr(appmod, "KIWI_API_KEY", "k")
     # 1-stop outbound (2 segs), 1-stop return (2 segs) = max stops = 1; 52500s -> 875 min
-    itin_cheap = _kiwi_itinerary(7000, [0, 0, 1, 1], duration={"total": 52500})
+    itin_cheap = _kiwi_itinerary(7000, [0, 0, 1, 1], duration={"total": 52500},
+                                 airlines=["AC", "NH"])
     # nonstop: 1 outbound + 1 return = max stops = 0; 36000s -> 600 min
-    itin_nonstop = _kiwi_itinerary(9500, [0, 1], duration={"total": 36000})
+    itin_nonstop = _kiwi_itinerary(9500, [0, 1], duration={"total": 36000},
+                                   airlines=["UA"])
     payload = {"data": [itin_cheap, itin_nonstop]}
     captured_urls = []
 
@@ -205,6 +214,9 @@ def test_kiwi_fare_happy_path(monkeypatch, fake_resp):
     # duration_min = cheapest itinerary (875); nonstop_duration_min = chosen nonstop (600)
     assert res["duration_min"] == 875
     assert res["nonstop_duration_min"] == 600
+    # airlines = cheapest itinerary's carriers; nonstop_airlines = the NONSTOP's (codex P2)
+    assert res["airlines"] == ["AC", "NH"]
+    assert res["nonstop_airlines"] == ["UA"]
 
 
 def test_kiwi_fare_non_200(monkeypatch, fake_resp):
@@ -244,8 +256,9 @@ def test_kiwi_fare_no_nonstop(monkeypatch, fake_resp):
     assert res["cheapest_cad"] == 6000
     assert res["nonstop_cad"] is None
     assert res["source"] == "kiwi"
-    # no nonstop itinerary → nonstop_duration_min is None
+    # no nonstop itinerary → nonstop_duration_min / nonstop_airlines are None
     assert res["nonstop_duration_min"] is None
+    assert res["nonstop_airlines"] is None
 
 
 def test_providers_configured_includes_kiwi_when_set(monkeypatch):
@@ -306,6 +319,7 @@ def test_serpapi_fare_happy_path(monkeypatch, fake_resp):
     assert res["cheapest_cad"] == 2675          # party total, not scaled
     assert res["stops"] == 1                    # 1 outbound layover (cheapest entry)
     assert res["nonstop_cad"] is None           # never claimed: single-call response is outbound-only
+    assert res["nonstop_airlines"] is None      # no confirmed nonstop → no nonstop carriers
     assert res["source"] == "serpapi"
     assert res["book"] is None                  # no booking URL in SerpApi response
     assert captured["url"] == "https://serpapi.com/search.json"
@@ -796,7 +810,8 @@ def test_skyscanner_fare_happy_path_search_then_poll(monkeypatch, fake_resp):
     assert res["duration_min"] == 830         # 500 + 330
     assert res["nonstop_cad"] == 5200         # Direct item price
     assert res["nonstop_duration_min"] == 650  # 320 + 330
-    assert res["airlines"] == ["Air Canada"]
+    assert res["airlines"] == ["Air Canada"]   # cheapest (1-stop) item's carriers
+    assert res["nonstop_airlines"] == ["WestJet"]  # Direct item's own carriers (codex P2)
     assert res["layovers"] == [{"iata": "NRT", "duration_min": None}]
     assert res["book"] == "https://www.skyscanner.ca/book/best1"
     # search then exactly one poll
@@ -929,6 +944,7 @@ def test_skyscanner_fare_dedupes_items_across_buckets(monkeypatch, fake_resp):
     assert res["stops"] == 1
     assert res["nonstop_cad"] is None  # no nonstop item
     assert res["nonstop_duration_min"] is None
+    assert res["nonstop_airlines"] is None
     # two layovers (one connection per leg)
     assert res["layovers"] == [{"iata": "NRT", "duration_min": None},
                                {"iata": "NRT", "duration_min": None}]
@@ -1453,6 +1469,32 @@ def test_amadeus_airlines_codes_and_segment_layovers(monkeypatch, fake_resp):
     assert res["airlines"] == ["AC", "NH"]
     # connection at NRT: 14:00 → 15:20 = 80 min; return leg is nonstop (no layover)
     assert res["layovers"] == [{"iata": "NRT", "duration_min": 80}]
+    # single 1-stop offer → no nonstop itinerary → nonstop_airlines None
+    assert res["nonstop_airlines"] is None
+
+
+def test_amadeus_nonstop_airlines_from_nonstop_offer(monkeypatch, fake_resp):
+    """amadeus: nonstop_airlines = the NONSTOP offer's carriers, distinct from the
+    cheapest connecting offer's airlines (codex P2 carrier/itinerary pairing)."""
+    monkeypatch.setattr(appmod, "amadeus_token", lambda: "T")
+    # cheapest: 1-stop via NRT on AC/NH
+    cheap_out = [
+        {"carrierCode": "AC", "arrival": {"iataCode": "NRT", "at": "2026-12-12T14:00:00"}},
+        {"carrierCode": "NH", "departure": {"iataCode": "NRT", "at": "2026-12-12T15:20:00"}},
+    ]
+    # nonstop (pricier) on UA, single segment per direction
+    ns_seg = [{"carrierCode": "UA",
+               "departure": {"iataCode": "YYZ", "at": "2026-12-12T10:00:00"},
+               "arrival": {"iataCode": "PVG", "at": "2026-12-12T22:00:00"}}]
+    offers = [
+        _amadeus_offer_full(8000, cheap_out, [{"carrierCode": "AC"}]),
+        _amadeus_offer_full(9500, ns_seg, ns_seg),
+    ]
+    monkeypatch.setattr(appmod.requests, "get",
+                        lambda *a, **k: fake_resp({"data": offers}, status=200))
+    res = appmod.amadeus_fare("YYZ", "PVG", "2026-12-12", "2027-01-04", 2, 0)
+    assert res["airlines"] == ["AC", "NH"]       # cheapest (connecting) carriers
+    assert res["nonstop_airlines"] == ["UA"]     # the nonstop offer's own carrier
 
 
 def test_amadeus_layover_unparseable_times_duration_none(monkeypatch, fake_resp):

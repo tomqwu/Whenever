@@ -79,6 +79,7 @@ def _make_result():
                     "chosen": "cheapest", "stops": 2, "chosen_stops": 2,
                     "duration_min": 950, "chosen_duration_min": 950,
                     "airlines": ["Air Canada", "ANA"],
+                    "chosen_airlines": ["Air Canada", "ANA"],
                     "chosen_layovers": [{"iata": "NRT", "duration_min": 80}],
                     "source": "travelpayouts",
                 },
@@ -399,6 +400,32 @@ class TestRenderPdf:
                 pass
         assert b"Air Canada, ANA" in blob
         assert b"via NRT 1h20m" in blob
+
+    def test_pdf_best_summary_uses_chosen_airlines_for_nonstop(self):
+        """A nonstop-chosen best renders the NONSTOP itinerary's carriers
+        (chosen_airlines), never the cheapest connecting fare's airlines (codex P2)."""
+        import re
+        import zlib
+        from export import render_pdf
+        result = _make_result()
+        result["results"][0]["best"] = {
+            "dep": "2026-12-19", "ret": "2027-01-04",
+            "cheapest_cad": 9000, "chosen_cad": 9000,
+            "chosen": "nonstop", "stops": 1, "chosen_stops": 0,
+            "duration_min": 875, "chosen_duration_min": 700,
+            "airlines": ["Air Canada"], "chosen_airlines": ["WestJet"],
+            "chosen_layovers": [],
+            "source": "travelpayouts",
+        }
+        out = render_pdf(result)
+        blob = b""
+        for m in re.finditer(rb"stream\r?\n(.*?)\r?\nendstream", out, re.S):
+            try:
+                blob += zlib.decompress(m.group(1))
+            except Exception:
+                pass
+        assert b"WestJet" in blob          # the nonstop pick's carrier
+        assert b"Air Canada" not in blob   # cheapest connecting carrier must not leak
 
     def test_non_latin1_city_does_not_crash(self):
         """Non-Latin-1 city names (e.g. 'Łódź', '東京') must not raise.

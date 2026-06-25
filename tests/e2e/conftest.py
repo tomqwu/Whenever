@@ -70,9 +70,12 @@ def _patch_common(monkeypatch):
         # duration_min and the summary/nonstop line uses nonstop_duration_min;
         # both are 875 here so '14h 35m' renders in cell + card alike.
         "nonstop_duration_min": 875,
-        # airlines render on the cell + summary card; the cheapest line's layover
-        # (NRT, 80 min) renders as 'via NRT (1h 20m)' (#56/#57).
+        # airlines render on the cheapest cell line; the cheapest line's layover
+        # (NRT, 80 min) renders as 'via NRT (1h 20m)' (#56/#57). nonstop_airlines is
+        # the NONSTOP itinerary's carrier (WestJet) — since nonstop is chosen here,
+        # the summary card surfaces chosen_airlines == nonstop_airlines (codex P2).
         "airlines": ["Air Canada", "ANA"],
+        "nonstop_airlines": ["WestJet"],
         "layovers": [{"iata": "NRT", "duration_min": 80}],
     })
     monkeypatch.setattr(appmod, "build_recommendation",
