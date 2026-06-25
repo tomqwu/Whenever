@@ -1232,10 +1232,35 @@ def test_skyscanner_fare_poll_timeout_is_configurable(monkeypatch, fake_resp):
 
 
 def test_skyscanner_fare_poll_config_defaults():
-    """The shipped defaults are the longer-but-bounded budget (12 x 1.5s, 8s timeout)."""
-    assert appmod.SKYSCANNER_POLL_ATTEMPTS == 12
-    assert appmod.SKYSCANNER_POLL_INTERVAL == 1.5
-    assert appmod.SKYSCANNER_POLL_TIMEOUT == 8
+    """The shipped defaults are the longer-but-bounded budget (12 x 1.5s, 8s timeout).
+
+    These are read from the environment at import time, so assert them in a
+    subprocess that neutralizes dotenv.load_dotenv and clears any
+    SKYSCANNER_POLL_* vars — the result depends only on the shipped defaults,
+    never on the developer/CI shell or a repo-local .env.
+    """
+    import os
+    import subprocess
+    import sys
+
+    repo = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+    script = (
+        "import dotenv; dotenv.load_dotenv = lambda *a, **k: None; import app; "
+        "print(app.SKYSCANNER_POLL_ATTEMPTS, app.SKYSCANNER_POLL_INTERVAL, "
+        "app.SKYSCANNER_POLL_TIMEOUT)"
+    )
+    env = {
+        k: v for k, v in os.environ.items()
+        if k not in {"SKYSCANNER_POLL_ATTEMPTS", "SKYSCANNER_POLL_INTERVAL",
+                     "SKYSCANNER_POLL_TIMEOUT"}
+    }
+    env["PYTHONPATH"] = repo
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=repo, env=env, capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "12 1.5 8"
 
 
 def test_skyscanner_tried_first_in_provider_chain(monkeypatch):
