@@ -93,6 +93,137 @@ def test_watchdb_rewatch_after_remove(db):
     assert len(db.list_watches(active_only=True)) == 1
 
 
+def test_watchdb_child_count_distinguishes_active_rows(db):
+    """A count-only watch (children=2, child_ages=[]) and an adults-only watch
+    (children=0, child_ages=[]) for the same route/dates are DIFFERENT trips
+    (priced for different party sizes) and must both stay active — the unique
+    key includes the children COUNT, not just child_ages."""
+    common = dict(
+        origin="YYZ", dest_iata="PEK", dest_city="Beijing",
+        dep_date="2026-12-14", ret_date="2027-01-04",
+        adults=2, threshold_pct=25.0, created_at="2026-06-23T00:00:00",
+    )
+    db.add_watch(children=0, **common)   # adults only
+    db.add_watch(children=2, **common)   # two kids, ages unknown — must NOT collide
+    actives = db.list_watches(active_only=True)
+    assert len(actives) == 2
+    assert {w["children"] for w in actives} == {0, 2}
+
+
+def test_watchdb_dedupes_preexisting_active_duplicates_on_init(tmp_path):
+    """A DB that already holds duplicate active rows for a trip key (e.g. created
+    before this index existed) must NOT crash WatchDB init. Re-opening de-dupes:
+    the lowest id stays active, the rest are flagged inactive, and the unique
+    index gets created."""
+    import sqlite3
+    db_path = str(tmp_path / "dupes.db")
+
+    # First open creates the schema (and the unique index).
+    db1 = WatchDB(db_path)
+    # Insert two duplicate ACTIVE rows DIRECTLY, bypassing add_watch and the
+    # index guard, to simulate a pre-index DB. Drop the index so the raw inserts
+    # are allowed, mirroring a DB created before the index existed.
+    db1._conn.execute("DROP INDEX IF EXISTS idx_watch_active_unique")
+    for _ in range(2):
+        db1._conn.execute(
+            """INSERT INTO watches
+               (origin, dest_iata, dest_city, dep_date, ret_date,
+                adults, children, child_ages, threshold_pct, created_at, active)
+               VALUES ('YYZ','PEK','Beijing','2026-12-14','2027-01-04',
+                       2, 0, '[]', 25.0, '2026-06-23T00:00:00', 1)""",
+        )
+    db1._conn.commit()
+    # Two active duplicates now exist with no index.
+    assert len(db1.list_watches(active_only=True)) == 2
+    db1.close()
+
+    # Re-opening must NOT raise despite the pre-existing duplicates.
+    db2 = WatchDB(db_path)
+    try:
+        actives = db2.list_watches(active_only=True)
+        assert len(actives) == 1, "duplicates should be collapsed to one active row"
+        # The surviving active row is the lowest id; the other is now inactive.
+        all_rows = db2.list_watches(active_only=False)
+        assert len(all_rows) == 2
+        inactive = [r for r in all_rows if r["active"] == 0]
+        assert len(inactive) == 1
+        assert actives[0]["id"] == min(r["id"] for r in all_rows)
+        # The unique index now exists.
+        cur = db2._conn.execute("SELECT name FROM sqlite_master WHERE type='index'")
+        assert "idx_watch_active_unique" in {r[0] for r in cur.fetchall()}
+        # Idempotent: re-running the de-dup pass changes nothing.
+        db2._dedupe_active_watches()
+        assert len(db2.list_watches(active_only=True)) == 1
+    finally:
+        db2.close()
+
+
+def test_watchdb_index_retry_after_dedup_succeeds(tmp_path, monkeypatch):
+    """If the FIRST de-dup pass is skipped (so the first CREATE UNIQUE INDEX hits
+    duplicates and raises), init's defensive retry runs de-dup again and the
+    index is created — init must not crash."""
+    # Build a DB with two active duplicates and NO index.
+    db_path = str(tmp_path / "retry.db")
+    seed = WatchDB(db_path)
+    seed._conn.execute("DROP INDEX IF EXISTS idx_watch_active_unique")
+    for _ in range(2):
+        seed._conn.execute(
+            """INSERT INTO watches
+               (origin, dest_iata, dest_city, dep_date, ret_date,
+                adults, children, child_ages, threshold_pct, created_at, active)
+               VALUES ('YYZ','PEK','Beijing','2026-12-14','2027-01-04',
+                       2, 0, '[]', 25.0, '2026-06-23T00:00:00', 1)""",
+        )
+    seed._conn.commit()
+    seed.close()
+
+    # Make the FIRST _dedupe_active_watches call a no-op so the first CREATE
+    # raises IntegrityError; subsequent calls run the real de-dup (retry path).
+    real_dedupe = WatchDB._dedupe_active_watches
+    calls = {"n": 0}
+
+    def flaky_dedupe(self):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return  # skip — leaves duplicates so the first CREATE INDEX fails
+        return real_dedupe(self)
+
+    monkeypatch.setattr(WatchDB, "_dedupe_active_watches", flaky_dedupe)
+    db2 = WatchDB(db_path)   # must NOT raise — retry de-dup fixes it
+    try:
+        assert len(db2.list_watches(active_only=True)) == 1
+        cur = db2._conn.execute("SELECT name FROM sqlite_master WHERE type='index'")
+        assert "idx_watch_active_unique" in {r[0] for r in cur.fetchall()}
+        assert calls["n"] >= 2  # first (no-op) + retry
+    finally:
+        db2.close()
+
+
+def test_watchdb_index_raises_clear_error_when_dedup_never_resolves(tmp_path, monkeypatch):
+    """If de-dup never removes the duplicates (both passes are no-ops), init
+    surfaces a clear IntegrityError naming the index rather than a bare one."""
+    import sqlite3
+    db_path = str(tmp_path / "stuck.db")
+    seed = WatchDB(db_path)
+    seed._conn.execute("DROP INDEX IF EXISTS idx_watch_active_unique")
+    for _ in range(2):
+        seed._conn.execute(
+            """INSERT INTO watches
+               (origin, dest_iata, dest_city, dep_date, ret_date,
+                adults, children, child_ages, threshold_pct, created_at, active)
+               VALUES ('YYZ','PEK','Beijing','2026-12-14','2027-01-04',
+                       2, 0, '[]', 25.0, '2026-06-23T00:00:00', 1)""",
+        )
+    seed._conn.commit()
+    seed.close()
+
+    # Every de-dup pass is a no-op: both CREATE attempts fail.
+    monkeypatch.setattr(WatchDB, "_dedupe_active_watches", lambda self: None)
+    with pytest.raises(sqlite3.IntegrityError) as exc:
+        WatchDB(db_path)
+    assert "idx_watch_active_unique" in str(exc.value)
+
+
 def test_watchdb_add_and_list(db):
     wid = _sample_watch(db)
     watches = db.list_watches()

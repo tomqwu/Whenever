@@ -905,6 +905,12 @@ def api_watch_add():
         # trip must not insert another active row (the scheduler would then re-price
         # it and emit duplicate drop alerts).
         sorted_ages = sorted(child_ages)
+        # This route only carries child_ages (no separate count), so the
+        # children COUNT it would store equals len(child_ages) — matching
+        # add_watch's reconciliation. Include it in the dedup key so a
+        # count-only watch (children=2, child_ages=[]) added elsewhere does NOT
+        # collide with an adults-only request (children=0, child_ages=[]).
+        children = len(child_ages)
 
         def _matching_active():
             """Return an existing active watch matching this trip key, or None."""
@@ -915,6 +921,7 @@ def api_watch_add():
                     and existing.get("dep_date") == dep_date
                     and existing.get("ret_date") == ret_date
                     and int(existing.get("adults") or 0) == adults
+                    and int(existing.get("children") or 0) == children
                     and sorted(existing.get("child_ages") or []) == sorted_ages
                 ):
                     return existing

@@ -347,6 +347,28 @@ def test_add_watch_different_trip_creates_second_row(client, watch_db):
     assert len(watch_db.list_watches()) == 2
 
 
+def test_add_watch_count_only_does_not_collide_with_adults_only(client, watch_db):
+    """A count-only watch (children=2, child_ages=[]) saved out-of-band and an
+    adults-only POST (children=0, child_ages=[]) for the SAME route/dates are
+    different trips: the POST must create a distinct row, not dedup-hit the
+    count-only one. The dedup key now includes the children COUNT."""
+    # Seed a count-only active watch directly (e.g. created by another caller).
+    count_only_id = watch_db.add_watch(
+        origin="YYZ", dest_iata="PVG", dest_city="Shanghai",
+        dep_date="2026-12-12", ret_date="2027-01-04",
+        adults=2, children=2, threshold_pct=25.0,
+    )
+    # POST an adults-only watch for the same route/dates (no child_ages).
+    body = {k: v for k, v in _VALID_BODY.items() if k != "child_ages"}
+    r = client.post("/api/watch", json=body)
+    assert r.status_code == 200
+    assert "existing" not in r.get_json()              # NOT a dedup hit
+    assert r.get_json()["id"] != count_only_id
+    actives = watch_db.list_watches(active_only=True)
+    assert len(actives) == 2
+    assert {w["children"] for w in actives} == {0, 2}
+
+
 def test_watch_db_helper_resolves_env(monkeypatch, tmp_path):
     """_watch_db() opens a WatchDB at the WATCH_DB env path (default fallback)."""
     db_path = tmp_path / "w.db"

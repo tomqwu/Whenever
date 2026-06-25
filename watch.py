@@ -39,7 +39,13 @@ class WatchDB:
         self._conn.row_factory = sqlite3.Row
         if db_path != ":memory:":
             self._conn.execute("PRAGMA journal_mode=WAL")
-        self._create_tables()
+        try:
+            self._create_tables()
+        except Exception:
+            # Don't leak the open connection if schema/index setup fails (e.g.
+            # an unresolvable duplicate-active-rows IntegrityError).
+            self.close()
+            raise
 
     def _create_tables(self):
         self._conn.executescript("""
@@ -68,17 +74,68 @@ class WatchDB:
                 source     TEXT,
                 book       TEXT
             );
+        """)
+        # Before creating the partial UNIQUE INDEX, collapse any pre-existing
+        # duplicate active rows. A DB created before this index (or before
+        # `children` joined the key) can hold multiple active rows for the same
+        # trip key; CREATE UNIQUE INDEX would then raise IntegrityError and brick
+        # every code path that opens the DB. De-duping first is idempotent and a
+        # no-op on a fresh/empty DB.
+        self._dedupe_active_watches()
+        # At most one ACTIVE watch per trip key. This is the atomic backstop for
+        # the route's pre-check: two concurrent identical POSTs can both pass a
+        # list_watches() check before either inserts, but only one INSERT can
+        # satisfy this partial unique index — the second raises
+        # sqlite3.IntegrityError, which the route treats as "already exists".
+        # The key includes `children` (the passenger COUNT) so a count-only watch
+        # (children=2, child_ages=[]) is distinct from an adults-only one
+        # (children=0, child_ages=[]) — they are priced for different parties.
+        # Partial (WHERE active = 1) so removing a watch (active -> 0) frees the
+        # key and the same trip can be re-watched later.
+        try:
+            self._conn.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_watch_active_unique
+                    ON watches(origin, dest_iata, dep_date, ret_date,
+                               adults, children, child_ages)
+                    WHERE active = 1;
+            """)
+        except sqlite3.IntegrityError:
+            # A residual duplicate slipped through (e.g. a concurrent writer):
+            # de-dupe once more and retry. If it still fails, surface a clear,
+            # actionable error rather than a bare IntegrityError from init.
+            self._dedupe_active_watches()
+            try:
+                self._conn.execute("""
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_watch_active_unique
+                        ON watches(origin, dest_iata, dep_date, ret_date,
+                                   adults, children, child_ages)
+                        WHERE active = 1;
+                """)
+            except sqlite3.IntegrityError as exc:
+                raise sqlite3.IntegrityError(
+                    "Could not create idx_watch_active_unique: duplicate active "
+                    "watch rows remain after de-dup. Inspect the 'watches' table "
+                    f"for active duplicates on the trip key. ({exc})"
+                ) from exc
+        self._conn.commit()
 
-            -- At most one ACTIVE watch per trip key. This is the atomic backstop
-            -- for the route's pre-check: two concurrent identical POSTs can both
-            -- pass a list_watches() check before either inserts, but only one
-            -- INSERT can satisfy this partial unique index — the second raises
-            -- sqlite3.IntegrityError, which the route treats as "already exists".
-            -- Partial (WHERE active = 1) so removing a watch (active -> 0) frees
-            -- the key and the same trip can be re-watched later.
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_watch_active_unique
-                ON watches(origin, dest_iata, dep_date, ret_date, adults, child_ages)
-                WHERE active = 1;
+    def _dedupe_active_watches(self):
+        """Keep one active row per trip key; mark the rest inactive.
+
+        For each set of active rows sharing the unique-index key
+        (origin, dest_iata, dep_date, ret_date, adults, children, child_ages),
+        keep the lowest id active and set active=0 on the others. Idempotent and
+        safe on every init: a fresh/empty DB or an already-deduped DB is a no-op.
+        """
+        self._conn.execute("""
+            UPDATE watches SET active = 0
+            WHERE active = 1
+              AND id NOT IN (
+                  SELECT MIN(id) FROM watches
+                  WHERE active = 1
+                  GROUP BY origin, dest_iata, dep_date, ret_date,
+                           adults, children, child_ages
+              );
         """)
         self._conn.commit()
 
