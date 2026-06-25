@@ -7,7 +7,7 @@ LLM via Ollama (default model: deepseek-v4pro). Fares come from Amadeus if
 credentials are set, otherwise from clearly-labeled AI estimates. Every price
 deep-links to a real Kayak search for booking.
 """
-import os, re, json, time, datetime as dt, logging, concurrent.futures, sqlite3
+import os, re, json, time, datetime as dt, logging, concurrent.futures, sqlite3, urllib.parse
 from functools import lru_cache
 import requests
 import yaml
@@ -187,6 +187,9 @@ AMADEUS_SECRET = os.environ.get("AMADEUS_CLIENT_SECRET")
 TRAVELPAYOUTS_TOKEN = os.environ.get("TRAVELPAYOUTS_TOKEN")
 KIWI_API_KEY = os.environ.get("KIWI_API_KEY")
 SERPAPI_KEY = os.environ.get("SERPAPI_KEY")
+# RapidAPI flights-sky (Skyscanner data) — preferred provider (richest data).
+RAPIDAPI_KEY = os.environ.get("RAPIDAPI_KEY")
+RAPIDAPI_HOST = os.environ.get("RAPIDAPI_HOST", "flights-sky.p.rapidapi.com")
 CURRENCY = os.environ.get("CURRENCY", "cad").lower()
 FARE_CACHE_TTL = int(os.environ.get("FARE_CACHE_TTL", "3600"))
 SEARCH_CONCURRENCY = int(os.environ.get("SEARCH_CONCURRENCY", "8"))
@@ -201,6 +204,8 @@ PORT = int(os.environ.get("PORT", "5001"))
 
 def providers_configured():
     p = []
+    if RAPIDAPI_KEY:
+        p.append("skyscanner")
     if SERPAPI_KEY:
         p.append("serpapi")
     if AMADEUS_ID and AMADEUS_SECRET:
@@ -558,6 +563,227 @@ def kiwi_fare(origin, dest, dep, ret, adults, children):
     }
 
 
+def _skyscanner_headers():
+    """RapidAPI auth headers for the flights-sky host."""
+    return {"x-rapidapi-host": RAPIDAPI_HOST, "x-rapidapi-key": RAPIDAPI_KEY}
+
+
+def _skyscanner_get(url, params=None, retries_502=2):
+    """GET a flights-sky endpoint, retrying a transient HTTP 502 a couple times.
+
+    Returns the requests.Response (caller checks status_code), or None if every
+    attempt raised an exception. A non-502 status is returned immediately for the
+    caller to handle defensively.
+    """
+    for attempt in range(retries_502 + 1):
+        try:
+            r = requests.get(url, headers=_skyscanner_headers(), params=params, timeout=30)
+        except Exception:
+            return None
+        # Retry only a transient 502, and only while attempts remain; on the final
+        # attempt (attempt == retries_502) the 502 is returned for the caller to
+        # handle, so the loop always returns and never falls through.
+        if r.status_code == 502 and attempt < retries_502:
+            time.sleep(0.4)
+            continue
+        return r
+
+
+def _skyscanner_flatten_items(data):
+    """Flatten all buckets[].items[] from a complete flights-sky response, deduped.
+
+    Dedupe key is the item ``id`` when present (the same itinerary can appear in
+    several buckets, e.g. Best + Cheapest), else identity. Returns a list of item
+    dicts; an unexpected shape yields [].
+    """
+    itineraries = data.get("itineraries") if isinstance(data, dict) else None
+    buckets = itineraries.get("buckets") if isinstance(itineraries, dict) else None
+    if not isinstance(buckets, list):
+        return []
+    seen = set()
+    out = []
+    for bucket in buckets:
+        if not isinstance(bucket, dict):
+            continue
+        for item in bucket.get("items") or []:
+            if not isinstance(item, dict):
+                continue
+            key = item.get("id")
+            if key is not None:
+                if key in seen:
+                    continue
+                seen.add(key)
+            out.append(item)
+    return out
+
+
+def _skyscanner_price(item):
+    """Numeric party-total price for an item (price.raw), or None if absent/non-numeric."""
+    price = item.get("price")
+    raw = price.get("raw") if isinstance(price, dict) else None
+    return raw if isinstance(raw, (int, float)) else None
+
+
+def _skyscanner_legs(item):
+    """List of leg dicts for an item, or [] if absent/malformed."""
+    legs = item.get("legs")
+    return [leg for leg in legs if isinstance(leg, dict)] if isinstance(legs, list) else []
+
+
+def _skyscanner_item_duration(item):
+    """Sum legs[].durationInMinutes for an item; None if any leg's value is missing."""
+    legs = _skyscanner_legs(item)
+    if not legs:
+        return None
+    total = 0
+    for leg in legs:
+        d = leg.get("durationInMinutes")
+        if not isinstance(d, (int, float)):
+            return None
+        total += d
+    return int(round(total))
+
+
+def _skyscanner_max_stops(item):
+    """Max legs[].stopCount for an item; None if no leg carries a stopCount."""
+    counts = [leg.get("stopCount") for leg in _skyscanner_legs(item)
+              if isinstance(leg.get("stopCount"), (int, float))]
+    return max(int(c) for c in counts) if counts else None
+
+
+def _skyscanner_is_nonstop(item):
+    """True iff ALL legs have stopCount == 0 (and there is at least one leg)."""
+    legs = _skyscanner_legs(item)
+    if not legs:
+        return False
+    for leg in legs:
+        if leg.get("stopCount") != 0:
+            return False
+    return True
+
+
+def _skyscanner_airlines(item):
+    """Unique marketing carrier names across the item's legs (order-preserving)."""
+    names = []
+    for leg in _skyscanner_legs(item):
+        carriers = leg.get("carriers")
+        marketing = carriers.get("marketing") if isinstance(carriers, dict) else None
+        for c in marketing or []:
+            name = c.get("name") if isinstance(c, dict) else None
+            if name and name not in names:
+                names.append(name)
+    return names
+
+
+def _skyscanner_layovers(item):
+    """Best-effort connection layovers for an item.
+
+    For each leg, a layover is the connection airport between two consecutive
+    segments: its IATA is the first segment's destination flightPlaceId. Duration
+    between segments is not directly given by the API, so it is left None unless
+    derivable; we keep it None (best-effort). Returns a list of
+    ``{"iata", "duration_min"}`` dicts (possibly empty).
+    """
+    out = []
+    for leg in _skyscanner_legs(item):
+        segments = leg.get("segments")
+        if not isinstance(segments, list):
+            continue
+        segs = [s for s in segments if isinstance(s, dict)]
+        for i in range(len(segs) - 1):
+            dest = segs[i].get("destination")
+            iata = None
+            if isinstance(dest, dict):
+                iata = dest.get("flightPlaceId") or dest.get("displayCode")
+            out.append({"iata": iata, "duration_min": None})
+    return out
+
+
+def skyscanner_fare(origin, dest, dep, ret, adults, children):
+    """Real round-trip fares from RapidAPI flights-sky (Skyscanner data).
+
+    3-step async flow: (1) search-roundtrip, (2) poll search-incomplete until the
+    session is complete, (3) parse buckets[].items[]. Place IDs are IATA codes.
+    Price is the party total for the passed adults. Defensive: missing key, any
+    non-200 (except a retried 502), no buckets/items, or unexpected shape → None.
+    Never fabricates.
+    """
+    if not RAPIDAPI_KEY:
+        return None
+    base = f"https://{RAPIDAPI_HOST}"
+    params = {
+        "placeIdFrom": origin, "placeIdTo": dest,
+        "departDate": dep, "returnDate": ret,
+        "adults": adults, "currency": "CAD", "market": "CA",
+        "locale": "en-US", "cabinClass": "economy",
+    }
+    r = _skyscanner_get(f"{base}/web/flights/search-roundtrip", params=params)
+    if r is None or r.status_code != 200:
+        return None
+    try:
+        data = r.json().get("data", {})
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+
+    # Step 2: poll until the session is complete (bounded).
+    context = data.get("context") if isinstance(data.get("context"), dict) else {}
+    if context.get("status") != "complete":
+        session_id = context.get("sessionId")
+        if not session_id:
+            return None
+        poll_url = f"{base}/web/flights/search-incomplete"
+        completed = False
+        for _ in range(8):
+            time.sleep(0.6)
+            pr = _skyscanner_get(
+                poll_url,
+                params={"sessionId": urllib.parse.quote(session_id, safe="")},
+            )
+            if pr is None or pr.status_code != 200:
+                continue
+            try:
+                data = pr.json().get("data", {})
+            except Exception:
+                continue
+            if not isinstance(data, dict):
+                continue
+            ctx = data.get("context") if isinstance(data.get("context"), dict) else {}
+            if ctx.get("status") == "complete":
+                completed = True
+                break
+        if not completed:
+            return None
+
+    # Step 3: parse buckets[].items[].
+    items = [it for it in _skyscanner_flatten_items(data)
+             if _skyscanner_price(it) is not None]
+    if not items:
+        return None
+
+    cheapest = min(items, key=_skyscanner_price)
+    nonstops = [it for it in items if _skyscanner_is_nonstop(it)]
+    ns = min(nonstops, key=_skyscanner_price) if nonstops else None
+
+    book = None
+    link = cheapest.get("deepLink") or cheapest.get("url")
+    if isinstance(link, str) and link.startswith("http"):
+        book = link
+
+    return {
+        "cheapest_cad": round(_skyscanner_price(cheapest)),
+        "stops": _skyscanner_max_stops(cheapest),
+        "nonstop_cad": round(_skyscanner_price(ns)) if ns else None,
+        "duration_min": _skyscanner_item_duration(cheapest),
+        "nonstop_duration_min": _skyscanner_item_duration(ns) if ns else None,
+        "airlines": _skyscanner_airlines(cheapest),
+        "layovers": _skyscanner_layovers(cheapest),
+        "source": "skyscanner",
+        "book": book,
+    }
+
+
 def serpapi_fare(origin, dest, dep, ret, adults, children):
     """Live Google Flights fares via SerpApi. Price is the PARTY TOTAL in CAD (not per-ticket)."""
     if not SERPAPI_KEY:
@@ -624,7 +850,7 @@ def serpapi_fare(origin, dest, dep, ret, adults, children):
 
 def _get_fare_uncached(origin, dest, dep, ret, adults, children):
     """Try each configured provider in order; return first real priced result."""
-    for provider in (serpapi_fare, amadeus_fare, travelpayouts_fare, kiwi_fare):
+    for provider in (skyscanner_fare, serpapi_fare, amadeus_fare, travelpayouts_fare, kiwi_fare):
         try:
             res = provider(origin, dest, dep, ret, adults, children)
             if res and res.get("cheapest_cad"):

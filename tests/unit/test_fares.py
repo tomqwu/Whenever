@@ -407,11 +407,13 @@ def test_providers_configured_excludes_serpapi_when_unset(monkeypatch):
     assert "serpapi" not in appmod.providers_configured()
 
 
-def test_serpapi_tried_first_in_provider_chain(monkeypatch):
-    """serpapi_fare is called FIRST — before amadeus, travelpayouts, kiwi."""
+def test_serpapi_tried_before_amadeus_in_provider_chain(monkeypatch):
+    """serpapi_fare is tried before amadeus/travelpayouts/kiwi (skyscanner None)."""
     call_order = []
     serpapi_result = {"cheapest_cad": 2675, "stops": 1, "nonstop_cad": 3500,
                       "source": "serpapi", "book": None}
+    monkeypatch.setattr(appmod, "skyscanner_fare",
+                        lambda *a: call_order.append("skyscanner") or None)
     monkeypatch.setattr(appmod, "serpapi_fare",
                         lambda *a: call_order.append("serpapi") or serpapi_result)
     monkeypatch.setattr(appmod, "amadeus_fare",
@@ -424,7 +426,7 @@ def test_serpapi_tried_first_in_provider_chain(monkeypatch):
 
     res = appmod.get_fare("YYZ", "PVG", "2026-12-12", "2027-01-04", 2, 0)
 
-    assert call_order[0] == "serpapi"
+    assert call_order == ["skyscanner", "serpapi"]
     assert res["source"] == "serpapi"
     # amadeus/travelpayouts/kiwi never called because serpapi succeeded
     assert "amadeus" not in call_order
@@ -681,3 +683,428 @@ def test_fallback_chain_reaches_kiwi(monkeypatch):
     res = appmod.get_fare("YYZ", "PVG", "2026-12-12", "2027-01-04", 2, 0)
     assert res["source"] == "kiwi"
     assert res["cheapest_cad"] == 7200
+
+
+# ---------------------------------------------------------------------------
+# skyscanner_fare (RapidAPI flights-sky) tests
+# ---------------------------------------------------------------------------
+
+def _sky_leg(stop_count, duration_min, carriers, place_codes):
+    """Build a flights-sky leg dict.
+
+    carriers: list of marketing airline name strings.
+    place_codes: list of segment endpoint IATA codes, len = stops+2, so segments
+    are consecutive pairs (A->B, B->C, ...); a connection = the middle code(s).
+    """
+    segments = []
+    for i in range(len(place_codes) - 1):
+        segments.append({
+            "origin": {"flightPlaceId": place_codes[i], "displayCode": place_codes[i]},
+            "destination": {"flightPlaceId": place_codes[i + 1],
+                            "displayCode": place_codes[i + 1]},
+            "durationInMinutes": 100,
+        })
+    return {
+        "stopCount": stop_count,
+        "durationInMinutes": duration_min,
+        "carriers": {"marketing": [{"name": n} for n in carriers]},
+        "segments": segments,
+    }
+
+
+def _sky_item(item_id, price, out_leg, ret_leg, deep_link=None):
+    item = {"id": item_id, "price": {"raw": price}, "legs": [out_leg, ret_leg]}
+    if deep_link is not None:
+        item["deepLink"] = deep_link
+    return item
+
+
+def _sky_complete_payload():
+    """A complete flights-sky payload: Best bucket (1-stop, cheaper) + Direct bucket (nonstop, pricier)."""
+    # 1-stop outbound via NRT (3 codes), nonstop return; max stops = 1; dur = 500+330 = 830
+    best_item = _sky_item(
+        "BEST1", 4400.0,
+        _sky_leg(1, 500, ["Air Canada"], ["YYZ", "NRT", "LAX"]),
+        _sky_leg(0, 330, ["Air Canada"], ["LAX", "YYZ"]),
+        deep_link="https://www.skyscanner.ca/book/best1",
+    )
+    # nonstop both directions; max stops = 0; dur = 320+330 = 650
+    direct_item = _sky_item(
+        "DIR1", 5200.0,
+        _sky_leg(0, 320, ["WestJet"], ["YYZ", "LAX"]),
+        _sky_leg(0, 330, ["WestJet"], ["LAX", "YYZ"]),
+    )
+    return {
+        "status": True,
+        "data": {
+            "context": {"status": "complete", "sessionId": "sid"},
+            "itineraries": {"buckets": [
+                {"id": "Best", "items": [best_item]},
+                {"id": "Direct", "items": [direct_item]},
+            ]},
+        },
+    }
+
+
+def test_skyscanner_fare_none_without_key(monkeypatch):
+    """skyscanner_fare returns None immediately when RAPIDAPI_KEY is not set."""
+    monkeypatch.setattr(appmod, "RAPIDAPI_KEY", None)
+    assert appmod.skyscanner_fare("YYZ", "LAX", "2026-08-07", "2026-08-09", 1, 0) is None
+
+
+def test_skyscanner_fare_happy_path_search_then_poll(monkeypatch, fake_resp):
+    """search returns incomplete+sessionId; poll returns complete with buckets.
+
+    Asserts cheapest_cad, stops, duration_min (sum of legs), nonstop_cad +
+    nonstop_duration_min (from Direct item), airlines, layovers, source.
+    """
+    monkeypatch.setattr(appmod, "RAPIDAPI_KEY", "k")
+    monkeypatch.setattr(appmod.time, "sleep", lambda *_a, **_k: None)
+    complete = _sky_complete_payload()
+    calls = []
+
+    def fake_get(url, headers=None, params=None, timeout=None):
+        calls.append((url, params))
+        if url.endswith("/web/flights/search-roundtrip"):
+            # auth headers + IATA place ids present
+            assert headers["x-rapidapi-host"] == appmod.RAPIDAPI_HOST
+            assert headers["x-rapidapi-key"] == "k"
+            assert params["placeIdFrom"] == "YYZ" and params["placeIdTo"] == "LAX"
+            assert params["adults"] == 1
+            return fake_resp(
+                {"status": True,
+                 "data": {"context": {"status": "incomplete", "sessionId": "sid-244"}}},
+                status=200)
+        # poll endpoint: sessionId is URL-encoded
+        assert url.endswith("/web/flights/search-incomplete")
+        assert params["sessionId"] == "sid-244"
+        return fake_resp(complete, status=200)
+
+    monkeypatch.setattr(appmod.requests, "get", fake_get)
+    res = appmod.skyscanner_fare("YYZ", "LAX", "2026-08-07", "2026-08-09", 1, 0)
+
+    assert res is not None
+    assert res["source"] == "skyscanner"
+    assert res["cheapest_cad"] == 4400        # Best item is cheaper
+    assert res["stops"] == 1                  # max(legs stopCount) on cheapest
+    assert res["duration_min"] == 830         # 500 + 330
+    assert res["nonstop_cad"] == 5200         # Direct item price
+    assert res["nonstop_duration_min"] == 650  # 320 + 330
+    assert res["airlines"] == ["Air Canada"]
+    assert res["layovers"] == [{"iata": "NRT", "duration_min": None}]
+    assert res["book"] == "https://www.skyscanner.ca/book/best1"
+    # search then exactly one poll
+    assert len(calls) == 2
+
+
+def test_skyscanner_fare_complete_on_first_call_no_poll(monkeypatch, fake_resp):
+    """If search-roundtrip is already complete, no poll request is made."""
+    monkeypatch.setattr(appmod, "RAPIDAPI_KEY", "k")
+    monkeypatch.setattr(appmod.time, "sleep", lambda *_a, **_k: None)
+    complete = _sky_complete_payload()
+    urls = []
+
+    def fake_get(url, headers=None, params=None, timeout=None):
+        urls.append(url)
+        return fake_resp(complete, status=200)
+
+    monkeypatch.setattr(appmod.requests, "get", fake_get)
+    res = appmod.skyscanner_fare("YYZ", "LAX", "2026-08-07", "2026-08-09", 1, 0)
+    assert res["cheapest_cad"] == 4400
+    assert urls == ["https://" + appmod.RAPIDAPI_HOST + "/web/flights/search-roundtrip"]
+
+
+def test_skyscanner_fare_non_200_returns_none(monkeypatch, fake_resp):
+    """A non-200 search response → None."""
+    monkeypatch.setattr(appmod, "RAPIDAPI_KEY", "k")
+    monkeypatch.setattr(appmod.requests, "get",
+                        lambda *a, **k: fake_resp({}, status=403))
+    assert appmod.skyscanner_fare("YYZ", "LAX", "2026-08-07", "2026-08-09", 1, 0) is None
+
+
+def test_skyscanner_fare_retries_502_then_200(monkeypatch, fake_resp):
+    """A transient 502 on search is retried, then a 200 completes successfully."""
+    monkeypatch.setattr(appmod, "RAPIDAPI_KEY", "k")
+    monkeypatch.setattr(appmod.time, "sleep", lambda *_a, **_k: None)
+    complete = _sky_complete_payload()
+    seq = [fake_resp({}, status=502), complete and fake_resp(complete, status=200)]
+    state = {"i": 0}
+
+    def fake_get(url, headers=None, params=None, timeout=None):
+        r = seq[state["i"]]
+        state["i"] += 1
+        return r
+
+    monkeypatch.setattr(appmod.requests, "get", fake_get)
+    res = appmod.skyscanner_fare("YYZ", "LAX", "2026-08-07", "2026-08-09", 1, 0)
+    assert res is not None
+    assert res["cheapest_cad"] == 4400
+    assert state["i"] == 2  # one 502 retry, then success
+
+
+def test_skyscanner_fare_persistent_502_returns_none(monkeypatch, fake_resp):
+    """If every attempt is 502, the final 502 is returned and handled → None."""
+    monkeypatch.setattr(appmod, "RAPIDAPI_KEY", "k")
+    monkeypatch.setattr(appmod.time, "sleep", lambda *_a, **_k: None)
+    monkeypatch.setattr(appmod.requests, "get",
+                        lambda *a, **k: fake_resp({}, status=502))
+    assert appmod.skyscanner_fare("YYZ", "LAX", "2026-08-07", "2026-08-09", 1, 0) is None
+
+
+def test_skyscanner_fare_request_exception_returns_none(monkeypatch):
+    """A requests-level exception on search → None (never raises)."""
+    monkeypatch.setattr(appmod, "RAPIDAPI_KEY", "k")
+
+    def boom(*a, **k):
+        raise appmod.requests.RequestException("boom")
+
+    monkeypatch.setattr(appmod.requests, "get", boom)
+    assert appmod.skyscanner_fare("YYZ", "LAX", "2026-08-07", "2026-08-09", 1, 0) is None
+
+
+def test_skyscanner_fare_json_decode_error(monkeypatch):
+    """If r.json() raises on the search response, skyscanner_fare returns None."""
+    monkeypatch.setattr(appmod, "RAPIDAPI_KEY", "k")
+
+    class BrokenResp:
+        status_code = 200
+        def json(self):
+            raise ValueError("not json")
+
+    monkeypatch.setattr(appmod.requests, "get", lambda *a, **k: BrokenResp())
+    assert appmod.skyscanner_fare("YYZ", "LAX", "2026-08-07", "2026-08-09", 1, 0) is None
+
+
+def test_skyscanner_fare_empty_buckets_returns_none(monkeypatch, fake_resp):
+    """Complete response but no buckets/items → None."""
+    monkeypatch.setattr(appmod, "RAPIDAPI_KEY", "k")
+    payload = {"data": {"context": {"status": "complete", "sessionId": "s"},
+                        "itineraries": {"buckets": []}}}
+    monkeypatch.setattr(appmod.requests, "get",
+                        lambda *a, **k: fake_resp(payload, status=200))
+    assert appmod.skyscanner_fare("YYZ", "LAX", "2026-08-07", "2026-08-09", 1, 0) is None
+
+
+def test_skyscanner_fare_malformed_item_no_price_skipped(monkeypatch, fake_resp):
+    """An item with no numeric price.raw is skipped; the priced one is used."""
+    monkeypatch.setattr(appmod, "RAPIDAPI_KEY", "k")
+    good = _sky_item("G", 3000.0,
+                     _sky_leg(0, 300, ["AC"], ["YYZ", "LAX"]),
+                     _sky_leg(0, 310, ["AC"], ["LAX", "YYZ"]))
+    bad = {"id": "B", "price": {}, "legs": []}  # no usable price.raw
+    nonitem = "garbage"  # non-dict item is ignored
+    payload = {"data": {"context": {"status": "complete"},
+                        "itineraries": {"buckets": [
+                            {"items": [bad, nonitem, good]},
+                            "not-a-bucket",
+                        ]}}}
+    monkeypatch.setattr(appmod.requests, "get",
+                        lambda *a, **k: fake_resp(payload, status=200))
+    res = appmod.skyscanner_fare("YYZ", "LAX", "2026-08-07", "2026-08-09", 1, 0)
+    assert res["cheapest_cad"] == 3000
+    assert res["nonstop_cad"] == 3000  # the good item is nonstop both legs
+
+
+def test_skyscanner_fare_dedupes_items_across_buckets(monkeypatch, fake_resp):
+    """The same item id in Best + Cheapest buckets is counted once."""
+    monkeypatch.setattr(appmod, "RAPIDAPI_KEY", "k")
+    item = _sky_item("DUP", 4000.0,
+                     _sky_leg(1, 400, ["AC"], ["YYZ", "NRT", "LAX"]),
+                     _sky_leg(1, 410, ["AC"], ["LAX", "NRT", "YYZ"]))
+    payload = {"data": {"context": {"status": "complete"},
+                        "itineraries": {"buckets": [
+                            {"id": "Best", "items": [item]},
+                            {"id": "Cheapest", "items": [item]},
+                        ]}}}
+    monkeypatch.setattr(appmod.requests, "get",
+                        lambda *a, **k: fake_resp(payload, status=200))
+    res = appmod.skyscanner_fare("YYZ", "LAX", "2026-08-07", "2026-08-09", 1, 0)
+    assert res["cheapest_cad"] == 4000
+    assert res["stops"] == 1
+    assert res["nonstop_cad"] is None  # no nonstop item
+    assert res["nonstop_duration_min"] is None
+    # two layovers (one connection per leg)
+    assert res["layovers"] == [{"iata": "NRT", "duration_min": None},
+                               {"iata": "NRT", "duration_min": None}]
+
+
+def test_skyscanner_fare_poll_never_completes_returns_none(monkeypatch, fake_resp):
+    """Search is incomplete and every poll stays incomplete → bounded → None."""
+    monkeypatch.setattr(appmod, "RAPIDAPI_KEY", "k")
+    monkeypatch.setattr(appmod.time, "sleep", lambda *_a, **_k: None)
+    poll_count = {"n": 0}
+
+    def fake_get(url, headers=None, params=None, timeout=None):
+        if url.endswith("/web/flights/search-roundtrip"):
+            return fake_resp(
+                {"data": {"context": {"status": "incomplete", "sessionId": "sid"}}},
+                status=200)
+        poll_count["n"] += 1
+        # poll always returns incomplete
+        return fake_resp({"data": {"context": {"status": "incomplete"}}}, status=200)
+
+    monkeypatch.setattr(appmod.requests, "get", fake_get)
+    res = appmod.skyscanner_fare("YYZ", "LAX", "2026-08-07", "2026-08-09", 1, 0)
+    assert res is None
+    assert poll_count["n"] >= 1  # polling was bounded, not infinite
+
+
+def test_skyscanner_fare_incomplete_no_session_id_returns_none(monkeypatch, fake_resp):
+    """Incomplete search with no sessionId → cannot poll → None."""
+    monkeypatch.setattr(appmod, "RAPIDAPI_KEY", "k")
+    monkeypatch.setattr(appmod.requests, "get",
+                        lambda *a, **k: fake_resp(
+                            {"data": {"context": {"status": "incomplete"}}}, status=200))
+    assert appmod.skyscanner_fare("YYZ", "LAX", "2026-08-07", "2026-08-09", 1, 0) is None
+
+
+def test_skyscanner_fare_poll_recovers_from_transient_failures(monkeypatch, fake_resp):
+    """Poll tolerates a non-200, a json error, and a non-dict before completing."""
+    monkeypatch.setattr(appmod, "RAPIDAPI_KEY", "k")
+    monkeypatch.setattr(appmod.time, "sleep", lambda *_a, **_k: None)
+    complete = _sky_complete_payload()
+
+    class BrokenJson:
+        status_code = 200
+        def json(self):
+            raise ValueError("x")
+
+    poll_responses = [
+        fake_resp({}, status=500),                       # non-200
+        BrokenJson(),                                     # json raises
+        fake_resp({"data": "not-a-dict"}, status=200),   # data not a dict
+        fake_resp(complete, status=200),                 # finally complete
+    ]
+    state = {"i": 0}
+
+    def fake_get(url, headers=None, params=None, timeout=None):
+        if url.endswith("/web/flights/search-roundtrip"):
+            return fake_resp(
+                {"data": {"context": {"status": "incomplete", "sessionId": "sid"}}},
+                status=200)
+        r = poll_responses[state["i"]]
+        state["i"] += 1
+        return r
+
+    monkeypatch.setattr(appmod.requests, "get", fake_get)
+    res = appmod.skyscanner_fare("YYZ", "LAX", "2026-08-07", "2026-08-09", 1, 0)
+    assert res is not None
+    assert res["cheapest_cad"] == 4400
+    assert state["i"] == 4
+
+
+def test_skyscanner_fare_data_not_dict_returns_none(monkeypatch, fake_resp):
+    """If data is not a dict, return None defensively."""
+    monkeypatch.setattr(appmod, "RAPIDAPI_KEY", "k")
+    monkeypatch.setattr(appmod.requests, "get",
+                        lambda *a, **k: fake_resp({"data": [1, 2, 3]}, status=200))
+    assert appmod.skyscanner_fare("YYZ", "LAX", "2026-08-07", "2026-08-09", 1, 0) is None
+
+
+def test_skyscanner_fare_no_book_link(monkeypatch, fake_resp):
+    """When the cheapest item has no deep link, book is None."""
+    monkeypatch.setattr(appmod, "RAPIDAPI_KEY", "k")
+    item = _sky_item("NOLINK", 3000.0,
+                     _sky_leg(0, 300, ["AC"], ["YYZ", "LAX"]),
+                     _sky_leg(0, 310, ["AC"], ["LAX", "YYZ"]))
+    payload = {"data": {"context": {"status": "complete"},
+                        "itineraries": {"buckets": [{"items": [item]}]}}}
+    monkeypatch.setattr(appmod.requests, "get",
+                        lambda *a, **k: fake_resp(payload, status=200))
+    res = appmod.skyscanner_fare("YYZ", "LAX", "2026-08-07", "2026-08-09", 1, 0)
+    assert res["book"] is None
+
+
+def test_skyscanner_fare_missing_duration_and_stops_none(monkeypatch, fake_resp):
+    """Legs without durationInMinutes/stopCount → duration_min/stops None (no fabrication)."""
+    monkeypatch.setattr(appmod, "RAPIDAPI_KEY", "k")
+    leg = {"carriers": {"marketing": [{"name": "AC"}]}, "segments": []}
+    item = {"id": "X", "price": {"raw": 2500.0}, "legs": [leg, leg]}
+    payload = {"data": {"context": {"status": "complete"},
+                        "itineraries": {"buckets": [{"items": [item]}]}}}
+    monkeypatch.setattr(appmod.requests, "get",
+                        lambda *a, **k: fake_resp(payload, status=200))
+    res = appmod.skyscanner_fare("YYZ", "LAX", "2026-08-07", "2026-08-09", 1, 0)
+    assert res["cheapest_cad"] == 2500
+    assert res["duration_min"] is None
+    assert res["stops"] is None
+    assert res["layovers"] == []  # no segments → no connections
+    assert res["nonstop_cad"] is None  # stopCount not 0 (missing) → not nonstop
+
+
+def test_skyscanner_fare_unexpected_itineraries_shape_none(monkeypatch, fake_resp):
+    """itineraries not a dict (buckets unreachable) → None."""
+    monkeypatch.setattr(appmod, "RAPIDAPI_KEY", "k")
+    payload = {"data": {"context": {"status": "complete"}, "itineraries": []}}
+    monkeypatch.setattr(appmod.requests, "get",
+                        lambda *a, **k: fake_resp(payload, status=200))
+    assert appmod.skyscanner_fare("YYZ", "LAX", "2026-08-07", "2026-08-09", 1, 0) is None
+
+
+def test_skyscanner_tried_first_in_provider_chain(monkeypatch):
+    """skyscanner_fare is called FIRST — before serpapi, amadeus, travelpayouts, kiwi."""
+    call_order = []
+    sky_result = {"cheapest_cad": 4400, "stops": 1, "nonstop_cad": 5200,
+                  "source": "skyscanner", "book": None}
+    monkeypatch.setattr(appmod, "skyscanner_fare",
+                        lambda *a: call_order.append("skyscanner") or sky_result)
+    monkeypatch.setattr(appmod, "serpapi_fare",
+                        lambda *a: call_order.append("serpapi") or None)
+    monkeypatch.setattr(appmod, "amadeus_fare",
+                        lambda *a: call_order.append("amadeus") or None)
+    monkeypatch.setattr(appmod, "travelpayouts_fare",
+                        lambda *a: call_order.append("travelpayouts") or None)
+    monkeypatch.setattr(appmod, "kiwi_fare",
+                        lambda *a: call_order.append("kiwi") or None)
+    monkeypatch.setattr(appmod, "FARE_CACHE_TTL", 0)
+
+    res = appmod.get_fare("YYZ", "LAX", "2026-08-07", "2026-08-09", 1, 0)
+
+    assert call_order[0] == "skyscanner"
+    assert res["source"] == "skyscanner"
+    # later providers never called because skyscanner succeeded
+    assert call_order == ["skyscanner"]
+
+
+def test_skyscanner_helpers_empty_leg_edge_cases():
+    """Direct helper coverage: empty/malformed legs and segments degrade gracefully."""
+    # _skyscanner_item_duration: no legs → None
+    assert appmod._skyscanner_item_duration({"legs": []}) is None
+    # _skyscanner_max_stops: no stopCount anywhere → None
+    assert appmod._skyscanner_max_stops({"legs": [{"durationInMinutes": 10}]}) is None
+    # _skyscanner_is_nonstop: no legs → False (cannot claim nonstop)
+    assert appmod._skyscanner_is_nonstop({"legs": []}) is False
+    # _skyscanner_legs: legs not a list → []
+    assert appmod._skyscanner_legs({"legs": "nope"}) == []
+    # _skyscanner_layovers: a leg whose segments is not a list is skipped
+    item = {"legs": [{"segments": "nope"},
+                     {"segments": [
+                         {"destination": {"flightPlaceId": "NRT"}},
+                         {"destination": {"flightPlaceId": "LAX"}},
+                     ]}]}
+    assert appmod._skyscanner_layovers(item) == [{"iata": "NRT", "duration_min": None}]
+    # _skyscanner_price: price not a dict → None
+    assert appmod._skyscanner_price({"price": "x"}) is None
+    # _skyscanner_airlines: carriers missing / non-dict → no names
+    assert appmod._skyscanner_airlines({"legs": [{"carriers": None}]}) == []
+
+
+def test_skyscanner_get_returns_502_when_no_retries_left(monkeypatch, fake_resp):
+    """With retries_502=0 a 502 is returned immediately (no retry, final attempt)."""
+    monkeypatch.setattr(appmod, "RAPIDAPI_KEY", "k")
+    resp = fake_resp({}, status=502)
+    monkeypatch.setattr(appmod.requests, "get", lambda *a, **k: resp)
+    got = appmod._skyscanner_get("https://h/x", params={}, retries_502=0)
+    assert got is resp
+
+
+def test_providers_configured_includes_skyscanner_when_set(monkeypatch):
+    """providers_configured() includes 'skyscanner' only when RAPIDAPI_KEY is set."""
+    monkeypatch.setattr(appmod, "RAPIDAPI_KEY", "somekey")
+    assert "skyscanner" in appmod.providers_configured()
+
+
+def test_providers_configured_excludes_skyscanner_when_unset(monkeypatch):
+    """providers_configured() does NOT include 'skyscanner' when RAPIDAPI_KEY is None."""
+    monkeypatch.setattr(appmod, "RAPIDAPI_KEY", None)
+    assert "skyscanner" not in appmod.providers_configured()
