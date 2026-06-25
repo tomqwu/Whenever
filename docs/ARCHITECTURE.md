@@ -57,7 +57,7 @@ configured, cells return `source: "no-data"` rather than a fabricated number.
 
 ```python
 def get_fare(origin, dest, dep, ret, adults, children):
-    for provider in (serpapi_fare, amadeus_fare, travelpayouts_fare, kiwi_fare):
+    for provider in (skyscanner_fare, serpapi_fare, amadeus_fare, travelpayouts_fare, kiwi_fare):
         res = provider(...)
         if res and res.get("cheapest_cad"):
             return res
@@ -89,10 +89,11 @@ recommendation factors `chosen_duration_min` in (price is balanced against total
 flight time).
 
 **Provider priority (first match wins):**
-1. **SerpApi / Google Flights** (`SERPAPI_KEY`) — live Google Flights results; best coverage for long-haul exact-date searches (e.g. Toronto → China Dec 2026). Prices are party totals in CAD (not per-ticket). No direct booking URL; falls back to Kayak link. The single-call round-trip response exposes only the outbound leg, so `nonstop_cad` is not populated for this provider (no false round-trip nonstop), `stops` reflects the outbound leg only, and `duration_min` is `null` (total round-trip duration unavailable; a future return-leg fetch could populate it).
-2. **Amadeus Self-Service** (`AMADEUS_CLIENT_ID` + `AMADEUS_CLIENT_SECRET`) — test environment; limited inventory.
-3. **Travelpayouts / Aviasales** (`TRAVELPAYOUTS_TOKEN`) — cached market fares; per-ticket price scaled to party total.
-4. **Kiwi / Tequila** (`KIWI_API_KEY`) — real fares with booking deep-links.
+1. **RapidAPI flights-sky / Skyscanner** (`RAPIDAPI_KEY`, host `RAPIDAPI_HOST`) — **preferred; richest data** (round-trip duration, airlines, layovers). Place IDs are plain IATA codes (no resolution step). 3-step async flow: `search-roundtrip` → poll `search-incomplete` until the session is `complete` → parse `itineraries.buckets[].items[]`. Prices are party totals in CAD for the passed `adults`. Transient HTTP 502 on the request is retried a couple times; any other non-200, missing key, or unexpected shape → `None`. `airlines` (cheapest item's marketing carrier names) and `layovers` (connection IATA per leg) ride in the normalized dict for surfacing in the UI.
+2. **SerpApi / Google Flights** (`SERPAPI_KEY`) — live Google Flights results; best coverage for long-haul exact-date searches (e.g. Toronto → China Dec 2026). Prices are party totals in CAD (not per-ticket). No direct booking URL; falls back to Kayak link. The single-call round-trip response exposes only the outbound leg, so `nonstop_cad` is not populated for this provider (no false round-trip nonstop), `stops` reflects the outbound leg only, and `duration_min` is `null` (total round-trip duration unavailable; a future return-leg fetch could populate it).
+3. **Amadeus Self-Service** (`AMADEUS_CLIENT_ID` + `AMADEUS_CLIENT_SECRET`) — test environment; limited inventory.
+4. **Travelpayouts / Aviasales** (`TRAVELPAYOUTS_TOKEN`) — cached market fares; per-ticket price scaled to party total.
+5. **Kiwi / Tequila** (`KIWI_API_KEY`) — real fares with booking deep-links.
 
 To add another provider, write one function with the signature above and prepend/append it to the tuple. No other code changes needed.
 
@@ -113,7 +114,9 @@ the nonstop is "chosen"; otherwise the cheapest connection is chosen. Threshold 
 | `TRAVELPAYOUTS_TOKEN` | Travelpayouts API token | — |
 | `AMADEUS_CLIENT_ID` / `AMADEUS_CLIENT_SECRET` | Amadeus creds | — |
 | `KIWI_API_KEY` | Kiwi/Tequila API key (free Self-Service tier at tequila.kiwi.com) | — |
-| `SERPAPI_KEY` | SerpApi API key for live Google Flights data (free trial at serpapi.com); preferred provider | — |
+| `RAPIDAPI_KEY` | RapidAPI key for the flights-sky (Skyscanner data) API — **preferred** provider (richest data: duration/airlines/layovers) | — |
+| `RAPIDAPI_HOST` | RapidAPI host for the flights-sky API | `flights-sky.p.rapidapi.com` |
+| `SERPAPI_KEY` | SerpApi API key for live Google Flights data (free trial at serpapi.com) | — |
 | `FARE_CACHE_TTL` | In-memory cache TTL (seconds) for fare results. Set `<= 0` to disable. | `3600` |
 | `SEARCH_CONCURRENCY` | Max parallel threads for the departure×return grid fetch in `run_search`. Each cell is one provider call, so large grids × many cities = many provider calls (quota/cost) — recommend modest date spans (default UI: 2×2). | `8` |
 | `MAX_SEARCH_CELLS` | Hard cap on total search grid cells (cities × dep_dates × ret_dates). Each cell = one provider API call. A request exceeding the cap returns HTTP 400 before any fare calls are made. Set `<= 0` to disable the cap. The frontend also shows a soft confirm dialog above 40 cells (see `CONFIRM_CELLS` in `templates/index.html`). | `200` |

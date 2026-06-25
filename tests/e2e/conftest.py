@@ -61,6 +61,7 @@ def _patch_common(monkeypatch):
     monkeypatch.setattr(appmod, "AMADEUS_SECRET", None)
     monkeypatch.setattr(appmod, "TRAVELPAYOUTS_TOKEN", None)
     monkeypatch.setattr(appmod, "SERPAPI_KEY", None)
+    monkeypatch.setattr(appmod, "RAPIDAPI_KEY", None)
     monkeypatch.setattr(appmod, "ollama_ok", lambda: True)
     monkeypatch.setattr(appmod, "get_fare", lambda *a, **k: {
         "cheapest_cad": 8000, "stops": 1, "nonstop_cad": 8500,
