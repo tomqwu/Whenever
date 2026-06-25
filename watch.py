@@ -75,6 +75,13 @@ class WatchDB:
                 book       TEXT
             );
         """)
+        # Canonicalize stored child_ages (sort) so order-variants like [11,9]
+        # and [9,11] share identical raw JSON text. A DB written before ages were
+        # sorted on store can hold both variants for the same trip; without this
+        # pass the de-dup GROUP BY (and the raw-text unique index) would treat
+        # them as distinct and let two active rows survive. Idempotent: a no-op
+        # when every row is already canonical.
+        self._canonicalize_child_ages()
         # Before creating the partial UNIQUE INDEX, collapse any pre-existing
         # duplicate active rows. A DB created before this index (or before
         # `children` joined the key) can hold multiple active rows for the same
@@ -117,6 +124,29 @@ class WatchDB:
                     "watch rows remain after de-dup. Inspect the 'watches' table "
                     f"for active duplicates on the trip key. ({exc})"
                 ) from exc
+        self._conn.commit()
+
+    def _canonicalize_child_ages(self):
+        """Rewrite any non-canonical stored child_ages JSON to sorted form.
+
+        add_watch sorts ages before storing, but a DB written before that change
+        can hold unsorted text (e.g. "[11, 9]"). Re-encoding to the canonical
+        sorted text ("[9, 11]") lets the de-dup pass and the raw-text unique
+        index see order-variants of the same party as one key. Idempotent: rows
+        already canonical are left untouched.
+        """
+        rows = self._conn.execute(
+            "SELECT id, child_ages FROM watches"
+        ).fetchall()
+        for row in rows:
+            raw = row["child_ages"]
+            ages = json.loads(raw or "[]")
+            canonical = json.dumps(sorted(ages))
+            if canonical != raw:
+                self._conn.execute(
+                    "UPDATE watches SET child_ages=? WHERE id=?",
+                    (canonical, row["id"]),
+                )
         self._conn.commit()
 
     def _dedupe_active_watches(self):
@@ -162,7 +192,13 @@ class WatchDB:
         #   - If ages are supplied, they are authoritative (count = len(ages)).
         #   - Otherwise preserve the explicit `children` count (ages unknown),
         #     and store an empty ages list.
+        # Canonicalize ages by sorting before storage so the partial unique
+        # index (keyed on the raw child_ages JSON text) and the route's
+        # order-insensitive dedup pre-check agree: [11,9] and [9,11] for the
+        # same trip become the identical stored text "[9, 11]", collapsing to a
+        # single active row instead of two index-distinct duplicates.
         if child_ages:
+            child_ages = sorted(child_ages)
             children = len(child_ages)
         else:
             child_ages = []

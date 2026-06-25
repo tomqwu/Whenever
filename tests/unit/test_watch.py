@@ -450,7 +450,8 @@ def test_check_all_watches_kayak_fallback_encodes_child_ages(db):
     assert len(drops) == 1
     book = drops[0]["book"]
     assert book.startswith("https://www.kayak.com")
-    assert "children-11-9" in book
+    # Ages are canonicalized (sorted) on store, so the link carries 9-11.
+    assert "children-9-11" in book
 
 
 def test_check_all_watches_kayak_fallback_count_only_placeholder_ages(db):
@@ -485,7 +486,10 @@ def test_check_all_watches_kayak_fallback_no_children_adults_only(db):
 
 
 def test_watchdb_persists_and_parses_child_ages(db):
-    """child_ages is stored JSON-encoded and parsed back to a list; children=len."""
+    """child_ages is stored JSON-encoded and parsed back to a list; children=len.
+
+    Ages are canonicalized (sorted) on store, so [11, 9] persists as [9, 11].
+    """
     db.add_watch(
         origin="YYZ", dest_iata="PEK", dest_city="Beijing",
         dep_date="2026-12-14", ret_date="2027-01-04",
@@ -493,8 +497,63 @@ def test_watchdb_persists_and_parses_child_ages(db):
         created_at="2026-06-23T00:00:00",
     )
     w = db.list_watches()[0]
-    assert w["child_ages"] == [11, 9]
+    assert w["child_ages"] == [9, 11]
     assert w["children"] == 2
+    # The raw stored JSON text is canonical (sorted) so the unique index and
+    # the route's order-insensitive dedup agree on the key.
+    raw = db._conn.execute("SELECT child_ages FROM watches").fetchone()[0]
+    assert raw == "[9, 11]"
+
+
+def test_watchdb_canonicalizes_child_age_order_single_active_row(db):
+    """[11, 9] then [9, 11] for the SAME trip are the same party: the second
+    add collides with the unique index (same canonical stored text) instead of
+    surviving as an index-distinct duplicate."""
+    import sqlite3
+    kwargs = dict(
+        origin="YYZ", dest_iata="PEK", dest_city="Beijing",
+        dep_date="2026-12-14", ret_date="2027-01-04",
+        adults=2, threshold_pct=25.0, created_at="2026-06-23T00:00:00",
+    )
+    db.add_watch(child_ages=[11, 9], **kwargs)
+    with pytest.raises(sqlite3.IntegrityError):
+        db.add_watch(child_ages=[9, 11], **kwargs)
+    actives = db.list_watches(active_only=True)
+    assert len(actives) == 1
+    assert actives[0]["child_ages"] == [9, 11]
+
+
+def test_watchdb_dedupes_preexisting_age_order_variants_on_init(tmp_path):
+    """A pre-canonical DB holding [11,9] and [9,11] active rows for the same
+    trip (distinct to a raw-text index, same party in reality) must collapse to
+    one active row on init and let the unique index be created."""
+    db_path = str(tmp_path / "ages.db")
+
+    db1 = WatchDB(db_path)
+    # Drop the index and INSERT two active rows with DIFFERENT raw age order,
+    # simulating rows written before child_ages was canonicalized on store.
+    db1._conn.execute("DROP INDEX IF EXISTS idx_watch_active_unique")
+    for ages in ("[11, 9]", "[9, 11]"):
+        db1._conn.execute(
+            """INSERT INTO watches
+               (origin, dest_iata, dest_city, dep_date, ret_date,
+                adults, children, child_ages, threshold_pct, created_at, active)
+               VALUES ('YYZ','PEK','Beijing','2026-12-14','2027-01-04',
+                       2, 2, ?, 25.0, '2026-06-23T00:00:00', 1)""",
+            (ages,),
+        )
+    db1._conn.commit()
+    assert len(db1.list_watches(active_only=True)) == 2
+    db1.close()
+
+    db2 = WatchDB(db_path)
+    try:
+        actives = db2.list_watches(active_only=True)
+        assert len(actives) == 1, "order-variant duplicates collapse to one row"
+        cur = db2._conn.execute("SELECT name FROM sqlite_master WHERE type='index'")
+        assert "idx_watch_active_unique" in {r[0] for r in cur.fetchall()}
+    finally:
+        db2.close()
 
 
 def test_watchdb_explicit_children_count_without_ages(db):

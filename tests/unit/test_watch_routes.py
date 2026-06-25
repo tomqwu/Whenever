@@ -57,7 +57,8 @@ def test_add_watch_creates_row(client, watch_db):
     assert row["ret_date"] == "2027-01-04"
     assert row["last_price"] == 8000
     assert row["last_source"] == "travelpayouts"
-    assert row["child_ages"] == [11, 9]
+    # Ages are canonicalized (sorted) on store so uniqueness is order-insensitive.
+    assert row["child_ages"] == [9, 11]
 
 
 def test_add_watch_minimal_body(client, watch_db):
@@ -174,7 +175,7 @@ def test_add_watch_drops_non_int_child_ages(client, watch_db):
     """Non-int child_ages entries are dropped; the int ones are kept."""
     r = client.post("/api/watch", json={**_VALID_BODY, "child_ages": [11, "x", 9, None]})
     assert r.status_code == 200
-    assert watch_db.list_watches()[0]["child_ages"] == [11, 9]
+    assert watch_db.list_watches()[0]["child_ages"] == [9, 11]
 
 
 def test_add_watch_string_child_ages_400(client, watch_db):
@@ -194,7 +195,7 @@ def test_add_watch_list_child_ages_stored(client, watch_db):
     r = client.post("/api/watch", json={**_VALID_BODY, "child_ages": [11, 9]})
     assert r.status_code == 200
     row = watch_db.list_watches()[0]
-    assert row["child_ages"] == [11, 9]
+    assert row["child_ages"] == [9, 11]
     assert row["children"] == 2
 
 
