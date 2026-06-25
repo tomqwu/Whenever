@@ -8,7 +8,7 @@ credentials are set, otherwise from clearly-labeled AI estimates. Every price
 deep-links to a real Kayak search for booking.
 """
 import os, re, json, time, datetime as dt, logging, concurrent.futures, sqlite3
-from functools import lru_cache
+from functools import lru_cache, wraps
 import requests
 import yaml
 from dotenv import load_dotenv
@@ -211,6 +211,83 @@ MAX_SEARCH_CELLS = int(os.environ.get("MAX_SEARCH_CELLS", "200"))
 MAX_DATE_SPAN = int(os.environ.get("MAX_DATE_SPAN", "60"))
 # Dev-server port. Default 5001 to avoid macOS AirPlay Receiver, which holds 5000.
 PORT = int(os.environ.get("PORT", "5001"))
+
+# ----------------------------- rate limiting (#60) -----------------------------
+# Lightweight in-memory per-IP sliding-window rate limiter. No new dependencies.
+# RATE_LIMIT_ENABLED  — set to 0/false/no to disable entirely (tests default off).
+# RATE_LIMIT_WINDOW   — sliding window size in seconds.
+# SEARCH_RATE_PER_MIN — max requests per window for the "search" bucket
+#                       (/api/search, /api/search/stream, /api/export/*).
+# API_RATE_PER_MIN    — max requests per window for the "api" bucket
+#                       (/api/top-cities, /api/suggest, /api/resolve, /api/watch*).
+# / and /api/health are exempt.
+def _parse_bool_env(name, default=True):
+    v = os.environ.get(name, "").strip().lower()
+    if not v:
+        return default
+    return v not in ("0", "false", "no")
+
+RATE_LIMIT_ENABLED: bool = _parse_bool_env("RATE_LIMIT_ENABLED", True)
+RATE_LIMIT_WINDOW: int = int(os.environ.get("RATE_LIMIT_WINDOW", "60"))
+SEARCH_RATE_PER_MIN: int = int(os.environ.get("SEARCH_RATE_PER_MIN", "10"))
+API_RATE_PER_MIN: int = int(os.environ.get("API_RATE_PER_MIN", "60"))
+
+# Module-level sliding-window state: (client_ip, bucket_name) -> [timestamp, ...]
+_rate_state: dict = {}
+
+
+def _rate_time() -> float:
+    """Returns current time. Thin wrapper so tests can monkeypatch it."""
+    return time.time()
+
+
+def _client_ip() -> str:
+    """Return the first-hop client IP from X-Forwarded-For or REMOTE_ADDR."""
+    xff = request.headers.get("X-Forwarded-For", "")
+    if xff:
+        return xff.split(",")[0].strip()
+    return request.remote_addr or "127.0.0.1"
+
+
+def rate_limited(bucket: str, limit_fn):
+    """Decorator factory: apply sliding-window rate limiting to a route.
+
+    Args:
+        bucket:   Logical bucket name (e.g. "search" or "api").
+        limit_fn: Zero-arg callable returning the current per-window limit.
+                  Using a callable instead of a plain int means the limit can
+                  be monkeypatched in tests and the decorator picks it up live.
+    """
+    def decorator(fn):
+        @wraps(fn)
+        def wrapper(*args, **kwargs):
+            if not RATE_LIMIT_ENABLED:
+                return fn(*args, **kwargs)
+            ip = _client_ip()
+            key = (ip, bucket)
+            now = _rate_time()
+            window = RATE_LIMIT_WINDOW
+            limit = limit_fn()
+
+            # Prune timestamps outside the sliding window
+            ts_list = _rate_state.get(key, [])
+            ts_list = [t for t in ts_list if now - t < window]
+
+            if len(ts_list) >= limit:
+                # Compute seconds until the oldest timestamp ages out
+                oldest = ts_list[0]
+                retry_after = max(1, int(oldest + window - now) + 1)
+                resp = jsonify({"error": "rate limit exceeded, slow down"})
+                resp.status_code = 429
+                resp.headers["Retry-After"] = str(retry_after)
+                return resp
+
+            ts_list.append(now)
+            _rate_state[key] = ts_list
+            return fn(*args, **kwargs)
+        return wrapper
+    return decorator
+
 
 def providers_configured():
     p = []
@@ -1125,6 +1202,7 @@ def health():
                     "providers": providers_configured()})
 
 @app.route("/api/top-cities", methods=["POST"])
+@rate_limited("api", lambda: API_RATE_PER_MIN)
 def api_top_cities():
     body = request.get_json(force=True)
     country = (body.get("country") or "").strip()
@@ -1137,6 +1215,7 @@ def api_top_cities():
         return jsonify({"error": f"model error: {e}"}), 502
 
 @app.route("/api/suggest")
+@rate_limited("api", lambda: API_RATE_PER_MIN)
 def api_suggest():
     """GET /api/suggest?q=<text> — type-ahead destination suggestions.
 
@@ -1148,6 +1227,7 @@ def api_suggest():
 
 
 @app.route("/api/resolve", methods=["POST"])
+@rate_limited("api", lambda: API_RATE_PER_MIN)
 def api_resolve():
     body = request.get_json(force=True)
     city = (body.get("city") or "").strip()
@@ -1376,6 +1456,7 @@ def _check_cell_cap(dests, dep_dates, ret_dates):
 
 
 @app.route("/api/search", methods=["POST"])
+@rate_limited("search", lambda: SEARCH_RATE_PER_MIN)
 def api_search():
     b = request.get_json(force=True)
     args = _search_args_from_body(b)
@@ -1389,6 +1470,7 @@ def api_search():
 
 
 @app.route("/api/search/stream", methods=["POST"])
+@rate_limited("search", lambda: SEARCH_RATE_PER_MIN)
 def api_search_stream():
     """POST /api/search/stream — same body as /api/search.
 
@@ -1519,6 +1601,7 @@ def api_search_stream():
 
 
 @app.route("/api/export/csv", methods=["POST"])
+@rate_limited("search", lambda: SEARCH_RATE_PER_MIN)
 def api_export_csv():
     b = request.get_json(force=True)
     args = _search_args_from_body(b)
@@ -1538,6 +1621,7 @@ def api_export_csv():
 
 
 @app.route("/api/export/pdf", methods=["POST"])
+@rate_limited("search", lambda: SEARCH_RATE_PER_MIN)
 def api_export_pdf():
     b = request.get_json(force=True)
     args = _search_args_from_body(b)
@@ -1585,6 +1669,7 @@ def _watch_to_json(row):
 
 
 @app.route("/api/watch", methods=["POST"])
+@rate_limited("api", lambda: API_RATE_PER_MIN)
 def api_watch_add():
     # request.get_json() can return None (no body) or a non-dict (client posts
     # `null`, `[]`, a bare string/number); a subsequent b.get(...) would raise
@@ -1725,6 +1810,7 @@ def api_watch_add():
 
 
 @app.route("/api/watch", methods=["GET"])
+@rate_limited("api", lambda: API_RATE_PER_MIN)
 def api_watch_list():
     db = _watch_db()
     try:
@@ -1735,6 +1821,7 @@ def api_watch_list():
 
 
 @app.route("/api/watch/<int:watch_id>", methods=["DELETE"])
+@rate_limited("api", lambda: API_RATE_PER_MIN)
 def api_watch_remove(watch_id):
     db = _watch_db()
     try:

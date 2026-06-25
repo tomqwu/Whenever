@@ -37,6 +37,10 @@ def _reset_state(monkeypatch):
     assertions.  Each test that needs a provider must set it explicitly
     via its own monkeypatch; those patches are applied after this one and
     take effect correctly because monkeypatch stacks.
+
+    Rate limiter is disabled by default (RATE_LIMIT_ENABLED=False) so the
+    500+ existing tests are not affected.  Tests that exercise the limiter
+    explicitly set RATE_LIMIT_ENABLED=True via their own monkeypatch.
     """
     monkeypatch.setattr(appmod, "AMADEUS_ID", None)
     monkeypatch.setattr(appmod, "AMADEUS_SECRET", None)
@@ -44,6 +48,9 @@ def _reset_state(monkeypatch):
     monkeypatch.setattr(appmod, "KIWI_API_KEY", None)
     monkeypatch.setattr(appmod, "SERPAPI_KEY", None)
     monkeypatch.setattr(appmod, "RAPIDAPI_KEY", None)
+    # Disable rate limiting for all tests unless explicitly re-enabled.
+    monkeypatch.setattr(appmod, "RATE_LIMIT_ENABLED", False)
+    appmod._rate_state.clear()
     appmod.top_cities.cache_clear()
     appmod.resolve_airport.cache_clear()
     appmod._amadeus_token["value"] = None
@@ -55,3 +62,4 @@ def _reset_state(monkeypatch):
     if hasattr(appmod.resolve_airport, "cache_clear"):
         appmod.resolve_airport.cache_clear()
     appmod._fare_cache.clear()
+    appmod._rate_state.clear()

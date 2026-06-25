@@ -136,6 +136,10 @@ the nonstop is "chosen"; otherwise the cheapest connection is chosen. Threshold 
 | `MAX_SEARCH_CELLS` | Hard cap on total search grid cells (cities × dep_dates × ret_dates). Each cell = one provider API call. A request exceeding the cap returns HTTP 400 before any fare calls are made. Set `<= 0` to disable the cap. The frontend also shows a soft confirm dialog above 40 cells (see `CONFIRM_CELLS` in `templates/index.html`). | `200` |
 | `MAX_DATE_SPAN` | Generous per-direction day cap. `dep_span`/`ret_span` (and `date_range`'s `count`) are clamped to this ceiling **before** the date arrays are expanded, so a malformed huge span (e.g. `dep_span=10000000`) can't allocate millions of dates and tie up the worker before the cell cap's 400 fires. The form max is small; this is a safety ceiling, not the typical value. | `60` |
 | `PORT` | Dev-server port (`python app.py`). Default avoids macOS AirPlay Receiver, which holds 5000. | `5001` |
+| `RATE_LIMIT_ENABLED` | Enable in-memory per-IP rate limiting. Set to `0`, `false`, or `no` to disable (e.g. when a reverse proxy already handles this, or in tests). | `true` |
+| `RATE_LIMIT_WINDOW` | Sliding-window size in seconds for rate limiting. | `60` |
+| `SEARCH_RATE_PER_MIN` | Max requests per window for the **search** bucket (`/api/search`, `/api/search/stream`, `/api/export/csv`, `/api/export/pdf`). Exceeding this returns HTTP 429 + `Retry-After`. | `10` |
+| `API_RATE_PER_MIN` | Max requests per window for the **api** bucket (`/api/top-cities`, `/api/suggest`, `/api/resolve`, `/api/watch` POST/GET, `/api/watch/<id>` DELETE). | `60` |
 
 ## Price Watch
 
@@ -217,6 +221,25 @@ remains valid — the seed lookup is deterministic by `(country, n)`.
 
 **Graceful degradation:** If `config/country_seeds.yaml` is absent or unparseable at startup,
 a warning is logged and `_SEED_CONFIG = {}` so all countries fall through to the LLM.
+
+## Rate Limiting (#60)
+
+A lightweight in-memory per-IP sliding-window rate limiter (no new dependencies) guards endpoints that trigger real provider calls.
+
+**Two buckets:**
+- **search** — `/api/search`, `/api/search/stream`, `/api/export/csv`, `/api/export/pdf` (default: 10 req/60 s)
+- **api** — `/api/top-cities`, `/api/suggest`, `/api/resolve`, `/api/watch` (POST/GET/DELETE) (default: 60 req/60 s)
+
+**Exempt:** `/` and `/api/health`.
+
+**Behavior:**
+- Client IP = first hop of `X-Forwarded-For`, or `REMOTE_ADDR`.
+- Sliding window: timestamps older than `RATE_LIMIT_WINDOW` seconds are pruned on each request.
+- If the count ≥ the bucket limit, returns `HTTP 429` with JSON `{"error": "rate limit exceeded, slow down"}` and a `Retry-After` header (seconds until the oldest timestamp ages out).
+- For `/api/search/stream`, the 429 is returned **before** any streaming begins (the decorator runs first).
+- Memory hygiene: pruning on every call keeps per-IP bucket lists bounded to at most `limit` entries.
+- Disable via `RATE_LIMIT_ENABLED=false` (or `0`/`no`) — useful when a reverse proxy already handles rate limiting, or in tests (the autouse `_reset_state` fixture defaults it off so all existing tests are unaffected).
+- Pairs with the existing quota guard (`MAX_SEARCH_CELLS`) — both remain active when rate limiting is enabled.
 
 ## Known limitations
 
