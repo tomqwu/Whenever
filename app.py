@@ -568,6 +568,24 @@ def run_search(origin, dests, adults, child_ages, dep_dates, ret_dates,
     }
 
 
+def _span(v, default=4):
+    """Safely parse a date-span value to an int clamped to [1, MAX_DATE_SPAN].
+
+    Non-numeric or None values (e.g. a stale ``"abc"``) fall back to ``default``
+    instead of raising, so a garbage span on the fallback path degrades to the
+    default span rather than producing a 500. Falsy values (0, "") also fall
+    back to ``default``, preserving the prior ``or 4`` semantics. ``date_range``
+    re-clamps the count internally as a backstop.
+    """
+    if not v:
+        return max(1, min(default, MAX_DATE_SPAN))
+    try:
+        n = int(v)
+    except (ValueError, TypeError):
+        n = default
+    return max(1, min(n, MAX_DATE_SPAN))
+
+
 def _search_args_from_body(b: dict):
     """Parse a request body dict into run_search keyword arguments.
 
@@ -582,13 +600,16 @@ def _search_args_from_body(b: dict):
     dests = b.get("destinations") or []
     adults = int(b.get("adults", 2))
     child_ages = [int(a) for a in (b.get("child_ages") or [])]
-    # Clamp the span to [1, MAX_DATE_SPAN] BEFORE expansion so a malformed huge
-    # value (e.g. dep_span=10000000) can't build millions of dates and tie up the
-    # worker before the cell cap's 400 fires. A bad/negative value floors to 1.
-    dep_span = max(1, min(int(b.get("dep_span", 4) or 4), MAX_DATE_SPAN))
-    ret_span = max(1, min(int(b.get("ret_span", 4) or 4), MAX_DATE_SPAN))
-    dep_dates = b.get("dep_dates") or date_range(b.get("dep_start", ""), dep_span)
-    ret_dates = b.get("ret_dates") or date_range(b.get("ret_start", ""), ret_span)
+    # Span is only consulted on the FALLBACK path (when explicit dep_dates/
+    # ret_dates are not supplied). When explicit date arrays are present, the
+    # span fields are unused and must NOT be parsed at all, so a stale/garbage
+    # span (e.g. dep_span="abc") is ignored rather than raising a 500.
+    dep_dates = b.get("dep_dates")
+    if not dep_dates:
+        dep_dates = date_range(b.get("dep_start", ""), _span(b.get("dep_span", 4)))
+    ret_dates = b.get("ret_dates")
+    if not ret_dates:
+        ret_dates = date_range(b.get("ret_start", ""), _span(b.get("ret_span", 4)))
     threshold_pct = float(b.get("nonstop_threshold", 25))
     families = int(b.get("families", 1))
 

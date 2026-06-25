@@ -179,6 +179,60 @@ class TestSearchArgsFromBody:
         assert result is not None
         assert len(result["dep_dates"]) == 4
 
+    def test_explicit_dates_ignore_garbage_span(self):
+        """Codex review: explicit dep_dates/ret_dates plus a non-numeric stale
+        span (e.g. dep_span='abc') must NOT raise. The span is only consulted on
+        the fallback path; with explicit arrays it is never parsed."""
+        body = {
+            "origin": "YYZ",
+            "destinations": [{"city": "X", "iata": "XXX"}],
+            "dep_dates": ["2026-12-12"],
+            "ret_dates": ["2027-01-04"],
+            "dep_span": "abc", "ret_span": "xyz",
+        }
+        result = appmod._search_args_from_body(body)
+        assert result is not None
+        assert result["dep_dates"] == ["2026-12-12"]
+        assert result["ret_dates"] == ["2027-01-04"]
+
+    def test_fallback_huge_span_clamped(self):
+        """Fallback path: a huge numeric span is still clamped to MAX_DATE_SPAN."""
+        body = {
+            "origin": "YYZ",
+            "destinations": [{"city": "X", "iata": "XXX"}],
+            "dep_start": "2026-12-12", "dep_span": 10_000_000,
+            "ret_start": "2027-01-04", "ret_span": 2,
+        }
+        result = appmod._search_args_from_body(body)
+        assert result is not None
+        assert len(result["dep_dates"]) == appmod.MAX_DATE_SPAN
+        assert len(result["ret_dates"]) == 2
+
+    def test_fallback_garbage_span_degrades_no_crash(self):
+        """Fallback path (no explicit dates): a garbage span degrades to the
+        default span instead of raising a 500."""
+        body = {
+            "origin": "YYZ",
+            "destinations": [{"city": "X", "iata": "XXX"}],
+            "dep_start": "2026-12-12", "dep_span": "abc",
+            "ret_start": "2027-01-04", "ret_span": None,
+        }
+        result = appmod._search_args_from_body(body)
+        assert result is not None
+        # default span (4) applied since the span could not be parsed
+        assert len(result["dep_dates"]) == 4
+        assert len(result["ret_dates"]) == 4
+
+    def test_fallback_garbage_span_missing_start_returns_none(self):
+        """Fallback path with a garbage span AND a missing start: degrades to a
+        400 (None) via empty date_range, never a 500."""
+        body = {
+            "origin": "YYZ",
+            "destinations": [{"city": "X", "iata": "XXX"}],
+            "dep_span": "abc", "ret_span": "abc",
+        }
+        assert appmod._search_args_from_body(body) is None
+
 
 # ---------------------------------------------------------------------------
 # api_search still behaves identically after refactor
