@@ -100,7 +100,36 @@ def test_travelpayouts_scales_and_builds_book_link(monkeypatch, fake_resp):
     # duration_min = cheapest itinerary (900); nonstop_duration_min = chosen nonstop (600)
     assert res["duration_min"] == 900
     assert res["nonstop_duration_min"] == 600
-    # travelpayouts gives no per-itinerary carrier detail → nonstop_airlines None
+    # nonstop option here carries no airline field → nonstop_airlines None
+    assert res["nonstop_airlines"] is None
+
+
+def test_travelpayouts_nonstop_airlines_from_nonstop_option(monkeypatch, fake_resp):
+    """travelpayouts: nonstop_airlines = the NONSTOP option's own carrier code,
+    distinct from the cheapest's, and the nonstop-chosen cell uses it (codex P2)."""
+    monkeypatch.setattr(appmod, "TRAVELPAYOUTS_TOKEN", "tok")
+    data = [
+        {"price": 1000, "transfers": 1, "return_transfers": 0, "airline": "AC"},
+        {"price": 1100, "transfers": 0, "return_transfers": 0, "airline": "AF"},
+    ]
+    monkeypatch.setattr(appmod.requests, "get",
+                        lambda *a, **k: fake_resp({"data": data}, status=200))
+    res = appmod.travelpayouts_fare("YYZ", "PVG", "2026-12-12", "2027-01-04", 2, 0)
+    assert res["airlines"] == ["AC"]                 # cheapest's carrier
+    assert res["nonstop_airlines"] == ["AF"]         # nonstop option's own carrier
+    # nonstop is within threshold → chosen=nonstop → chosen_airlines uses nonstop_airlines
+    cell = appmod._build_cell("YYZ", "PVG", "2026-12-12", "2027-01-04", 2, [], res, 0.25)
+    assert cell["chosen"] == "nonstop"
+    assert cell["chosen_airlines"] == ["AF"]
+
+
+def test_travelpayouts_no_nonstop_airlines_none(monkeypatch, fake_resp):
+    """travelpayouts: no nonstop option → nonstop_airlines None."""
+    monkeypatch.setattr(appmod, "TRAVELPAYOUTS_TOKEN", "tok")
+    data = [{"price": 1000, "transfers": 1, "return_transfers": 0, "airline": "AC"}]
+    monkeypatch.setattr(appmod.requests, "get",
+                        lambda *a, **k: fake_resp({"data": data}, status=200))
+    res = appmod.travelpayouts_fare("YYZ", "PVG", "2026-12-12", "2027-01-04", 2, 0)
     assert res["nonstop_airlines"] is None
 
 

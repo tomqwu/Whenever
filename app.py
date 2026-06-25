@@ -553,9 +553,10 @@ def travelpayouts_fare(origin, dest, dep, ret, adults, children):
         # detail. airlines -> [code] (or [] when absent); layovers -> None (the
         # provider can't supply connection airports/durations).
         "airlines": [cheapest["airline"]] if cheapest.get("airline") else [],
-        # Travelpayouts gives a single airline code per result with no itinerary
-        # detail, so we can't attribute carriers to the nonstop pick specifically.
-        "nonstop_airlines": None,
+        # The nonstop pick carries its own single airline code: surface it so the
+        # chosen-nonstop cell attributes the real carrier (mirrors `airlines`).
+        # None when there's no nonstop option or it lacks an airline field.
+        "nonstop_airlines": [ns["airline"]] if ns and ns.get("airline") else None,
         "layovers": None,
     }
 
