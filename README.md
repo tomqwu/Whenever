@@ -28,6 +28,7 @@ cd Whenever
   where one exists; nonstop is auto-picked when its premium is within your threshold.
 - **Clickable prices** → every fare deep-links to Kayak/Google Flights to book.
 - **AI recommendation** → DeepSeek reads the grid and names the single best trip.
+- **Export results** → after a search, download the fare matrix as a PDF or CSV from the UI.
 
 ## Prerequisites
 
