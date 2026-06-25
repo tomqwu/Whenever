@@ -620,7 +620,10 @@ function wireWatchButtons(metaInfo, bestByCityIdx) {
     const btn = document.getElementById('card-watch-' + di);
     if (!btn) return;
     const best = bestByCityIdx[di];
-    if (!best) return;  // only cities with a priced best can be watched
+    // Only cities with a priced best can be watched. The scheduler compares the
+    // baseline against cheapest_cad, so a watch only makes sense (and the
+    // baseline only seeds correctly) when cheapest_cad is present.
+    if (!best || best.cheapest_cad == null) return;
     btn.style.display = '';
     btn.onclick = async () => {
       const body = {
@@ -632,7 +635,12 @@ function wireWatchButtons(metaInfo, bestByCityIdx) {
         adults: metaInfo.adults,
         child_ages: metaInfo.child_ages || [],
         threshold_pct: metaInfo.nonstop_threshold,
-        last_price: best.chosen_cad,
+        // Seed the baseline with cheapest_cad — the exact value
+        // check_all_watches re-fetches and compares against — so an UNCHANGED
+        // fare never looks like a drop on the first scheduler run. Using
+        // chosen_cad (which can be the premium nonstop price) would seed a
+        // higher baseline than the scheduler ever reads back. (codex review)
+        last_price: best.cheapest_cad,
         last_source: best.source,
       };
       btn.disabled = true;

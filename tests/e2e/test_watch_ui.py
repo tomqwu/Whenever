@@ -53,6 +53,52 @@ def test_watch_button_saves_trip(seed_live_server, page):
     assert "PEK" in trip_text and "Beijing" in trip_text
 
 
+def test_watch_seeds_baseline_with_cheapest_not_chosen(seed_live_server, page):
+    """The baseline POSTed to /api/watch must be cheapest_cad, never chosen_cad.
+
+    The mocked backend prices every cell at cheapest_cad=8000 / nonstop_cad=8500
+    with a 25% nonstop threshold, so the deterministic best cell is a NONSTOP
+    pick (chosen='nonstop', chosen_cad=8500). check_all_watches re-fetches and
+    compares against cheapest_cad (8000), so seeding the baseline with the
+    premium chosen_cad (8500) would make an UNCHANGED fare look like an
+    8500→8000 drop on the very first scheduler run. The baseline must therefore
+    be 8000 (cheapest), captured here straight off the POST request body, and
+    confirmed again via GET /api/watch.
+    """
+    _run_search(page, seed_live_server)
+
+    posted = {}
+
+    def _capture(route, request):
+        # The glob matches both the POST (save) and the GET (list refresh);
+        # only the POST carries the body we want, so ignore the GET.
+        if request.method == "POST":
+            try:
+                posted["body"] = request.post_data_json
+            except Exception:
+                posted["body"] = None
+        route.continue_()
+
+    page.route("**/api/watch", _capture)
+    try:
+        page.click("#card-watch-0")
+        page.wait_for_selector("#watchedList .watched-item", timeout=15000)
+    finally:
+        page.unroute("**/api/watch", _capture)
+
+    # Asserted off the intercepted request body: cheapest (8000), not 8500.
+    assert posted.get("body") is not None, "POST /api/watch body was not captured"
+    assert posted["body"]["last_price"] == 8000
+    assert posted["body"]["last_price"] != 8500  # not the chosen/nonstop price
+    assert posted["body"]["last_source"] == "test"
+
+    # And confirmed through the persisted record (GET /api/watch).
+    data = page.evaluate("async () => (await (await fetch('/api/watch')).json())")
+    watches = data["watches"]
+    assert len(watches) == 1
+    assert watches[0]["last_price"] == 8000
+
+
 def test_watch_remove_button(seed_live_server, page):
     """The ✕ remove button DELETEs a watched trip and clears it from the list."""
     _run_search(page, seed_live_server)
