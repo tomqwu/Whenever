@@ -7,7 +7,7 @@ LLM via Ollama (default model: deepseek-v4pro). Fares come from Amadeus if
 credentials are set, otherwise from clearly-labeled AI estimates. Every price
 deep-links to a real Kayak search for booking.
 """
-import os, re, json, time, datetime as dt, logging
+import os, re, json, time, datetime as dt, logging, concurrent.futures
 from functools import lru_cache
 import requests
 import yaml
@@ -50,6 +50,7 @@ KIWI_API_KEY = os.environ.get("KIWI_API_KEY")
 SERPAPI_KEY = os.environ.get("SERPAPI_KEY")
 CURRENCY = os.environ.get("CURRENCY", "cad").lower()
 FARE_CACHE_TTL = int(os.environ.get("FARE_CACHE_TTL", "3600"))
+SEARCH_CONCURRENCY = int(os.environ.get("SEARCH_CONCURRENCY", "8"))
 # Dev-server port. Default 5001 to avoid macOS AirPlay Receiver, which holds 5000.
 PORT = int(os.environ.get("PORT", "5001"))
 
@@ -479,18 +480,44 @@ def run_search(origin, dests, adults, child_ages, dep_dates, ret_dates,
     threshold_pct: nonstop premium % (e.g. 25). Returns dict with keys
     origin, adults, child_ages, families, dep_dates, ret_dates, results,
     recommendation, providers.
+
+    All dep×ret cells across all destinations are fetched concurrently via a
+    bounded ThreadPoolExecutor (SEARCH_CONCURRENCY workers, default 8).
+    Results are assembled into the original dest/dep/ret order so the output
+    is identical to the former sequential implementation.
     """
     children = len(child_ages)
     threshold = threshold_pct / 100.0
 
+    # Build the flat task list preserving (dest_idx, dep_idx, ret_idx) positions.
+    tasks = []
+    for di, dest in enumerate(dests):
+        code = (dest.get("iata") or "").upper()[:3]
+        for dpi, dep in enumerate(dep_dates):
+            for ri, ret in enumerate(ret_dates):
+                tasks.append((di, dpi, ri, code, dep, ret))
+
+    # Fetch all cells concurrently.
+    fare_results: dict = {}  # (di, dpi, ri) -> fare dict
+    workers = max(1, SEARCH_CONCURRENCY)
+
+    def _fetch(task):
+        di, dpi, ri, code, dep, ret = task
+        return (di, dpi, ri), get_fare(origin, code, dep, ret, adults, children)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+        for key, fare in pool.map(_fetch, tasks):
+            fare_results[key] = fare
+
+    # Assemble results in the original dest order.
     results = []
-    for dest in dests:
+    for di, dest in enumerate(dests):
         code = (dest.get("iata") or "").upper()[:3]
         grid = []
-        for dep in dep_dates:
+        for dpi, dep in enumerate(dep_dates):
             row = []
-            for ret in ret_dates:
-                f = get_fare(origin, code, dep, ret, adults, children)
+            for ri, ret in enumerate(ret_dates):
+                f = fare_results[(di, dpi, ri)]
                 cheap = f.get("cheapest_cad")
                 ns = f.get("nonstop_cad")
                 chosen = "cheapest"

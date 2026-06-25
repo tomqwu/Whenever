@@ -45,7 +45,7 @@ configured, cells return `source: "no-data"` rather than a fabricated number.
 3. **`POST /api/resolve`** `{city}` → `resolve_airport()` maps a city name to an IATA code.
 4. **`POST /api/search`** — the main endpoint:
    - builds the departure × return date grid,
-   - calls `get_fare(origin, dest, dep, ret, adults, children)` per cell,
+   - calls `get_fare(origin, dest, dep, ret, adults, children)` per cell **concurrently** via a `ThreadPoolExecutor` (bounded by `SEARCH_CONCURRENCY`, default 8),
    - applies the **nonstop-preference rule** (pick nonstop if within the premium threshold),
    - finds the best cell per city,
    - calls `build_recommendation()` → Ollama analyzes the grid and names the best value.
@@ -98,6 +98,7 @@ the nonstop is "chosen"; otherwise the cheapest connection is chosen. Threshold 
 | `KIWI_API_KEY` | Kiwi/Tequila API key (free Self-Service tier at tequila.kiwi.com) | — |
 | `SERPAPI_KEY` | SerpApi API key for live Google Flights data (free trial at serpapi.com); preferred provider | — |
 | `FARE_CACHE_TTL` | In-memory cache TTL (seconds) for fare results. Set `<= 0` to disable. | `3600` |
+| `SEARCH_CONCURRENCY` | Max parallel threads for the departure×return grid fetch in `run_search`. Each cell is one provider call, so large grids × many cities = many provider calls (quota/cost) — recommend modest date spans (default UI: 2×2). | `8` |
 | `PORT` | Dev-server port (`python app.py`). Default avoids macOS AirPlay Receiver, which holds 5000. | `5001` |
 
 ## Price Watch

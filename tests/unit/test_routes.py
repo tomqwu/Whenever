@@ -212,3 +212,54 @@ def test_search_string_fractional_threshold_does_not_raise(client, monkeypatch):
     }
     r = client.post("/api/search", json=payload)
     assert r.status_code == 200, "String '25.5' threshold must not crash the route"
+
+
+# ---------------------------------------------------------------------------
+# Export route coverage — /api/export/csv and /api/export/pdf
+# ---------------------------------------------------------------------------
+
+_EXPORT_PAYLOAD = {
+    "origin": "YYZ",
+    "destinations": [{"city": "Shanghai", "iata": "PVG"}],
+    "dep_dates": ["2026-12-12"],
+    "ret_dates": ["2027-01-04"],
+}
+
+_FAKE_FARE = {
+    "cheapest_cad": 1200, "stops": 1, "nonstop_cad": None,
+    "source": "test", "book": None,
+}
+
+
+def test_export_csv_returns_csv(client, monkeypatch):
+    """POST /api/export/csv must return text/csv with the grid data."""
+    monkeypatch.setattr(appmod, "get_fare", lambda *a, **k: _FAKE_FARE)
+    monkeypatch.setattr(appmod, "build_recommendation", lambda *a, **k: "rec")
+
+    r = client.post("/api/export/csv", json=_EXPORT_PAYLOAD)
+    assert r.status_code == 200
+    assert "text/csv" in r.content_type
+    assert b"PVG" in r.data
+
+
+def test_export_csv_bad_payload_returns_400(client):
+    """POST /api/export/csv with missing fields must return 400."""
+    r = client.post("/api/export/csv", json={"origin": ""})
+    assert r.status_code == 400
+
+
+def test_export_pdf_returns_pdf(client, monkeypatch):
+    """POST /api/export/pdf must return application/pdf bytes."""
+    monkeypatch.setattr(appmod, "get_fare", lambda *a, **k: _FAKE_FARE)
+    monkeypatch.setattr(appmod, "build_recommendation", lambda *a, **k: "rec")
+
+    r = client.post("/api/export/pdf", json=_EXPORT_PAYLOAD)
+    assert r.status_code == 200
+    assert r.content_type == "application/pdf"
+    assert r.data[:4] == b"%PDF"
+
+
+def test_export_pdf_bad_payload_returns_400(client):
+    """POST /api/export/pdf with missing fields must return 400."""
+    r = client.post("/api/export/pdf", json={"origin": ""})
+    assert r.status_code == 400
