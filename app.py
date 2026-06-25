@@ -7,7 +7,7 @@ LLM via Ollama (default model: deepseek-v4pro). Fares come from Amadeus if
 credentials are set, otherwise from clearly-labeled AI estimates. Every price
 deep-links to a real Kayak search for booking.
 """
-import os, re, json, time, datetime as dt, logging, concurrent.futures, sqlite3, urllib.parse
+import os, re, json, time, datetime as dt, logging, concurrent.futures, sqlite3
 from functools import lru_cache
 import requests
 import yaml
@@ -704,9 +704,10 @@ def skyscanner_fare(origin, dest, dep, ret, adults, children):
 
     3-step async flow: (1) search-roundtrip, (2) poll search-incomplete until the
     session is complete, (3) parse buckets[].items[]. Place IDs are IATA codes.
-    Price is the party total for the passed adults. Defensive: missing key, any
-    non-200 (except a retried 502), no buckets/items, or unexpected shape → None.
-    Never fabricates.
+    Price is the party total for the passed adults AND children (both sent to the
+    search so family quotes are not adults-only; verified live that ``children``
+    changes the returned price.raw). Defensive: missing key, any non-200 (except a
+    retried 502), no buckets/items, or unexpected shape → None. Never fabricates.
     """
     if not RAPIDAPI_KEY:
         return None
@@ -714,7 +715,8 @@ def skyscanner_fare(origin, dest, dep, ret, adults, children):
     params = {
         "placeIdFrom": origin, "placeIdTo": dest,
         "departDate": dep, "returnDate": ret,
-        "adults": adults, "currency": "CAD", "market": "CA",
+        "adults": adults, "children": children,
+        "currency": "CAD", "market": "CA",
         "locale": "en-US", "cabinClass": "economy",
     }
     r = _skyscanner_get(f"{base}/web/flights/search-roundtrip", params=params)
@@ -739,7 +741,7 @@ def skyscanner_fare(origin, dest, dep, ret, adults, children):
             time.sleep(0.6)
             pr = _skyscanner_get(
                 poll_url,
-                params={"sessionId": urllib.parse.quote(session_id, safe="")},
+                params={"sessionId": session_id},
             )
             if pr is None or pr.status_code != 200:
                 continue

@@ -771,11 +771,12 @@ def test_skyscanner_fare_happy_path_search_then_poll(monkeypatch, fake_resp):
             assert headers["x-rapidapi-key"] == "k"
             assert params["placeIdFrom"] == "YYZ" and params["placeIdTo"] == "LAX"
             assert params["adults"] == 1
+            assert params["children"] == 0
             return fake_resp(
                 {"status": True,
                  "data": {"context": {"status": "incomplete", "sessionId": "sid-244"}}},
                 status=200)
-        # poll endpoint: sessionId is URL-encoded
+        # poll endpoint: raw sessionId passed through (requests encodes once)
         assert url.endswith("/web/flights/search-incomplete")
         assert params["sessionId"] == "sid-244"
         return fake_resp(complete, status=200)
@@ -1039,6 +1040,63 @@ def test_skyscanner_fare_unexpected_itineraries_shape_none(monkeypatch, fake_res
     monkeypatch.setattr(appmod.requests, "get",
                         lambda *a, **k: fake_resp(payload, status=200))
     assert appmod.skyscanner_fare("YYZ", "LAX", "2026-08-07", "2026-08-09", 1, 0) is None
+
+
+def test_skyscanner_fare_search_passes_children_when_present(monkeypatch, fake_resp):
+    """Family searches send children=<n> so the Skyscanner quote counts kids.
+
+    Without this, price.raw is adults-only and underprices child itineraries
+    (and skyscanner is tried first, so it wins + caches the wrong total).
+    Captures the search-roundtrip params from the mocked requests.get.
+    """
+    monkeypatch.setattr(appmod, "RAPIDAPI_KEY", "k")
+    monkeypatch.setattr(appmod.time, "sleep", lambda *_a, **_k: None)
+    complete = _sky_complete_payload()
+    captured = {}
+
+    def fake_get(url, headers=None, params=None, timeout=None):
+        if url.endswith("/web/flights/search-roundtrip"):
+            captured.update(params)
+            return fake_resp(complete, status=200)
+        return fake_resp(complete, status=200)
+
+    monkeypatch.setattr(appmod.requests, "get", fake_get)
+    res = appmod.skyscanner_fare("YYZ", "LAX", "2026-08-07", "2026-08-09", 2, 2)
+
+    assert res is not None
+    assert captured["adults"] == 2
+    assert captured["children"] == 2
+
+
+def test_skyscanner_fare_poll_uses_raw_session_id(monkeypatch, fake_resp):
+    """A sessionId containing /, +, = is passed RAW to the poll request.
+
+    requests' params= encodes once; pre-quoting would double-encode (e.g. / ->
+    %252F) so the poll could not find the session. The mock must receive the
+    original raw sessionId, not a percent-encoded form.
+    """
+    monkeypatch.setattr(appmod, "RAPIDAPI_KEY", "k")
+    monkeypatch.setattr(appmod.time, "sleep", lambda *_a, **_k: None)
+    raw_sid = "a/b+c=d=="
+    complete = _sky_complete_payload()
+    poll_params = {}
+
+    def fake_get(url, headers=None, params=None, timeout=None):
+        if url.endswith("/web/flights/search-roundtrip"):
+            return fake_resp(
+                {"status": True,
+                 "data": {"context": {"status": "incomplete", "sessionId": raw_sid}}},
+                status=200)
+        assert url.endswith("/web/flights/search-incomplete")
+        poll_params.update(params)
+        return fake_resp(complete, status=200)
+
+    monkeypatch.setattr(appmod.requests, "get", fake_get)
+    res = appmod.skyscanner_fare("YYZ", "LAX", "2026-08-07", "2026-08-09", 1, 0)
+
+    assert res is not None
+    # raw, not %252F / %252B / %253D etc.
+    assert poll_params["sessionId"] == raw_sid
 
 
 def test_skyscanner_tried_first_in_provider_chain(monkeypatch):
