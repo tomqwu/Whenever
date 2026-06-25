@@ -105,6 +105,8 @@ td.err{color:#b94a48;font-size:11px}
 
     <div class="row" style="margin-top:16px;align-items:center">
       <button id="run">Find best value</button>
+      <button id="exportPdf" class="sec" disabled>&#8203;&#11015; PDF</button>
+      <button id="exportCsv" class="sec" disabled>&#8203;&#11015; CSV</button>
       <span class="hint" id="runHint"></span>
     </div>
   </div>
@@ -120,6 +122,7 @@ td.err{color:#b94a48;font-size:11px}
 const $ = s => document.querySelector(s);
 let CITIES = [];   // [{city,iata,on}]
 let LAST = null;
+let LAST_PAYLOAD = null;  // last submitted search payload, used by export buttons
 
 function fmtDate(iso){
   const d = new Date(iso+'T00:00:00');
@@ -230,6 +233,7 @@ $('#run').onclick = async () => {
     ret_start: $('#retStart').value, ret_span: parseInt($('#retSpan').value) || 2,
     nonstop_threshold: parseFloat($('#thresh').value) || 25,
   };
+  LAST_PAYLOAD = payload;  // capture for export buttons
   $('#run').disabled = true;
   $('#runHint').textContent = 'Searching ' + dests.length + ' cities…';
   $('#prog').style.width = '5%';
@@ -365,6 +369,8 @@ $('#run').onclick = async () => {
         succeeded = true;
         $('#prog').style.width = '100%';
         setTimeout(() => { $('#prog').style.width = '0%'; }, 600);
+        $('#exportPdf').disabled = false;
+        $('#exportCsv').disabled = false;
       }
     }
 
@@ -466,6 +472,47 @@ function render(data){
     (noData?'<span class="warn">Some cells returned no fares from the API. </span>':'')+
     'Per family of '+(data.adults+data.child_ages.length)+'. Prices CAD · click any price to open the booking.';
 }
+
+async function triggerExport(endpoint, defaultFilename, btnEl, loadingLabel) {
+  if (!LAST_PAYLOAD) return;  // defensive: should never happen (button is disabled)
+  const origText = btnEl.textContent;
+  btnEl.disabled = true;
+  btnEl.textContent = loadingLabel;
+  try {
+    const resp = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(LAST_PAYLOAD),
+    });
+    if (!resp.ok) {
+      let msg = 'Export failed (' + resp.status + ')';
+      try { const e = await resp.json(); if (e.error) msg = e.error; } catch (_) {}
+      alert(msg);
+      return;
+    }
+    const blob = await resp.blob();
+    // Try to extract filename from Content-Disposition
+    const cd = resp.headers.get('Content-Disposition') || '';
+    const match = cd.match(/filename="([^"]+)"/);
+    const filename = match ? match[1] : defaultFilename;
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  } catch (e) {
+    alert('Export failed: ' + e);
+  } finally {
+    btnEl.textContent = origText;
+    btnEl.disabled = false;
+  }
+}
+
+$('#exportPdf').onclick = () => triggerExport('/api/export/pdf', 'whenever-matrix.pdf', $('#exportPdf'), 'Preparing PDF…');
+$('#exportCsv').onclick = () => triggerExport('/api/export/csv', 'whenever-matrix.csv', $('#exportCsv'), 'Preparing CSV…');
 
 renderKids([11,9]);
 health();
