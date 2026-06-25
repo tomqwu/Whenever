@@ -369,6 +369,70 @@ def parse_iso_duration(s):
     return int(hours or 0) * 60 + int(minutes or 0)
 
 
+def _amadeus_airlines(offer):
+    """Unique segment carrierCodes across all itineraries of an offer (order-preserving).
+
+    Amadeus gives IATA carrier codes (e.g. "AC"), not display names, so these are
+    codes. Returns [] when no segment carries a carrierCode (never fabricated).
+    """
+    codes = []
+    for it in offer.get("itineraries") or []:
+        if not isinstance(it, dict):
+            continue
+        for seg in it.get("segments") or []:
+            code = seg.get("carrierCode") if isinstance(seg, dict) else None
+            if code and code not in codes:
+                codes.append(code)
+    return codes
+
+
+def _amadeus_seg_iata(point):
+    """IATA code from an Amadeus segment endpoint (departure/arrival), or None."""
+    return point.get("iataCode") if isinstance(point, dict) else None
+
+
+def _amadeus_layovers(offer):
+    """Connection layovers derived from an offer's itineraries[].segments[].
+
+    A layover is the gap between consecutive segments within one itinerary: its IATA
+    is segment N's arrival airport, and its duration is the minutes between segment
+    N's arrival time and segment N+1's departure time (ISO-8601 timestamps). If the
+    timestamps are missing/unparseable the duration is None (best-effort, never
+    fabricated). Returns [] for an all-nonstop offer.
+    """
+    out = []
+    for it in offer.get("itineraries") or []:
+        if not isinstance(it, dict):
+            continue
+        segs = [s for s in (it.get("segments") or []) if isinstance(s, dict)]
+        for i in range(len(segs) - 1):
+            iata = _amadeus_seg_iata(segs[i].get("arrival"))
+            arr_at = segs[i].get("arrival", {}).get("at") if isinstance(segs[i].get("arrival"), dict) else None
+            dep_at = segs[i + 1].get("departure", {}).get("at") if isinstance(segs[i + 1].get("departure"), dict) else None
+            out.append({"iata": iata, "duration_min": _iso_gap_minutes(arr_at, dep_at)})
+    return out
+
+
+def _iso_gap_minutes(start, end):
+    """Whole-minute gap between two ISO-8601 datetime strings, or None if unparseable.
+
+    Used for Amadeus connection layover durations (arrival of seg N → departure of
+    seg N+1). A missing/malformed value (or a negative gap) yields None — never
+    fabricated.
+    """
+    if not isinstance(start, str) or not isinstance(end, str):
+        return None
+    try:
+        a = dt.datetime.fromisoformat(start)
+        b = dt.datetime.fromisoformat(end)
+    except (ValueError, TypeError):
+        return None
+    secs = (b - a).total_seconds()
+    if secs < 0:
+        return None
+    return int(round(secs / 60.0))
+
+
 _amadeus_token = {"value": None, "exp": 0}
 
 def amadeus_token():
@@ -431,6 +495,8 @@ def amadeus_fare(origin, dest, dep, ret, adults, children):
         "source": "amadeus",
         "duration_min": duration(cheapest),
         "nonstop_duration_min": duration(ns) if ns else None,
+        "airlines": _amadeus_airlines(cheapest),
+        "layovers": _amadeus_layovers(cheapest),
     }
 
 def travelpayouts_fare(origin, dest, dep, ret, adults, children):
@@ -482,7 +548,72 @@ def travelpayouts_fare(origin, dest, dep, ret, adults, children):
         "book": book,
         "duration_min": duration(cheapest),
         "nonstop_duration_min": duration(ns) if ns else None,
+        # Travelpayouts gives a single airline code per result and no per-stop
+        # detail. airlines -> [code] (or [] when absent); layovers -> None (the
+        # provider can't supply connection airports/durations).
+        "airlines": [cheapest["airline"]] if cheapest.get("airline") else [],
+        "layovers": None,
     }
+
+def _kiwi_airlines(itin):
+    """Unique carrier codes for a Tequila itinerary.
+
+    Prefers the top-level ``airlines`` list (IATA codes); falls back to the
+    per-segment ``route[].airline`` codes. These are codes, not display names.
+    Returns [] when none are present (never fabricated).
+    """
+    codes = []
+    top = itin.get("airlines") if isinstance(itin, dict) else None
+    if isinstance(top, list):
+        for c in top:
+            if c and c not in codes:
+                codes.append(c)
+    if codes:
+        return codes
+    for seg in (itin.get("route") or []) if isinstance(itin, dict) else []:
+        c = seg.get("airline") if isinstance(seg, dict) else None
+        if c and c not in codes:
+            codes.append(c)
+    return codes
+
+
+def _kiwi_layovers(itin):
+    """Connection layovers for a Tequila itinerary, derived from route[] segments.
+
+    A layover is the gap between consecutive segments of the SAME direction: its
+    IATA is segment N's arrival airport (``flyTo``/``cityCodeTo``) and its duration
+    is the minutes between segment N's arrival (``aTime``, Unix seconds) and segment
+    N+1's departure (``dTime``). A missing/negative gap yields None (best-effort).
+    Returns [] for a nonstop itinerary.
+    """
+    out = []
+    route = itin.get("route") if isinstance(itin, dict) else None
+    if not isinstance(route, list):
+        return out
+    segs = [s for s in route if isinstance(s, dict)]
+    for i in range(len(segs) - 1):
+        # Only a true connection: same direction (return flag) as the next segment.
+        if segs[i].get("return") != segs[i + 1].get("return"):
+            continue
+        iata = segs[i].get("flyTo") or segs[i].get("cityCodeTo")
+        out.append({"iata": iata,
+                    "duration_min": _kiwi_gap_minutes(segs[i].get("aTime"),
+                                                      segs[i + 1].get("dTime"))})
+    return out
+
+
+def _kiwi_gap_minutes(arr, dep):
+    """Whole-minute gap between two Unix-second timestamps, or None if unusable.
+
+    A missing/non-numeric value (or a negative gap) yields None — never fabricated.
+    """
+    if not isinstance(arr, (int, float)) or not isinstance(dep, (int, float)):
+        return None
+    secs = dep - arr
+    if secs < 0:
+        return None
+    return int(round(secs / 60.0))
+
 
 def kiwi_fare(origin, dest, dep, ret, adults, children):
     """Real fares from Kiwi/Tequila v2/search API. Returns booking deep-link."""
@@ -542,7 +673,7 @@ def kiwi_fare(origin, dest, dep, ret, adults, children):
         return int(round(secs / 60.0))
 
     def parse_itin(itin):
-        """Return (price_int, max_stops, is_nonstop, deep_link, duration_min) or raise."""
+        """Return (price_int, max_stops, is_nonstop, deep_link, duration_min, itin) or raise."""
         price = int(round(float(itin["price"])))
         route = itin["route"]
         outbound = [seg for seg in route if seg["return"] == 0]
@@ -551,7 +682,7 @@ def kiwi_fare(origin, dest, dep, ret, adults, children):
         in_stops = len(inbound) - 1
         max_stops = max(out_stops, in_stops)
         is_ns = max_stops == 0
-        return price, max_stops, is_ns, itin.get("deep_link"), itin_duration(itin)
+        return price, max_stops, is_ns, itin.get("deep_link"), itin_duration(itin), itin
 
     try:
         parsed = [parse_itin(it) for it in data]
@@ -570,6 +701,8 @@ def kiwi_fare(origin, dest, dep, ret, adults, children):
         "book": cheapest[3],
         "duration_min": cheapest[4],
         "nonstop_duration_min": ns[4] if ns else None,
+        "airlines": _kiwi_airlines(cheapest[5]),
+        "layovers": _kiwi_layovers(cheapest[5]),
     }
 
 
@@ -817,6 +950,46 @@ def skyscanner_fare(origin, dest, dep, ret, adults, children):
     }
 
 
+def _serpapi_airlines(entry):
+    """Unique carrier names from a SerpApi flight entry's flights[].airline (order-preserving).
+
+    ``entry`` is one best/other flight dict. Each segment in ``flights`` carries an
+    ``airline`` display name. Returns a de-duplicated list of names (empty when the
+    entry has no usable airline names — never fabricated).
+    """
+    names = []
+    flights = entry.get("flights")
+    if not isinstance(flights, list):
+        return names
+    for seg in flights:
+        name = seg.get("airline") if isinstance(seg, dict) else None
+        if name and name not in names:
+            names.append(name)
+    return names
+
+
+def _serpapi_layovers(entry):
+    """Per-connection layovers from a SerpApi entry's layovers[] (outbound leg).
+
+    Maps each SerpApi layover ``{id, name, duration}`` (duration in minutes) to the
+    app's ``{iata, name, duration_min}`` shape. Returns [] for a nonstop entry (no
+    layovers key) and skips any malformed (non-dict) layover defensively.
+    """
+    out = []
+    layovers = entry.get("layovers")
+    if not isinstance(layovers, list):
+        return out
+    for lo in layovers:
+        if not isinstance(lo, dict):
+            continue
+        out.append({
+            "iata": lo.get("id"),
+            "name": lo.get("name"),
+            "duration_min": lo.get("duration"),
+        })
+    return out
+
+
 def serpapi_fare(origin, dest, dep, ret, adults, children):
     """Live Google Flights fares via SerpApi. Price is the PARTY TOTAL in CAD (not per-ticket)."""
     if not SERPAPI_KEY:
@@ -859,6 +1032,8 @@ def serpapi_fare(origin, dest, dep, ret, adults, children):
         # describes only the outbound choice (Google's first-screen view). This is a
         # reasonable display approximation.
         stops = len(cheapest.get("layovers") or [])
+        airlines = _serpapi_airlines(cheapest)
+        layovers = _serpapi_layovers(cheapest)
     except Exception:
         return None
     # SerpApi's round-trip response only describes the outbound leg, so we cannot
@@ -878,6 +1053,8 @@ def serpapi_fare(origin, dest, dep, ret, adults, children):
         "book": None,
         "duration_min": duration_min,
         "nonstop_duration_min": nonstop_duration_min,
+        "airlines": airlines,
+        "layovers": layovers,
     }
 
 
@@ -892,7 +1069,7 @@ def _get_fare_uncached(origin, dest, dep, ret, adults, children):
             continue
     return {"cheapest_cad": None, "stops": None, "nonstop_cad": None,
             "source": "no-data", "duration_min": None,
-            "nonstop_duration_min": None}
+            "nonstop_duration_min": None, "airlines": None, "layovers": None}
 
 
 def get_fare(origin, dest, dep, ret, adults, children):
@@ -1009,6 +1186,16 @@ def _build_cell(origin, code, dep, ret, adults, child_ages, fare, threshold):
     # by definition, otherwise it's the cheapest itinerary's stop count (codex P2:
     # never pair the nonstop's duration with the connecting fare's stop count).
     chosen_stops = 0 if chosen == "nonstop" else stops
+    # airlines + layovers describe the CHEAPEST itinerary (the cell's primary price
+    # line shows cheapest_cad with its stops/duration, so the layover list pairs with
+    # that line). airlines is the fare's carrier list (names or codes; None when the
+    # provider can't supply it). layovers is the fare's per-connection list ([] for a
+    # nonstop cheapest, None when the provider gives no per-stop detail, e.g.
+    # travelpayouts). chosen_layovers pairs with the CHOSEN pick: [] when the nonstop
+    # line is selected (a nonstop has no layovers by definition).
+    airlines = fare.get("airlines")
+    layovers = fare.get("layovers")
+    chosen_layovers = [] if chosen == "nonstop" else layovers
     return {
         "dep": dep, "ret": ret,
         "cheapest_cad": cheap, "stops": stops,
@@ -1018,6 +1205,9 @@ def _build_cell(origin, code, dep, ret, adults, child_ages, fare, threshold):
         "duration_min": duration_min,
         "nonstop_duration_min": nonstop_duration_min,
         "chosen_duration_min": chosen_duration_min,
+        "airlines": airlines,
+        "layovers": layovers,
+        "chosen_layovers": chosen_layovers,
         "book": fare.get("book") or kayak_link(origin, code, dep, ret, adults, child_ages),
     }
 
@@ -1251,7 +1441,8 @@ def api_search_stream():
             except Exception:
                 fare = {"cheapest_cad": None, "stops": None, "nonstop_cad": None,
                         "source": "no-data", "duration_min": None,
-                        "nonstop_duration_min": None}
+                        "nonstop_duration_min": None, "airlines": None,
+                        "layovers": None}
             cell = _build_cell(origin, code, dep, ret, adults, child_ages, fare, threshold)
             return di, cell
 
@@ -1283,6 +1474,7 @@ def api_search_stream():
                     "chosen_stops": None,
                     "duration_min": None, "nonstop_duration_min": None,
                     "chosen_duration_min": None,
+                    "airlines": None, "layovers": None, "chosen_layovers": None,
                     "book": kayak_link(origin, code, dep, ret, adults, child_ages),
                 }) for ret in ret_dates]
                 for dep in dep_dates
@@ -1537,6 +1729,23 @@ def _fmt_duration(minutes):
     return f"{h}h {m}m"
 
 
+def _layover_summary(layovers):
+    """Compact human string for a cell's layovers, or None when there are none.
+
+    ``[]`` (nonstop / no connections) → None. Each layover renders as its IATA with
+    an optional "(Xh Ym)" when the duration is known: "PEK (1h 20m), NRT". A None
+    layovers value (provider gave no per-stop detail) → None.
+    """
+    if not layovers:
+        return None
+    parts = []
+    for lo in layovers:
+        iata = lo.get("iata") or "?"
+        dur = _fmt_duration(lo.get("duration_min"))
+        parts.append(f"{iata} ({dur})" if dur else iata)
+    return ", ".join(parts)
+
+
 def build_recommendation(origin, results, adults, child_ages, families):
     bests = [{"city": r["city"], "iata": r["iata"],
               "price_per_family": r["best"]["chosen_cad"] if r["best"] else None,
@@ -1545,7 +1754,9 @@ def build_recommendation(origin, results, adults, child_ages, families):
               "chosen": r["best"]["chosen"] if r["best"] else None,
               "stops": r["best"].get("chosen_stops") if r["best"] else None,
               "duration_min": r["best"].get("chosen_duration_min") if r["best"] else None,
-              "duration": _fmt_duration(r["best"].get("chosen_duration_min")) if r["best"] else None}
+              "duration": _fmt_duration(r["best"].get("chosen_duration_min")) if r["best"] else None,
+              "airlines": r["best"].get("airlines") if r["best"] else None,
+              "layovers": _layover_summary(r["best"].get("chosen_layovers")) if r["best"] else None}
              for r in results]
     summary = (f"From {origin}, {adults} adults + {len(child_ages)} kids, "
                f"{families} family/families. Per-family best options: "
@@ -1554,9 +1765,12 @@ def build_recommendation(origin, results, adults, child_ages, families):
         "You are a savvy travel planner for someone with FLEXIBLE dates who wants the most "
         "cost-effective vacation. The data below was COLLECTED FROM LIVE FLIGHT APIs (prices are "
         "CAD per family; `duration_min` is total round-trip flight time in minutes, `duration` is "
-        "the same as a human-readable string, and may be null when unknown). Analyze ONLY this "
-        "data — do not invent prices or durations. Pick the single best-value trip and explain in "
-        "2-3 short sentences why, balancing price, stops/nonstop, dates AND total flight duration. "
+        "the same as a human-readable string, and may be null when unknown; `airlines` lists the "
+        "operating carrier(s) and `layovers` summarizes connection airports/durations, either of "
+        "which may be null when the provider does not supply it). Analyze ONLY this "
+        "data — do not invent prices, durations, airlines or layovers. Pick the single best-value "
+        "trip and explain in 2-3 short sentences why, balancing price, stops/nonstop, dates, total "
+        "flight duration AND airline/layover convenience. "
         "Do NOT recommend a much-longer flight (e.g. one taking roughly 2x the fastest comparable "
         "option) merely because it is the cheapest — a modest saving rarely justifies a vastly "
         "longer trip. Then give a one-line runner-up. Be concise.\n\n" + summary

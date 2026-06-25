@@ -68,8 +68,19 @@ Each provider returns a normalized dict:
 
 ```json
 { "cheapest_cad": 8298, "stops": 1, "duration_min": 875, "nonstop_cad": 14756,
+  "airlines": ["Air Canada", "ANA"], "layovers": [{ "iata": "NRT", "duration_min": 80 }],
   "source": "travelpayouts", "book": "https://..." }
 ```
+
+`airlines` and `layovers` describe the **cheapest** itinerary and are real-data-only
+(`null`/`[]` when a provider doesn't supply them, never fabricated): `airlines` is the
+de-duplicated carrier **names** (serpapi, skyscanner) or IATA **codes** (amadeus from
+segment `carrierCode`, kiwi from the `airlines`/route codes, travelpayouts `[airline]`);
+`layovers` is a per-connection `[{ iata, name?, duration_min }]` list (serpapi from
+`layovers[]`, amadeus/kiwi derived from inter-segment gaps, skyscanner from segment
+connection IATAs, travelpayouts `null` — no per-stop detail). `_build_cell` also derives
+`chosen_layovers` (the selected fare's layovers; `[]` when the nonstop line is chosen),
+which the best/summary/recommendation surface alongside `chosen_duration_min`.
 
 Each price line is paired with **its own** stops/duration (no mixed itineraries):
 `duration_min` is the cheapest itinerary's round-trip time (pairs with
@@ -177,9 +188,10 @@ job storage and no `GET /api/export/<job_id>` route.
 cairo are required). The PDF is built programmatically — no HTML template is used.
 
 **CSV columns:** `city, iata, dep_date, ret_date, cheapest_cad, stops, duration_min,
-nonstop_cad, nonstop_duration_min, chosen, chosen_cad, chosen_duration_min, source,
-book`. One row per `(city, dep_date, ret_date)` matrix cell.
-`None`/no-data cells render as empty strings.
+nonstop_cad, nonstop_duration_min, chosen, chosen_cad, chosen_stops, chosen_duration_min,
+airlines, layovers, source, book`. `airlines` is a `"A, B"` string and `layovers` a
+compact `"PEK 1h20m, NRT"` string (cheapest itinerary). One row per
+`(city, dep_date, ret_date)` matrix cell. `None`/no-data cells render as empty strings.
 
 **Real-data guardrail:** export routes call `run_search` which calls `get_fare`.
 No fabricated prices appear in exported files. Web-only — there is no CLI export path.

@@ -75,6 +75,40 @@ def test_streaming_search_renders_duration(seed_live_server, page):
         f"Expected duration in summary card meta, got: {card_meta!r}"
 
 
+def test_streaming_search_renders_airlines_and_layovers(seed_live_server, page):
+    """Airline(s) (#57) and layover summary (#56) must render in a grid cell AND the
+    summary card. The shared e2e fare stub returns airlines ['Air Canada','ANA'] and
+    a layover at NRT (80 min) → 'via NRT (1h 20m)'."""
+    page.goto(seed_live_server)
+    page.click("#loadCities")
+    _select_all_chips(page)
+    page.click("#run")
+
+    page.wait_for_selector("#rec", state="visible", timeout=15000)
+
+    # A grid cell's .stops line names the airline(s).
+    page.wait_for_function(
+        "() => [...document.querySelectorAll('td .stops')]"
+        ".some(e => e.textContent.includes('Air Canada'))",
+        timeout=15000,
+    )
+    stops_texts = page.eval_on_selector_all(
+        "td .stops", "els => els.map(e => e.textContent)")
+    assert any("Air Canada" in t and "ANA" in t for t in stops_texts), \
+        f"Expected airlines in a cell, got: {stops_texts!r}"
+
+    # The cell's .layover line shows the connection summary.
+    lay_texts = page.eval_on_selector_all(
+        "td .layover", "els => els.map(e => e.textContent)")
+    assert any("via NRT (1h 20m)" in t for t in lay_texts), \
+        f"Expected 'via NRT (1h 20m)' in a cell, got: {lay_texts!r}"
+
+    # The summary card meta names the airline(s) too.
+    card_meta = page.inner_text("#card-meta-0")
+    assert "Air Canada" in card_meta, \
+        f"Expected airline in summary card meta, got: {card_meta!r}"
+
+
 def test_streaming_search_run_button_re_enabled(seed_live_server, page):
     """After stream completes, the run button must be re-enabled."""
     page.goto(seed_live_server)

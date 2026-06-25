@@ -54,6 +54,7 @@ td.rowh{background:#f4f1ea;font-weight:600}
 td a.price{display:block;font-weight:700;color:#1456b0;text-decoration:none}
 td a.price:hover{text-decoration:underline}
 .stops{font-size:10.5px;color:#8a8a83}
+.layover{font-size:10px;color:#a08a4a;margin-top:1px}
 .ns{font-size:11px;margin-top:2px}
 td.pick-ns{background:#e9f3e9}
 td.pick-ns .ns{color:#2f7d32;font-weight:600}
@@ -158,6 +159,29 @@ function fmtDuration(min){
   if (min == null) return '—';
   const h = Math.floor(min / 60), m = min % 60;
   return h + 'h ' + m + 'm';
+}
+
+// fmtAirlines: de-duplicated carrier names/codes -> escaped "Air Canada · ANA"
+// string, or '' when null/empty. Each name is escapeHtml'd before joining so an
+// untrusted carrier name can never reach the DOM as live markup (#56/#57).
+function fmtAirlines(airlines){
+  if (!Array.isArray(airlines) || !airlines.length) return '';
+  const seen = [];
+  airlines.forEach(a => { if (a && seen.indexOf(a) === -1) seen.push(a); });
+  return seen.map(escapeHtml).join(' · ');
+}
+
+// fmtLayovers: compact connection summary -> escaped "via PEK (1h 20m), NRT", or
+// '' when null/empty (nonstop or no per-stop detail). Each IATA is escapeHtml'd;
+// duration is rendered numerically via fmtDuration (omitted when unknown).
+function fmtLayovers(layovers){
+  if (!Array.isArray(layovers) || !layovers.length) return '';
+  const parts = layovers.map(lo => {
+    const iata = escapeHtml(lo && lo.iata ? lo.iata : '?');
+    const dur = (lo && lo.duration_min != null) ? fmtDuration(lo.duration_min) : '';
+    return dur ? iata + ' (' + dur + ')' : iata;
+  });
+  return 'via ' + parts.join(', ');
 }
 
 // escapeHtml: HTML-escape a value so no untrusted string (from the server,
@@ -435,9 +459,12 @@ function _cellHtml(c, thr) {
   const cls = pickNS ? 'pick-ns' : '';
   const stopsTxt = (c.stops != null ? c.stops + ' stop' + (c.stops === 1 ? '' : 's') : '');
   const durTxt = (c.duration_min != null ? fmtDuration(c.duration_min) : '');
-  const stopsDur = [stopsTxt, durTxt].filter(Boolean).join(' · ');
+  const airTxt = fmtAirlines(c.airlines);   // already escaped
+  const stopsDur = [airTxt, stopsTxt, durTxt].filter(Boolean).join(' · ');
+  const layTxt = fmtLayovers(c.layovers);   // already escaped, '' when none
   let inner = '<a class="price" href="' + escapeHtml(c.book) + '" target="_blank" rel="noopener">' + money(c.cheapest_cad) + '</a>' +
-    '<div class="stops">' + stopsDur + '</div>';
+    '<div class="stops">' + stopsDur + '</div>' +
+    (layTxt ? '<div class="layover">' + layTxt + '</div>' : '');
   if (c.nonstop_cad) {
     // nonstop line: pairs nonstop_cad with its OWN duration (nonstop = 0 stops).
     const nsDur = (c.nonstop_duration_min != null ? fmtDuration(c.nonstop_duration_min) : '');
@@ -605,7 +632,23 @@ $('#run').onclick = async () => {
             const metaEl = document.getElementById('card-meta-' + di);
             const groupEl = document.getElementById('card-group-' + di);
             if (priceEl) priceEl.textContent = money(evt.chosen_cad);
-            if (metaEl) metaEl.textContent = fmtDate(evt.dep) + ' → ' + fmtDate(evt.ret) + ' · ' + (evt.chosen_stops === 0 ? 'nonstop' : evt.chosen_stops + ' stop(s)') + (evt.chosen_duration_min != null ? ' · ' + fmtDuration(evt.chosen_duration_min) : '');
+            if (metaEl) {
+              // textContent is auto-escaped, so use the RAW airline names / layover
+              // text here (fmtAirlines/fmtLayovers escape for innerHTML paths).
+              const air = (Array.isArray(evt.airlines) && evt.airlines.length)
+                ? evt.airlines.filter((a,i,s)=>a&&s.indexOf(a)===i).join(' · ') : '';
+              const lay = (Array.isArray(evt.chosen_layovers) && evt.chosen_layovers.length)
+                ? 'via ' + evt.chosen_layovers.map(lo => {
+                    const iata = (lo && lo.iata) ? lo.iata : '?';
+                    const dur = (lo && lo.duration_min != null) ? fmtDuration(lo.duration_min) : '';
+                    return dur ? iata + ' (' + dur + ')' : iata;
+                  }).join(', ') : '';
+              metaEl.textContent = (air ? air + ' · ' : '') +
+                fmtDate(evt.dep) + ' → ' + fmtDate(evt.ret) + ' · ' +
+                (evt.chosen_stops === 0 ? 'nonstop' : evt.chosen_stops + ' stop(s)') +
+                (evt.chosen_duration_min != null ? ' · ' + fmtDuration(evt.chosen_duration_min) : '') +
+                (lay ? ' · ' + lay : '');
+            }
             if (groupEl) groupEl.textContent = money(evt.chosen_cad * fams);
           }
         }
@@ -715,9 +758,11 @@ function render(data){
   data.results.forEach(r=>{
     const b=r.best;
     const card=document.createElement('div'); card.className='card';
+    const bAir = b ? fmtAirlines(b.airlines) : '';
+    const bLay = b ? fmtLayovers(b.chosen_layovers) : '';
     card.innerHTML = `<div class="city">${escapeHtml(r.city)} <small>(${escapeHtml(r.iata)})</small></div>`+
       `<div class="price">${b?money(b.chosen_cad):'—'}</div>`+
-      `<div class="meta">${b?escapeHtml(fmtDate(b.dep))+' → '+escapeHtml(fmtDate(b.ret))+' · '+(b.chosen_stops===0?'nonstop':b.chosen_stops+' stop(s)')+(b.chosen_duration_min!=null?' · '+fmtDuration(b.chosen_duration_min):''):'no fares'}</div>`+
+      `<div class="meta">${b?(bAir?bAir+' · ':'')+escapeHtml(fmtDate(b.dep))+' → '+escapeHtml(fmtDate(b.ret))+' · '+(b.chosen_stops===0?'nonstop':b.chosen_stops+' stop(s)')+(b.chosen_duration_min!=null?' · '+fmtDuration(b.chosen_duration_min):'')+(bLay?' · '+bLay:''):'no fares'}</div>`+
       `<div class="meta">group ×${fams}: ${b?money(b.chosen_cad*fams):'—'}</div>`;
     sum.appendChild(card);
   });

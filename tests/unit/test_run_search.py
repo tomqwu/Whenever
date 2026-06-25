@@ -7,7 +7,8 @@ DEST_XXX = {"city": "NoWhere", "iata": "XXX"}
 
 
 def _fake_fare(cheapest, stops=1, nonstop=None, source="test", book=None,
-               duration_min=None, nonstop_duration_min=None):
+               duration_min=None, nonstop_duration_min=None,
+               airlines=None, layovers=None):
     return {
         "cheapest_cad": cheapest,
         "stops": stops,
@@ -16,6 +17,8 @@ def _fake_fare(cheapest, stops=1, nonstop=None, source="test", book=None,
         "book": book,
         "duration_min": duration_min,
         "nonstop_duration_min": nonstop_duration_min,
+        "airlines": airlines,
+        "layovers": layovers,
     }
 
 
@@ -352,3 +355,110 @@ def test_fmt_duration_helper():
     assert appmod._fmt_duration(875) == "14h 35m"
     assert appmod._fmt_duration(0) == "0h 0m"
     assert appmod._fmt_duration(None) is None
+
+
+# ---------------------------------------------------------------------------
+# _build_cell carries airlines + layovers (#56, #57)
+# ---------------------------------------------------------------------------
+
+def test_build_cell_carries_airlines_and_layovers_cheapest():
+    """When chosen=cheapest, the cell carries the fare's airlines + layovers verbatim."""
+    fare = _fake_fare(8000, stops=1, duration_min=875,
+                      airlines=["Air Canada", "ANA"],
+                      layovers=[{"iata": "NRT", "duration_min": 80}])
+    cell = appmod._build_cell("YYZ", "PVG", "2026-12-12", "2027-01-04", 2, [], fare, 0.25)
+    assert cell["chosen"] == "cheapest"
+    assert cell["airlines"] == ["Air Canada", "ANA"]
+    # layovers (cheapest line) and chosen_layovers both carry the connection.
+    assert cell["layovers"] == [{"iata": "NRT", "duration_min": 80}]
+    assert cell["chosen_layovers"] == [{"iata": "NRT", "duration_min": 80}]
+
+
+def test_build_cell_nonstop_chosen_layovers_empty():
+    """When chosen=nonstop, chosen_layovers is [] (nonstop pick has no layovers) but
+    the cell's layovers still describes the displayed CHEAPEST line; airlines kept."""
+    fare = _fake_fare(8000, stops=1, nonstop=8500,
+                      duration_min=875, nonstop_duration_min=600,
+                      airlines=["Air Canada"],
+                      layovers=[{"iata": "NRT", "duration_min": 80}])
+    cell = appmod._build_cell("YYZ", "PVG", "2026-12-12", "2027-01-04", 2, [], fare, 0.25)
+    assert cell["chosen"] == "nonstop"
+    assert cell["layovers"] == [{"iata": "NRT", "duration_min": 80}]  # cheapest line
+    assert cell["chosen_layovers"] == []          # nonstop pick = no layovers
+    assert cell["airlines"] == ["Air Canada"]
+
+
+def test_build_cell_airlines_layovers_none_passthrough():
+    """A provider that supplies neither (None) yields cell airlines/layovers None."""
+    fare = {"cheapest_cad": 8000, "stops": 1, "nonstop_cad": None, "source": "x"}
+    cell = appmod._build_cell("YYZ", "PVG", "2026-12-12", "2027-01-04", 2, [], fare, 0.25)
+    assert cell["airlines"] is None
+    assert cell["layovers"] is None
+    assert cell["chosen_layovers"] is None
+
+
+# ---------------------------------------------------------------------------
+# _layover_summary helper + recommendation surfacing (#56, #57)
+# ---------------------------------------------------------------------------
+
+def test_layover_summary_helper():
+    assert appmod._layover_summary(None) is None
+    assert appmod._layover_summary([]) is None
+    assert appmod._layover_summary(
+        [{"iata": "PEK", "duration_min": 80}]) == "PEK (1h 20m)"
+    # unknown duration → just the IATA; missing iata → "?"
+    assert appmod._layover_summary(
+        [{"iata": "NRT", "duration_min": None},
+         {"iata": None, "duration_min": 30}]) == "NRT, ? (0h 30m)"
+
+
+def test_build_recommendation_summary_includes_airlines_and_layovers(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(appmod, "ollama_chat",
+                        lambda prompt, *a, **k: captured.setdefault("prompt", prompt) or "ok")
+    results = [{
+        "city": "Shanghai", "iata": "PVG",
+        "best": {"chosen_cad": 8000, "dep": "2026-12-12", "ret": "2027-01-04",
+                 "chosen": "cheapest", "stops": 1, "chosen_stops": 1,
+                 "duration_min": 875, "chosen_duration_min": 875,
+                 "airlines": ["Air Canada", "ANA"],
+                 "chosen_layovers": [{"iata": "NRT", "duration_min": 80}]},
+    }]
+    appmod.build_recommendation("YYZ", results, 2, [], 1)
+    p = captured["prompt"]
+    assert "Air Canada" in p
+    assert "ANA" in p
+    assert "NRT (1h 20m)" in p
+    # prompt instructs the model to factor airline/layover convenience
+    assert "airline" in p.lower()
+    assert "layover" in p.lower()
+
+
+def test_build_recommendation_airlines_layovers_null_in_summary(monkeypatch):
+    """When best has no airlines/layovers, the summary serializes them as null."""
+    captured = {}
+    monkeypatch.setattr(appmod, "ollama_chat",
+                        lambda prompt, *a, **k: captured.setdefault("prompt", prompt) or "ok")
+    results = [{
+        "city": "Shanghai", "iata": "PVG",
+        "best": {"chosen_cad": 8000, "dep": "2026-12-12", "ret": "2027-01-04",
+                 "chosen": "cheapest", "stops": 1, "chosen_stops": 1,
+                 "duration_min": 875, "chosen_duration_min": 875,
+                 "airlines": None, "chosen_layovers": None},
+    }]
+    appmod.build_recommendation("YYZ", results, 2, [], 1)
+    p = captured["prompt"]
+    assert '"airlines": null' in p
+    assert '"layovers": null' in p
+
+
+def test_build_recommendation_no_best_airlines_layovers_null(monkeypatch):
+    """A city with no best (no fares) yields null airlines/layovers in the summary."""
+    captured = {}
+    monkeypatch.setattr(appmod, "ollama_chat",
+                        lambda prompt, *a, **k: captured.setdefault("prompt", prompt) or "ok")
+    results = [{"city": "Nowhere", "iata": "XXX", "best": None}]
+    appmod.build_recommendation("YYZ", results, 2, [], 1)
+    p = captured["prompt"]
+    assert '"airlines": null' in p
+    assert '"layovers": null' in p
