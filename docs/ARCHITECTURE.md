@@ -6,7 +6,7 @@ Whenever is a small Flask web app with three responsibilities, kept deliberately
                 ┌──────────────────────────────────────────────┐
    Browser ───▶ │  Flask (app.py)                              │
    (UI)         │                                              │
-                │  1. GenAI layer  ──▶  Ollama (local DeepSeek) │
+                │  1. GenAI layer  ──▶  Ollama (local model)     │
                 │       • country → top cities                 │
                 │       • city → IATA                          │
                 │       • analyze collected fares → pick best  │
