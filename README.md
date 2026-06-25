@@ -21,7 +21,10 @@ cd Whenever
 ## What it does
 
 - **Departure city** → resolves to an airport code.
-- **Arrival country** → DeepSeek expands it into the **top destination cities** (with airport codes).
+- **Destination autocomplete** → start typing in the destination field and pick from a
+  type-ahead list of **countries or cities** (backed by a bundled airports dataset). Choosing
+  a **country** expands it into the **top destination cities**; choosing a **city** adds just
+  that city, and you can add **several cities**.
 - **Passengers** → adults + children (with ages), priced **per family** and as a group.
 - **Flexible dates** → a 4×4 (or larger) grid of departure × return dates.
 - **Best-value matrix** → each cell shows the cheapest fare, stop count, and the nonstop fare

@@ -15,6 +15,43 @@ Reports backend readiness.
 
 ---
 
+### `GET /api/suggest`
+
+Type-ahead destination autocomplete. Matches the bundled airports dataset
+(`config/airports.json`) plus the country list, suggesting **countries** and
+**cities** for a partial query.
+
+**Query** `?q=<text>` (trimmed, case-insensitive). A blank/empty `q` returns no
+suggestions.
+
+Matching: countries whose name starts-with/contains `q`; cities whose city name,
+IATA code, or country contains `q`. Ranking puts prefix matches and exact-IATA
+matches first; results are capped at ~10.
+
+**Example** `GET /api/suggest?q=chi`
+```json
+{
+  "suggestions": [
+    { "type": "country", "name": "China", "code": "CN" },
+    { "type": "city", "city": "Chengdu", "iata": "TFU", "country": "China" }
+  ]
+}
+```
+
+`GET /api/suggest?q=hnd` (an IATA code) →
+```json
+{ "suggestions": [ { "type": "city", "city": "Tokyo", "iata": "HND", "country": "Japan" } ] }
+```
+
+The UI uses this for the destination field: picking a **country** runs the
+seed-first `/api/top-cities` expansion (replacing the chip set); picking a
+**city** appends just that city chip (multiple cities supported).
+
+If `config/airports.json` is missing or malformed the route degrades to an empty
+suggestion list.
+
+---
+
 ### `POST /api/top-cities`
 
 Expand a country into its top destination cities (via the local model).
