@@ -40,6 +40,22 @@ def _load_seed_config():
 _SEED_CONFIG: dict = _load_seed_config()
 
 # ----------------------- airports dataset (autocomplete) -----------------------
+# Country codes whose `country` value is NOT a sovereign country, so they must
+# never be offered as a "country" autocomplete suggestion (only as cities). For a
+# neutral travel app: Hong Kong (HK) and Macau (MO) are SARs; Taiwan (TW) is
+# politically sensitive; the rest are dependent/overseas territories present in the
+# dataset. Matched by 2-letter country_code so it's robust regardless of the
+# display string used as a city's location subtitle.
+_NON_SOVEREIGN_COUNTRY_CODES = {
+    "HK",  # Hong Kong SAR
+    "MO",  # Macau SAR
+    "TW",  # Taiwan
+    "PR",  # Puerto Rico (US territory)
+    "GU",  # Guam (US territory)
+    "PF",  # French Polynesia (French overseas collectivity)
+}
+
+
 def _load_airports():
     """Load the bundled airports dataset (config/airports.json).
 
@@ -88,6 +104,12 @@ def _build_suggest_index(airports, seed_config):
     """
     countries = {}  # lower-name -> {"name","code"}
     for a in airports:
+        # Non-sovereign territories (HK/MO SARs, Taiwan, overseas territories)
+        # must not be offered as a "country" suggestion — they remain CITY
+        # suggestions only. Matched by code so it's robust regardless of the
+        # `country` display string (e.g. "Hong Kong SAR").
+        if a.get("country_code", "") in _NON_SOVEREIGN_COUNTRY_CODES:
+            continue
         key = a["country"].lower()
         if key not in countries:
             countries[key] = {"name": a["country"], "code": a.get("country_code", "")}
@@ -277,8 +299,10 @@ def top_cities(country, n=6):
 
     # LLM fallback
     prompt = (
-        f"List the top {n} destination cities in {country} for international leisure "
-        f"travelers. Return ONLY a JSON array; each item: "
+        f"List the top {n} destination cities in the country {country} for "
+        f"international leisure travelers. If {country} is actually a single city "
+        f"or territory rather than a country, return just that one place. Return "
+        f"ONLY a JSON array; each item: "
         f'{{"city":"<name>","iata":"<primary international airport IATA code>"}}. '
         f"No commentary."
     )

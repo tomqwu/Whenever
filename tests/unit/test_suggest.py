@@ -132,6 +132,64 @@ def test_build_suggest_index_seed_without_display_name():
     assert any(c["name"] == "France" for c in countries)
 
 
+# ------------------ non-sovereign territory accuracy (#55) ------------------
+
+def test_hong_kong_is_city_not_country():
+    """q='hong' returns Hong Kong as a CITY (HKG), never a 'country' suggestion."""
+    out = appmod.suggest_destinations("hong")
+    assert not any(s["type"] == "country" and s["name"].lower().startswith("hong")
+                   for s in out), f"Hong Kong should not be a country: {out}"
+    cities = [s for s in out if s["type"] == "city" and s["iata"] == "HKG"]
+    assert cities, f"HKG city missing from {out}"
+    assert cities[0]["city"] == "Hong Kong"
+    assert cities[0]["country"] == "Hong Kong SAR"
+
+
+def test_macau_is_city_not_country():
+    """q='macau' returns Macau as a CITY (MFM), never a 'country' suggestion."""
+    out = appmod.suggest_destinations("macau")
+    assert not any(s["type"] == "country" for s in out), \
+        f"Macau should not be a country: {out}"
+    cities = [s for s in out if s["type"] == "city" and s["iata"] == "MFM"]
+    assert cities and cities[0]["country"] == "Macau SAR"
+
+
+def test_taiwan_returns_cities_not_country():
+    """q='taiwan' returns Taipei/Kaohsiung cities, never a 'Taiwan' country."""
+    out = appmod.suggest_destinations("taiwan")
+    assert not any(s["type"] == "country" and s["name"] == "Taiwan" for s in out), \
+        f"Taiwan should not be a country: {out}"
+    iatas = {s["iata"] for s in out if s["type"] == "city"}
+    assert {"TPE", "KHH"} & iatas, f"Taiwan cities missing from {out}"
+
+
+def test_sovereign_country_still_suggested():
+    """A real sovereign country (China) STILL appears as a country suggestion."""
+    out = appmod.suggest_destinations("china")
+    assert any(s["type"] == "country" and s["name"] == "China" for s in out)
+
+
+def test_non_sovereign_cities_still_findable_by_iata():
+    """Non-sovereign cities remain suggestible by IATA code."""
+    out = appmod.suggest_destinations("hkg")
+    assert any(s["type"] == "city" and s["iata"] == "HKG" for s in out)
+
+
+def test_build_index_excludes_non_sovereign_by_code():
+    """A non-sovereign country_code is excluded from countries even with a new label."""
+    airports = [
+        {"iata": "HKG", "city": "Hong Kong", "country": "Hong Kong SAR",
+         "country_code": "HK"},
+        {"iata": "PEK", "city": "Beijing", "country": "China", "country_code": "CN"},
+    ]
+    countries, cities = appmod._build_suggest_index(airports, {})
+    names = {c["name"] for c in countries}
+    assert "Hong Kong SAR" not in names and "Hong Kong" not in names
+    assert "China" in names
+    # the HK city is still present
+    assert any(c["iata"] == "HKG" for c in cities)
+
+
 # --------------------------- route ---------------------------
 
 def test_suggest_route_returns_matches(client):
@@ -158,3 +216,10 @@ def test_suggest_route_caps(client):
     """The route caps at <=10 results."""
     sug = client.get("/api/suggest?q=a").get_json()["suggestions"]
     assert len(sug) <= 10
+
+
+def test_suggest_route_hong_kong_city_only(client):
+    """GET /api/suggest?q=hong returns Hong Kong as a city, not a country."""
+    sug = client.get("/api/suggest?q=hong").get_json()["suggestions"]
+    assert not any(s["type"] == "country" for s in sug)
+    assert any(s["type"] == "city" and s["iata"] == "HKG" for s in sug)

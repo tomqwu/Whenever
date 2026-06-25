@@ -23,6 +23,17 @@ def test_suggest_api_iata(seed_live_server):
     assert any(s.get("iata") == "HND" and s["city"] == "Tokyo" for s in sug)
 
 
+def test_suggest_api_hong_kong_city_only(seed_live_server):
+    """Hong Kong/Macau/Taiwan are city suggestions only, never countries (#55)."""
+    hk = req.get(f"{seed_live_server}/api/suggest", params={"q": "hong"}).json()["suggestions"]
+    assert not any(s["type"] == "country" for s in hk)
+    assert any(s["type"] == "city" and s.get("iata") == "HKG" for s in hk)
+
+    tw = req.get(f"{seed_live_server}/api/suggest", params={"q": "taiwan"}).json()["suggestions"]
+    assert not any(s["type"] == "country" and s["name"] == "Taiwan" for s in tw)
+    assert {s.get("iata") for s in tw if s["type"] == "city"} & {"TPE", "KHH"}
+
+
 # --------------------------- browser ---------------------------
 
 def test_typeahead_dropdown_appears(seed_live_server, page):
