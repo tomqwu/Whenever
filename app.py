@@ -850,7 +850,12 @@ def _watch_to_json(row):
 
 @app.route("/api/watch", methods=["POST"])
 def api_watch_add():
-    b = request.get_json(force=True)
+    # request.get_json() can return None (no body) or a non-dict (client posts
+    # `null`, `[]`, a bare string/number); a subsequent b.get(...) would raise
+    # AttributeError -> 500. Reject anything that isn't a JSON object up front.
+    b = request.get_json(silent=True)
+    if not isinstance(b, dict):
+        return jsonify({"error": "watch payload required"}), 400
     origin = (b.get("origin") or "").strip().upper()
     dest_iata = (b.get("dest_iata") or "").strip().upper()
     dep_date = (b.get("dep_date") or "").strip()
@@ -891,6 +896,22 @@ def api_watch_add():
 
     db = _watch_db()
     try:
+        # Idempotent creation: reloading/repeating a search for an already-watched
+        # trip must not insert another active row (the scheduler would then re-price
+        # it and emit duplicate drop alerts). If an active watch already matches the
+        # same normalized key fields, return its id instead of inserting a duplicate.
+        sorted_ages = sorted(child_ages)
+        for existing in db.list_watches(active_only=True):
+            if (
+                (existing.get("origin") or "").strip().upper() == origin
+                and (existing.get("dest_iata") or "").strip().upper() == dest_iata
+                and existing.get("dep_date") == dep_date
+                and existing.get("ret_date") == ret_date
+                and int(existing.get("adults") or 0) == adults
+                and sorted(existing.get("child_ages") or []) == sorted_ages
+            ):
+                return jsonify({"id": existing["id"], "ok": True, "existing": True})
+
         watch_id = db.add_watch(
             origin=origin, dest_iata=dest_iata, dest_city=dest_city,
             dep_date=dep_date, ret_date=ret_date, adults=adults,

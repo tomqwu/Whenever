@@ -177,6 +177,57 @@ def test_add_watch_drops_non_int_child_ages(client, watch_db):
     assert watch_db.list_watches()[0]["child_ages"] == [11, 9]
 
 
+@pytest.mark.parametrize("body", [None, []])
+def test_add_watch_non_dict_body_400(client, watch_db, body):
+    """A null or non-object JSON body -> documented 400, never a 500, no row.
+
+    request.get_json() returns None / a list here; the route must reject it
+    before calling b.get(...) (which would raise AttributeError -> 500).
+    """
+    r = client.post("/api/watch", json=body)
+    assert r.status_code == 400
+    assert r.get_json()["error"] == "watch payload required"
+    assert watch_db.list_watches() == []   # nothing persisted
+
+
+def test_add_watch_same_trip_is_idempotent(client, watch_db):
+    """Posting the SAME trip twice creates only ONE active row.
+
+    The second call returns the existing watch's id with existing=True, and the
+    list endpoint shows a single matching watch (no duplicate to re-price/alert).
+    """
+    r1 = client.post("/api/watch", json=_VALID_BODY)
+    assert r1.status_code == 200
+    first = r1.get_json()
+    assert "existing" not in first
+
+    r2 = client.post("/api/watch", json=_VALID_BODY)
+    assert r2.status_code == 200
+    second = r2.get_json()
+    assert second["ok"] is True
+    assert second["existing"] is True
+    assert second["id"] == first["id"]
+
+    rows = watch_db.list_watches()
+    assert len(rows) == 1
+
+    watches = client.get("/api/watch").get_json()["watches"]
+    assert len(watches) == 1
+    assert watches[0]["id"] == first["id"]
+
+
+def test_add_watch_different_trip_creates_second_row(client, watch_db):
+    """A trip differing on a key field (dates) creates a distinct second row."""
+    r1 = client.post("/api/watch", json=_VALID_BODY)
+    r2 = client.post("/api/watch", json={
+        **_VALID_BODY, "dep_date": "2026-12-20", "ret_date": "2027-01-10",
+    })
+    assert r1.status_code == 200 and r2.status_code == 200
+    assert "existing" not in r2.get_json()
+    assert r2.get_json()["id"] != r1.get_json()["id"]
+    assert len(watch_db.list_watches()) == 2
+
+
 def test_watch_db_helper_resolves_env(monkeypatch, tmp_path):
     """_watch_db() opens a WatchDB at the WATCH_DB env path (default fallback)."""
     db_path = tmp_path / "w.db"
@@ -197,6 +248,9 @@ def test_add_watch_closes_db_on_error(client, monkeypatch):
     closed = {"v": False}
 
     class BoomDB:
+        def list_watches(self, active_only=True):
+            return []
+
         def add_watch(self, **kwargs):
             raise RuntimeError("boom")
 
