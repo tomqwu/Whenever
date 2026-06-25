@@ -116,6 +116,67 @@ def test_delete_watch_removes_it(client, watch_db):
     assert watch_db.list_watches() == []   # active_only -> removed
 
 
+def test_add_watch_non_numeric_last_price_400(client, watch_db):
+    """A non-numeric last_price (e.g. "8,000") is rejected with 400 and no row.
+
+    Persisting TEXT in last_price would later crash check_all_watches' int<str
+    comparison and block every watch check, so the route must refuse it.
+    """
+    body = {**_VALID_BODY, "last_price": "8,000"}
+    r = client.post("/api/watch", json=body)
+    assert r.status_code == 400
+    assert r.get_json()["error"] == "last_price must be numeric"
+    assert watch_db.list_watches() == []   # nothing persisted on a 400
+
+
+@pytest.mark.parametrize("value", [8000, 8000.0, "8000", "8000.5"])
+def test_add_watch_numeric_last_price_stored_as_int(client, watch_db, value):
+    """A numeric last_price is coerced to and stored as a Python int."""
+    r = client.post("/api/watch", json={**_VALID_BODY, "last_price": value})
+    assert r.status_code == 200
+    row = watch_db.list_watches()[0]
+    assert row["last_price"] == 8000
+    assert isinstance(row["last_price"], int)
+    assert not isinstance(row["last_price"], bool)
+
+
+def test_add_watch_omitted_last_price_is_none(client, watch_db):
+    """last_price omitted -> stored as None (no baseline)."""
+    body = dict(_VALID_BODY)
+    body.pop("last_price")
+    r = client.post("/api/watch", json=body)
+    assert r.status_code == 200
+    assert watch_db.list_watches()[0]["last_price"] is None
+
+
+def test_add_watch_null_last_price_is_none(client, watch_db):
+    """Explicit null last_price -> stored as None."""
+    r = client.post("/api/watch", json={**_VALID_BODY, "last_price": None})
+    assert r.status_code == 200
+    assert watch_db.list_watches()[0]["last_price"] is None
+
+
+def test_add_watch_bad_adults_400(client, watch_db):
+    r = client.post("/api/watch", json={**_VALID_BODY, "adults": "two"})
+    assert r.status_code == 400
+    assert r.get_json()["error"] == "adults must be numeric"
+    assert watch_db.list_watches() == []
+
+
+def test_add_watch_bad_threshold_pct_400(client, watch_db):
+    r = client.post("/api/watch", json={**_VALID_BODY, "threshold_pct": "lots"})
+    assert r.status_code == 400
+    assert r.get_json()["error"] == "threshold_pct must be numeric"
+    assert watch_db.list_watches() == []
+
+
+def test_add_watch_drops_non_int_child_ages(client, watch_db):
+    """Non-int child_ages entries are dropped; the int ones are kept."""
+    r = client.post("/api/watch", json={**_VALID_BODY, "child_ages": [11, "x", 9, None]})
+    assert r.status_code == 200
+    assert watch_db.list_watches()[0]["child_ages"] == [11, 9]
+
+
 def test_watch_db_helper_resolves_env(monkeypatch, tmp_path):
     """_watch_db() opens a WatchDB at the WATCH_DB env path (default fallback)."""
     db_path = tmp_path / "w.db"

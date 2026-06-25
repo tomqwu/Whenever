@@ -859,11 +859,34 @@ def api_watch_add():
         return jsonify({"error": "origin, dest_iata, dep_date and ret_date required"}), 400
 
     dest_city = b.get("dest_city")
-    adults = int(b.get("adults", 2))
-    child_ages = [int(a) for a in (b.get("child_ages") or [])]
-    threshold_pct = float(b.get("threshold_pct", 25.0))
-    # last_price seeds the baseline so the scheduler's first run can detect a drop.
+
+    # Coerce/validate numeric fields BEFORE touching the DB. The body is raw
+    # JSON, so a stray non-numeric value (e.g. last_price "8,000") would
+    # otherwise persist as TEXT and later crash check_all_watches' int<str
+    # comparison, blocking every watch. Reject those with a clean 400.
+    try:
+        adults = int(b.get("adults", 2))
+    except (TypeError, ValueError):
+        return jsonify({"error": "adults must be numeric"}), 400
+    try:
+        threshold_pct = float(b.get("threshold_pct", 25.0))
+    except (TypeError, ValueError):
+        return jsonify({"error": "threshold_pct must be numeric"}), 400
+    # child_ages: keep only the values that coerce cleanly to int; drop the rest.
+    child_ages = []
+    for a in (b.get("child_ages") or []):
+        try:
+            child_ages.append(int(a))
+        except (TypeError, ValueError):
+            continue
+    # last_price seeds the baseline so the scheduler's first run can detect a
+    # drop. Store an int (or None) — never the raw body value.
     last_price = b.get("last_price")
+    if last_price is not None:
+        try:
+            last_price = int(float(last_price))
+        except (TypeError, ValueError):
+            return jsonify({"error": "last_price must be numeric"}), 400
     last_source = b.get("last_source")
 
     db = _watch_db()
