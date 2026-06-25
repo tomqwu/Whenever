@@ -242,6 +242,97 @@ $('#run').onclick = async () => {
     const decoder = new TextDecoder();
     let buf = '';
 
+    function handleLine(line) {
+      line = line.trim();
+      if (!line) return;
+      let evt;
+      try { evt = JSON.parse(line); } catch (_) { return; }
+
+      if (evt.type === 'meta') {
+        total = evt.total_cells;
+        // Build skeleton: summary cards + grid tables
+        const sum = $('#summary');
+        sum.innerHTML = '';
+        const g = $('#grids');
+        g.innerHTML = '';
+        evt.results.forEach((r, di) => {
+          // Summary card skeleton
+          const card = document.createElement('div');
+          card.className = 'card';
+          card.id = 'card-' + di;
+          card.innerHTML = '<div class="city">' + r.city + ' <small>(' + r.iata + ')</small></div>' +
+            '<div class="price" id="card-price-' + di + '">…</div>' +
+            '<div class="meta" id="card-meta-' + di + '">searching…</div>' +
+            '<div class="meta">group ×' + fams + ': <span id="card-group-' + di + '">…</span></div>';
+          sum.appendChild(card);
+
+          // Grid table skeleton
+          const blk = document.createElement('div');
+          blk.className = 'cityblock';
+          blk.id = 'blk-' + di;
+          let html = '<h2>' + r.city + ' <small>(' + r.iata + ')</small></h2>' +
+            '<table id="tbl-' + di + '"><thead><tr><th>dep \\ ret</th>' +
+            evt.ret_dates.map(d => '<th>' + fmtDate(d) + '</th>').join('') +
+            '</tr></thead><tbody>';
+          evt.dep_dates.forEach(dep => {
+            html += '<tr><td class="rowh">' + fmtDate(dep) + '</td>';
+            evt.ret_dates.forEach(ret => {
+              html += '<td class="loading" data-k="' + dep + '|' + ret + '">…</td>';
+            });
+            html += '</tr>';
+          });
+          html += '</tbody></table>';
+          blk.innerHTML = html;
+          g.appendChild(blk);
+        });
+        $('#prog').style.width = '10%';
+
+      } else if (evt.type === 'cell') {
+        const di = evt.dest_index;
+        const key = evt.dep + '|' + evt.ret;
+        const tbl = document.getElementById('tbl-' + di);
+        if (tbl) {
+          const td = tbl.querySelector('td[data-k="' + key + '"]');
+          if (td) {
+            td.outerHTML = _cellHtml(evt, thr);
+          }
+        }
+        // Update best tracking for summary card
+        if (evt.chosen_cad != null) {
+          const prev = bestByCityIdx[di];
+          if (!prev || evt.chosen_cad < prev.chosen_cad) {
+            bestByCityIdx[di] = evt;
+            const priceEl = document.getElementById('card-price-' + di);
+            const metaEl = document.getElementById('card-meta-' + di);
+            const groupEl = document.getElementById('card-group-' + di);
+            if (priceEl) priceEl.textContent = money(evt.chosen_cad);
+            if (metaEl) metaEl.textContent = fmtDate(evt.dep) + ' → ' + fmtDate(evt.ret) + ' · ' + (evt.chosen === 'nonstop' ? 'nonstop' : evt.stops + ' stop(s)');
+            if (groupEl) groupEl.textContent = money(evt.chosen_cad * fams);
+          }
+        }
+        cellsDone++;
+        const pct = total > 0 ? 10 + (cellsDone / total) * 85 : 10;
+        $('#prog').style.width = pct + '%';
+
+      } else if (evt.type === 'recommendation') {
+        const rec = $('#rec');
+        rec.style.display = 'block';
+        rec.innerHTML = '<h3>Best-value pick</h3>' + (evt.text || '');
+        // Apply best-cell highlights
+        Object.entries(bestByCityIdx).forEach(([di, b]) => {
+          const tbl = document.getElementById('tbl-' + di);
+          if (tbl && b) {
+            const td = tbl.querySelector('td[data-k="' + b.dep + '|' + b.ret + '"]');
+            if (td) td.classList.add('best');
+          }
+        });
+
+      } else if (evt.type === 'done') {
+        $('#prog').style.width = '100%';
+        setTimeout(() => { $('#prog').style.width = '0%'; }, 600);
+      }
+    }
+
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
@@ -249,106 +340,12 @@ $('#run').onclick = async () => {
       const parts = buf.split('\n');
       buf = parts.pop();  // last partial line stays in buffer
       for (const raw of parts) {
-        const line = raw.trim();
-        if (!line) continue;
-        let msg;
-        try { msg = JSON.parse(line); } catch (_) { continue; }
-
-        if (msg.type === 'meta') {
-          total = msg.total_cells;
-          // Build skeleton: summary cards + grid tables
-          const sum = $('#summary');
-          sum.innerHTML = '';
-          const g = $('#grids');
-          g.innerHTML = '';
-          msg.results.forEach((r, di) => {
-            // Summary card skeleton
-            const card = document.createElement('div');
-            card.className = 'card';
-            card.id = 'card-' + di;
-            card.innerHTML = '<div class="city">' + r.city + ' <small>(' + r.iata + ')</small></div>' +
-              '<div class="price" id="card-price-' + di + '">…</div>' +
-              '<div class="meta" id="card-meta-' + di + '">searching…</div>' +
-              '<div class="meta">group ×' + fams + ': <span id="card-group-' + di + '">…</span></div>';
-            sum.appendChild(card);
-
-            // Grid table skeleton
-            const blk = document.createElement('div');
-            blk.className = 'cityblock';
-            blk.id = 'blk-' + di;
-            let html = '<h2>' + r.city + ' <small>(' + r.iata + ')</small></h2>' +
-              '<table id="tbl-' + di + '"><thead><tr><th>dep \\ ret</th>' +
-              msg.ret_dates.map(d => '<th>' + fmtDate(d) + '</th>').join('') +
-              '</tr></thead><tbody>';
-            msg.dep_dates.forEach(dep => {
-              html += '<tr><td class="rowh">' + fmtDate(dep) + '</td>';
-              msg.ret_dates.forEach(ret => {
-                html += '<td class="loading" data-k="' + dep + '|' + ret + '">…</td>';
-              });
-              html += '</tr>';
-            });
-            html += '</tbody></table>';
-            blk.innerHTML = html;
-            g.appendChild(blk);
-          });
-          $('#prog').style.width = '10%';
-
-        } else if (msg.type === 'cell') {
-          const di = msg.dest_index;
-          const key = msg.dep + '|' + msg.ret;
-          const tbl = document.getElementById('tbl-' + di);
-          if (tbl) {
-            const td = tbl.querySelector('td[data-k="' + key + '"]');
-            if (td) {
-              // Build new td content
-              if (msg.cheapest_cad == null) {
-                td.className = 'err';
-                td.innerHTML = 'n/a';
-              } else {
-                const pickNS = msg.nonstop_cad && msg.cheapest_cad && msg.nonstop_cad <= msg.cheapest_cad * thr;
-                td.className = pickNS ? 'pick-ns' : '';
-                let inner = '<a class="price" href="' + msg.book + '" target="_blank" rel="noopener">' + money(msg.cheapest_cad) + '</a>' +
-                  '<div class="stops">' + (msg.stops != null ? msg.stops + ' stop' + (msg.stops === 1 ? '' : 's') : '') + '</div>';
-                if (msg.nonstop_cad) inner += '<div class="ns">ns ' + money(msg.nonstop_cad) + '</div>';
-                td.innerHTML = inner;
-              }
-            }
-          }
-          // Update best tracking for summary card
-          if (msg.chosen_cad != null) {
-            const prev = bestByCityIdx[di];
-            if (!prev || msg.chosen_cad < prev.chosen_cad) {
-              bestByCityIdx[di] = msg;
-              const priceEl = document.getElementById('card-price-' + di);
-              const metaEl = document.getElementById('card-meta-' + di);
-              const groupEl = document.getElementById('card-group-' + di);
-              if (priceEl) priceEl.textContent = money(msg.chosen_cad);
-              if (metaEl) metaEl.textContent = fmtDate(msg.dep) + ' → ' + fmtDate(msg.ret) + ' · ' + (msg.chosen === 'nonstop' ? 'nonstop' : msg.stops + ' stop(s)');
-              if (groupEl) groupEl.textContent = money(msg.chosen_cad * fams);
-            }
-          }
-          cellsDone++;
-          const pct = total > 0 ? 10 + (cellsDone / total) * 85 : 10;
-          $('#prog').style.width = pct + '%';
-
-        } else if (msg.type === 'recommendation') {
-          const rec = $('#rec');
-          rec.style.display = 'block';
-          rec.innerHTML = '<h3>Best-value pick</h3>' + (msg.text || '');
-          // Apply best-cell highlights
-          Object.entries(bestByCityIdx).forEach(([di, b]) => {
-            const tbl = document.getElementById('tbl-' + di);
-            if (tbl && b) {
-              const td = tbl.querySelector('td[data-k="' + b.dep + '|' + b.ret + '"]');
-              if (td) td.classList.add('best');
-            }
-          });
-
-        } else if (msg.type === 'done') {
-          $('#prog').style.width = '100%';
-          setTimeout(() => { $('#prog').style.width = '0%'; }, 600);
-        }
+        handleLine(raw);
       }
+    }
+    // Flush any remaining buffered content after the stream ends
+    if (buf.trim()) {
+      handleLine(buf);
     }
   } catch (e) {
     alert('Search failed: ' + e);
