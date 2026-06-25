@@ -751,6 +751,9 @@ def api_export_csv():
     args = _search_args_from_body(b)
     if args is None:
         return jsonify(_SEARCH_ARGS_400), 400
+    cap_err = _check_cell_cap(args["dests"], args["dep_dates"], args["ret_dates"])
+    if cap_err is not None:
+        return cap_err
     result = run_search(**args)
     csv_text = export.render_csv(result)
     return Response(
@@ -767,6 +770,9 @@ def api_export_pdf():
     args = _search_args_from_body(b)
     if args is None:
         return jsonify(_SEARCH_ARGS_400), 400
+    cap_err = _check_cell_cap(args["dests"], args["dep_dates"], args["ret_dates"])
+    if cap_err is not None:
+        return cap_err
     result = run_search(**args)
     pdf_bytes = export.render_pdf(result)
     return Response(

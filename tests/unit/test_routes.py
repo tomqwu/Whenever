@@ -350,3 +350,54 @@ def test_stream_disabled_cap_allows_large(client, monkeypatch):
     monkeypatch.setattr("app.build_recommendation", lambda *a, **k: "rec")
     r = client.post("/api/search/stream", json=_LARGE_PAYLOAD)
     assert r.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Quota guard applies to export routes too — /api/export/csv and /api/export/pdf
+# (a direct POST must not bypass the MAX_SEARCH_CELLS cap)
+# ---------------------------------------------------------------------------
+
+def test_export_csv_rejects_over_cap(client, monkeypatch):
+    """POST /api/export/csv over the cap returns 400 and never calls get_fare."""
+    calls = []
+    monkeypatch.setattr("app.MAX_SEARCH_CELLS", 2)
+    monkeypatch.setattr("app.get_fare", lambda *a, **k: calls.append(1) or {})
+    r = client.post("/api/export/csv", json=_LARGE_PAYLOAD)
+    assert r.status_code == 400
+    body = r.get_json()
+    assert "too large" in body["error"]
+    assert "8" in body["error"]   # total_cells present in message
+    assert "2" in body["error"]   # cap value present
+    assert calls == []            # no provider calls were made
+
+
+def test_export_pdf_rejects_over_cap(client, monkeypatch):
+    """POST /api/export/pdf over the cap returns 400 and never calls get_fare."""
+    calls = []
+    monkeypatch.setattr("app.MAX_SEARCH_CELLS", 2)
+    monkeypatch.setattr("app.get_fare", lambda *a, **k: calls.append(1) or {})
+    r = client.post("/api/export/pdf", json=_LARGE_PAYLOAD)
+    assert r.status_code == 400
+    body = r.get_json()
+    assert "too large" in body["error"]
+    assert calls == []            # no provider calls were made
+
+
+def test_export_csv_accepts_under_cap(client, monkeypatch):
+    """POST /api/export/csv at/under the cap still succeeds (200)."""
+    monkeypatch.setattr("app.MAX_SEARCH_CELLS", 2)
+    monkeypatch.setattr(appmod, "get_fare", lambda *a, **k: _FAKE_FARE)
+    monkeypatch.setattr(appmod, "build_recommendation", lambda *a, **k: "rec")
+    r = client.post("/api/export/csv", json=_EXPORT_PAYLOAD)
+    assert r.status_code == 200
+    assert "text/csv" in r.content_type
+
+
+def test_export_pdf_accepts_under_cap(client, monkeypatch):
+    """POST /api/export/pdf at/under the cap still succeeds (200)."""
+    monkeypatch.setattr("app.MAX_SEARCH_CELLS", 2)
+    monkeypatch.setattr(appmod, "get_fare", lambda *a, **k: _FAKE_FARE)
+    monkeypatch.setattr(appmod, "build_recommendation", lambda *a, **k: "rec")
+    r = client.post("/api/export/pdf", json=_EXPORT_PAYLOAD)
+    assert r.status_code == 200
+    assert r.content_type == "application/pdf"
