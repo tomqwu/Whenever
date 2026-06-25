@@ -50,6 +50,61 @@ def test_load_from_hash_prefills_and_autoruns(live_server, page):
     assert "Beijing" in summary_text or "Shanghai" in summary_text
 
 
+def test_in_page_hashchange_restores_share(live_server, page):
+    """An already-open app that navigates IN-PAGE to a new #s= fragment (a
+    same-document hash navigation, no script reload) must re-apply the incoming
+    share state via the 'hashchange' listener: form prefills + auto-run fires.
+    The search's own hash write uses history.replaceState (no 'hashchange'), so
+    the restore must run exactly once and not loop."""
+    import json, urllib.parse
+    # 1. Load the page with NO hash → default form, no auto-run.
+    page.goto(live_server)
+    page.wait_for_selector("#depCode")
+    assert page.input_value("#depCode") == "YYZ"
+    assert page.input_value("#country") == "China"
+    # No shared search has run yet (default country field, summary empty of cards).
+    assert page.query_selector("#summary .card") is None
+
+    # Instrument: count how many times the auto-run search is kicked off so we can
+    # prove the hashchange restore fires once and does not loop.
+    page.evaluate(
+        "window.__runClicks = 0;"
+        "document.getElementById('run')"
+        ".addEventListener('click', () => { window.__runClicks++; });"
+    )
+
+    # 2. Navigate IN-PAGE to a #s= share hash (same document, no reload).
+    share = {
+        "depCity": "Toronto", "depCode": "YVR", "country": "Japan",
+        "cities": [{"city": "Tokyo", "iata": "NRT"}],
+        "adults": 2, "child_ages": [], "families": 1,
+        "dep_start": "2026-12-12", "dep_span": 2,
+        "ret_start": "2027-01-04", "ret_span": 2,
+        "nonstop_threshold": 25,
+    }
+    hash_val = "#s=" + urllib.parse.quote(json.dumps(share))
+    page.evaluate("h => { location.hash = h; }", hash_val)
+
+    # 3. The form must prefill from the NEW hash without a reload.
+    page.wait_for_function("() => document.getElementById('depCode').value === 'YVR'")
+    assert page.input_value("#depCode") == "YVR"
+    assert page.input_value("#country") == "Japan"
+    page.wait_for_selector(".chip.on")
+    chip_texts = " ".join(el.inner_text() for el in page.query_selector_all(".chip.on"))
+    assert "Tokyo" in chip_texts
+
+    # 4. Auto-run fires from the new hash: #summary populates.
+    page.wait_for_selector("#summary .card")
+    summary_text = page.inner_text("#summary")
+    assert "Tokyo" in summary_text
+
+    # 5. No loop: the replaceState hash write must NOT fire 'hashchange', so the
+    #    restore-driven auto-run ran exactly once.
+    page.wait_for_selector("#copyLink:not([disabled])")
+    page.wait_for_timeout(500)
+    assert page.evaluate("window.__runClicks") == 1
+
+
 def test_share_date_validator_is_timezone_safe(browser, live_server):
     """Loading a share hash with custom dates under a UTC+ timezone must still
     prefill the date inputs. With the old `new Date(s+'T00:00:00').toISOString()`

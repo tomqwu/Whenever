@@ -660,6 +660,13 @@ function restoreFromHash() {
 renderKids([11,9]);
 health();
 restoreFromHash();
+// In-page shared links: when an already-open app navigates to a URL that differs
+// only in the #s= fragment, the browser does a same-document hash navigation with
+// no script reload, so re-apply the incoming share state. This is safe from loops
+// because the search's own hash write uses history.replaceState (see above), which
+// does NOT fire 'hashchange'; restoreFromHash is idempotent and falls back quietly
+// on a malformed/empty hash.
+window.addEventListener('hashchange', restoreFromHash);
 </script>
 </body>
 </html>
