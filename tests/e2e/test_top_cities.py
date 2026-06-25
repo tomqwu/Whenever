@@ -118,37 +118,75 @@ def test_top_cities_api_optional_and_priority_in_response(seed_live_server):
 
 
 # ---------------------------------------------------------------------------
-# Browser assertion: optional city chip NOT pre-selected; required IS
+# Browser assertion: a country expansion starts with EVERY chip UNCHECKED
 # ---------------------------------------------------------------------------
 
-def test_optional_cities_chip_not_prechecked_required_is(seed_live_server, page):
-    """Required city chips are .on; optional city chips are NOT .on initially.
+def test_expanded_country_chips_all_unchecked(seed_live_server, page):
+    """After expanding a COUNTRY, no chip is .on — required AND optional alike.
 
-    Validates the templates/index.html change: on: !city.optional.
+    Validates the templates/index.html change: expandCountry maps every city to
+    on:false (opt-in UX), regardless of the `optional` flag. The user explicitly
+    clicks a chip to select it.
     """
     page.goto(seed_live_server)
     page.click("#loadCities")
     # Wait until at least one chip appears
     page.wait_for_selector(".chip")
 
-    # Required city Beijing should be .on (pre-selected)
-    beijing_chip = page.query_selector(".chip.on:has-text('Beijing')")
-    assert beijing_chip is not None, "Beijing (required) chip must have class 'on'"
+    # No chip may be pre-selected after a country expansion.
+    assert page.query_selector(".chip.on") is None, \
+        "No chip should have class 'on' after a country expansion (all unchecked)"
 
-    # Optional city Haikou should NOT be .on (unchecked)
-    haikou_on = page.query_selector(".chip.on:has-text('Haikou')")
-    assert haikou_on is None, "Haikou (optional) chip must NOT have class 'on'"
+    # Required city Beijing must still be RENDERED — just unchecked.
+    beijing_chip = page.query_selector(".chip:has-text('Beijing')")
+    assert beijing_chip is not None, "Beijing chip must be rendered (unchecked)"
+    assert "on" not in (beijing_chip.get_attribute("class") or ""), \
+        "Beijing (required) chip must NOT be pre-selected anymore"
 
-    # Haikou chip must still exist (just unchecked)
+    # Optional city Haikou must also be rendered, unchecked.
     haikou_chip = page.query_selector(".chip:has-text('Haikou')")
-    assert haikou_chip is not None, "Haikou chip must be rendered (even though unchecked)"
+    assert haikou_chip is not None, "Haikou chip must be rendered (unchecked)"
+    assert "on" not in (haikou_chip.get_attribute("class") or ""), \
+        "Haikou (optional) chip must NOT have class 'on'"
 
-    # Hong Kong (nearby hub) must also be rendered UNCHECKED (#46)
-    hkg_on = page.query_selector(".chip.on:has-text('Hong Kong')")
-    assert hkg_on is None, "Hong Kong (nearby optional) chip must NOT have class 'on'"
-
+    # Hong Kong (nearby hub) must also be rendered UNCHECKED (#46).
     hkg_chip = page.query_selector(".chip:has-text('Hong Kong')")
     assert hkg_chip is not None, "Hong Kong chip must be rendered (unchecked)"
+    assert "on" not in (hkg_chip.get_attribute("class") or ""), \
+        "Hong Kong (nearby optional) chip must NOT have class 'on'"
+
+    # Clicking a chip selects it (toggle UX unchanged). drawChips() rebuilds the
+    # chip DOM on every toggle, so re-query for the fresh element afterward.
+    beijing_chip.click()
+    page.wait_for_selector(".chip.on:has-text('Beijing')")
+    assert page.query_selector(".chip.on:has-text('Beijing')") is not None, \
+        "Clicking the Beijing chip must turn it .on"
+
+
+def test_run_with_all_unchecked_expansion_alerts(seed_live_server, page):
+    """After a country expansion (all chips unchecked) the user clicking Run with
+    nothing selected must still hit the existing 'pick at least one destination'
+    alert — never a broken/empty search."""
+    page.goto(seed_live_server)
+    page.click("#loadCities")
+    page.wait_for_selector(".chip")
+    # Nothing selected after expansion.
+    assert page.query_selector(".chip.on") is None
+
+    # Capture the alert and assert no search request goes out.
+    dialog_messages = []
+    page.on("dialog", lambda d: (dialog_messages.append(d.message), d.dismiss()))
+    search_hits = []
+    page.on("request", lambda req: search_hits.append(req.url)
+            if "/api/search" in req.url else None)
+
+    page.click("#run")
+    page.wait_for_timeout(400)
+
+    assert len(dialog_messages) == 1, f"Expected the alert, got {dialog_messages!r}"
+    assert "at least one" in dialog_messages[0].lower(), \
+        f"Expected 'pick at least one' alert, got: {dialog_messages[0]!r}"
+    assert search_hits == [], f"No search should run with nothing selected, got {search_hits!r}"
 
 
 # ---------------------------------------------------------------------------

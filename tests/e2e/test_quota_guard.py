@@ -8,6 +8,8 @@ import pytest
 from werkzeug.serving import make_server
 import app as appmod
 
+from tests.e2e.conftest import select_all_chips
+
 
 # ---------------------------------------------------------------------------
 # Fixtures: a server with many cities so cells exceed CONFIRM_CELLS (40)
@@ -99,7 +101,7 @@ def test_large_search_triggers_confirm_and_dismiss_aborts(quota_live_server, pag
     page.goto(quota_live_server)
     # Load the 5 cities
     page.click("#loadCities")
-    page.wait_for_selector(".chip.on")
+    select_all_chips(page)
 
     # Set dep_span=3 and ret_span=3 so cells = 5×3×3 = 45 > CONFIRM_CELLS(40)
     page.fill("#depSpan", "3")
@@ -142,7 +144,7 @@ def test_large_search_triggers_confirm_and_accept_proceeds(quota_live_server, pa
     page.goto(quota_live_server)
     # Load the 5 cities
     page.click("#loadCities")
-    page.wait_for_selector(".chip.on")
+    select_all_chips(page)
 
     # Set dep_span=3 and ret_span=3 so cells = 5×3×3 = 45 > CONFIRM_CELLS(40)
     page.fill("#depSpan", "3")
@@ -168,7 +170,7 @@ def test_small_search_no_confirm_needed(small_quota_live_server, page):
     page.goto(small_quota_live_server)
     # Load the 1 city
     page.click("#loadCities")
-    page.wait_for_selector(".chip.on")
+    select_all_chips(page)
 
     # dep_span=2, ret_span=2 → cells = 1×2×2 = 4 < CONFIRM_CELLS(40)
     page.fill("#depSpan", "2")

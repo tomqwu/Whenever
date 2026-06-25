@@ -7,12 +7,14 @@ These tests assert:
   3. HTML/script injection in model output is escaped — no injected elements.
 """
 
+from tests.e2e.conftest import select_all_chips
+
 
 def test_rec_bold_renders_as_strong(markdown_live_server, page):
     """**bold** in recommendation must render as a <strong> element."""
     page.goto(markdown_live_server)
     page.click("#loadCities")
-    page.wait_for_selector(".chip")
+    select_all_chips(page)
     page.click("#run")
 
     # Wait for recommendation to appear
@@ -35,7 +37,7 @@ def test_rec_no_literal_asterisks(markdown_live_server, page):
     """No literal ** must remain visible in #rec after markdown rendering."""
     page.goto(markdown_live_server)
     page.click("#loadCities")
-    page.wait_for_selector(".chip")
+    select_all_chips(page)
     page.click("#run")
 
     page.wait_for_selector("#rec", state="visible", timeout=15000)
@@ -50,7 +52,7 @@ def test_rec_newline_renders_as_line_break(markdown_live_server, page):
     """Newlines in recommendation must produce visible line-break separation."""
     page.goto(markdown_live_server)
     page.click("#loadCities")
-    page.wait_for_selector(".chip")
+    select_all_chips(page)
     page.click("#run")
 
     page.wait_for_selector("#rec", state="visible", timeout=15000)
@@ -67,7 +69,7 @@ def test_rec_xss_script_is_escaped(xss_live_server, page):
     """Model output containing <script> must be HTML-escaped, not executed."""
     page.goto(xss_live_server)
     page.click("#loadCities")
-    page.wait_for_selector(".chip")
+    select_all_chips(page)
     page.click("#run")
 
     page.wait_for_selector("#rec", state="visible", timeout=15000)
@@ -92,7 +94,7 @@ def test_rec_xss_injected_b_tag_not_rendered(xss_live_server, page):
     """Model output containing <b>injected</b> must not create a real <b> element."""
     page.goto(xss_live_server)
     page.click("#loadCities")
-    page.wait_for_selector(".chip")
+    select_all_chips(page)
     page.click("#run")
 
     page.wait_for_selector("#rec", state="visible", timeout=15000)

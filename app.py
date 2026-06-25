@@ -39,6 +39,144 @@ def _load_seed_config():
 
 _SEED_CONFIG: dict = _load_seed_config()
 
+# ----------------------- airports dataset (autocomplete) -----------------------
+# Country codes whose `country` value is NOT a sovereign country, so they must
+# never be offered as a "country" autocomplete suggestion (only as cities). For a
+# neutral travel app: Hong Kong (HK) and Macau (MO) are SARs; Taiwan (TW) is
+# politically sensitive; the rest are dependent/overseas territories present in the
+# dataset. Matched by 2-letter country_code so it's robust regardless of the
+# display string used as a city's location subtitle.
+_NON_SOVEREIGN_COUNTRY_CODES = {
+    "HK",  # Hong Kong SAR
+    "MO",  # Macau SAR
+    "TW",  # Taiwan
+    "PR",  # Puerto Rico (US territory)
+    "GU",  # Guam (US territory)
+    "PF",  # French Polynesia (French overseas collectivity)
+}
+
+
+def _load_airports():
+    """Load the bundled airports dataset (config/airports.json).
+
+    Returns a list of ``{"iata","city","country","country_code"}`` dicts.
+    Missing/malformed file -> empty list (suggest then returns no results),
+    so a packaging slip degrades gracefully instead of crashing at import.
+    """
+    path = os.path.join(os.path.dirname(__file__), "config", "airports.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, list):
+            _log.warning("airports.json parsed to non-list; autocomplete disabled")
+            return []
+        out = []
+        for a in data:
+            if not isinstance(a, dict):
+                continue
+            iata = str(a.get("iata", "")).strip().upper()
+            city = str(a.get("city", "")).strip()
+            country = str(a.get("country", "")).strip()
+            if not iata or not city or not country:
+                continue
+            out.append({
+                "iata": iata,
+                "city": city,
+                "country": country,
+                "country_code": str(a.get("country_code", "")).strip().upper(),
+            })
+        return out
+    except FileNotFoundError:
+        _log.warning("config/airports.json not found; destination autocomplete disabled")
+        return []
+    except Exception as exc:
+        _log.warning("Failed to parse airports.json (%s); autocomplete disabled", exc)
+        return []
+
+
+def _build_suggest_index(airports, seed_config):
+    """Build the country + city suggestion index from the airports dataset.
+
+    Countries are the unique country names (from the dataset plus any
+    ``country_seeds.yaml`` display names), each carrying its 2-letter code when
+    known. Cities are one entry per airport (city/iata/country). Returns
+    ``(countries, cities)`` where each list element is a ready-to-serve dict.
+    """
+    countries = {}  # lower-name -> {"name","code"}
+    for a in airports:
+        # Non-sovereign territories (HK/MO SARs, Taiwan, overseas territories)
+        # must not be offered as a "country" suggestion — they remain CITY
+        # suggestions only. Matched by code so it's robust regardless of the
+        # `country` display string (e.g. "Hong Kong SAR").
+        if a.get("country_code", "") in _NON_SOVEREIGN_COUNTRY_CODES:
+            continue
+        key = a["country"].lower()
+        if key not in countries:
+            countries[key] = {"name": a["country"], "code": a.get("country_code", "")}
+    # Fold in seed countries (display_name preferred) so a seeded country with no
+    # dataset airport still autocompletes and expands via top_cities.
+    for raw_key, cfg in (seed_config or {}).items():
+        name = (isinstance(cfg, dict) and cfg.get("display_name")) or str(raw_key).title()
+        if name.lower() not in countries:
+            countries[name.lower()] = {"name": name, "code": ""}
+    cities = [
+        {"city": a["city"], "iata": a["iata"], "country": a["country"]}
+        for a in airports
+    ]
+    return list(countries.values()), cities
+
+
+_AIRPORTS: list = _load_airports()
+_SUGGEST_COUNTRIES, _SUGGEST_CITIES = _build_suggest_index(_AIRPORTS, _SEED_CONFIG)
+
+
+def suggest_destinations(q, limit=10):
+    """Rank country + city suggestions for the type-ahead query ``q``.
+
+    Matching (case-insensitive): countries whose name starts-with/contains ``q``;
+    cities whose city name, IATA, or country contains ``q``. Ranking (lower score
+    first): exact IATA < country prefix < city/IATA prefix < country substring <
+    city substring. An exact IATA match wins over a country whose name merely
+    starts with ``q`` (e.g. ``DEN``=Denver ranks ahead of Denmark, ``VIE``=Vienna
+    ahead of Vietnam, ``CAN``=Guangzhou ahead of Canada). Ties break
+    alphabetically for stable output. Capped at ``limit`` results. Empty/blank
+    ``q`` -> [].
+    """
+    q = (q or "").strip().lower()
+    if len(q) < 1:
+        return []
+
+    scored = []  # (rank, sort_key, suggestion_dict)
+    for c in _SUGGEST_COUNTRIES:
+        name = c["name"].lower()
+        if name.startswith(q):
+            rank = 1
+        elif q in name:
+            rank = 3
+        else:
+            continue
+        scored.append((rank, name, {"type": "country", "name": c["name"], "code": c["code"]}))
+
+    for c in _SUGGEST_CITIES:
+        city = c["city"].lower()
+        iata = c["iata"].lower()
+        country = c["country"].lower()
+        if iata == q:
+            # Exact IATA beats a country whose name merely prefixes q (DEN/VIE/CAN).
+            rank = 0
+        elif city.startswith(q) or iata.startswith(q):
+            rank = 2
+        elif q in city or q in iata or q in country:
+            rank = 4
+        else:
+            continue
+        scored.append((rank, city + iata, {
+            "type": "city", "city": c["city"], "iata": c["iata"], "country": c["country"],
+        }))
+
+    scored.sort(key=lambda t: (t[0], t[1]))
+    return [s for _, _, s in scored[:limit]]
+
 # ----------------------------- config -----------------------------
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
 OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "deepseek-v4pro")
@@ -165,8 +303,10 @@ def top_cities(country, n=6):
 
     # LLM fallback
     prompt = (
-        f"List the top {n} destination cities in {country} for international leisure "
-        f"travelers. Return ONLY a JSON array; each item: "
+        f"List the top {n} destination cities in the country {country} for "
+        f"international leisure travelers. If {country} is actually a single city "
+        f"or territory rather than a country, return just that one place. Return "
+        f"ONLY a JSON array; each item: "
         f'{{"city":"<name>","iata":"<primary international airport IATA code>"}}. '
         f"No commentary."
     )
@@ -548,6 +688,17 @@ def api_top_cities():
         return jsonify({"cities": top_cities(country, n)})
     except Exception as e:
         return jsonify({"error": f"model error: {e}"}), 502
+
+@app.route("/api/suggest")
+def api_suggest():
+    """GET /api/suggest?q=<text> — type-ahead destination suggestions.
+
+    Returns ``{"suggestions": [...]}`` with up to ~10 country/city matches.
+    A blank/too-short query returns an empty list.
+    """
+    q = request.args.get("q", "")
+    return jsonify({"suggestions": suggest_destinations(q)})
+
 
 @app.route("/api/resolve", methods=["POST"])
 def api_resolve():

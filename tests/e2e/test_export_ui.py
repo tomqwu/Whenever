@@ -5,11 +5,14 @@ when the user clicks the export buttons after running a search.
 """
 
 
+from tests.e2e.conftest import select_some_chips
+
+
 def _run_search(page, base_url):
     """Navigate and run a full search flow, returning after stream completes."""
     page.goto(base_url)
     page.click("#loadCities")
-    page.wait_for_selector(".chip")
+    select_some_chips(page)
     page.click("#run")
     # Wait for stream to complete (recommendation visible)
     page.wait_for_selector("#rec", state="visible", timeout=15000)

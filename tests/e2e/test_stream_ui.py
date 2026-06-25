@@ -3,6 +3,8 @@ streaming search and assert progressive rendering produces the correct final sta
 
 import pytest
 
+from tests.e2e.conftest import select_some_chips as _select_all_chips
+
 
 def test_streaming_search_full_flow(seed_live_server, page):
     """Toronto (YYZ) → China: click run, wait for stream to complete, assert grid populated."""
@@ -10,7 +12,7 @@ def test_streaming_search_full_flow(seed_live_server, page):
 
     # Load top cities (China seeds)
     page.click("#loadCities")
-    page.wait_for_selector(".chip")
+    _select_all_chips(page)
 
     # Click run — triggers /api/search/stream
     page.click("#run")
@@ -50,7 +52,7 @@ def test_streaming_search_renders_duration(seed_live_server, page):
     """
     page.goto(seed_live_server)
     page.click("#loadCities")
-    page.wait_for_selector(".chip")
+    _select_all_chips(page)
     page.click("#run")
 
     # Stream complete
@@ -77,7 +79,7 @@ def test_streaming_search_run_button_re_enabled(seed_live_server, page):
     """After stream completes, the run button must be re-enabled."""
     page.goto(seed_live_server)
     page.click("#loadCities")
-    page.wait_for_selector(".chip")
+    _select_all_chips(page)
     page.click("#run")
 
     # Wait for done (rec visible)
@@ -92,7 +94,7 @@ def test_streaming_search_progress_bar(seed_live_server, page):
     """Progress bar should become non-zero during search and reset after."""
     page.goto(seed_live_server)
     page.click("#loadCities")
-    page.wait_for_selector(".chip")
+    _select_all_chips(page)
     page.click("#run")
 
     # Assert bar goes non-zero DURING the search
@@ -121,7 +123,7 @@ def test_streaming_best_tiebreak_matches_backend(seed_live_server, page):
     naive 'first to arrive' frontend could land elsewhere; assert it does not."""
     page.goto(seed_live_server)
     page.click("#loadCities")
-    page.wait_for_selector(".chip")
+    _select_all_chips(page)
     page.click("#run")
 
     # Wait for the recommendation (stream complete + highlights applied).
@@ -163,7 +165,7 @@ def test_streaming_progress_resets_on_400(seed_live_server, page):
     400, exercising the !response.ok early-return path."""
     page.goto(seed_live_server)
     page.click("#loadCities")
-    page.wait_for_selector(".chip")
+    _select_all_chips(page)
 
     # The non-ok path calls alert(); auto-dismiss so the handler proceeds.
     page.on("dialog", lambda d: d.dismiss())
@@ -189,7 +191,7 @@ def test_streaming_no_fare_card_finalized(nofare_live_server, page):
     (never left on the '…' placeholder) once the stream completes."""
     page.goto(nofare_live_server)
     page.click("#loadCities")
-    page.wait_for_selector(".chip")
+    _select_all_chips(page)
     page.click("#run")
 
     # Wait for stream completion (recommendation visible).

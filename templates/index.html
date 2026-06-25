@@ -25,6 +25,10 @@ input[type=number]{width:80px}
 button{cursor:pointer;border:1px solid var(--accent2);background:var(--accent);color:#fff;padding:9px 16px;border-radius:9px;font-size:14px;font-weight:600}
 button.sec{background:#fff;color:var(--mut);border-color:#d4d4cc}
 button:disabled{opacity:.5;cursor:default}
+.suggest{position:absolute;top:100%;left:0;right:0;z-index:30;margin:2px 0 0;padding:4px;list-style:none;background:#fff;border:1px solid #d4d4cc;border-radius:9px;box-shadow:0 6px 20px rgba(0,0,0,.10);max-height:280px;overflow-y:auto;min-width:220px}
+.suggest li{padding:7px 10px;border-radius:6px;cursor:pointer;font-size:13px;display:flex;align-items:baseline;gap:6px;white-space:nowrap}
+.suggest li .smeta{color:#8a8a83;font-size:11.5px}
+.suggest li.active,.suggest li:hover{background:#fcefe2}
 .chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:8px}
 .chip{display:inline-flex;align-items:center;gap:6px;border:1px solid #d4d4cc;border-radius:20px;padding:5px 11px;font-size:13px;cursor:pointer;background:#fff;user-select:none}
 .chip.on{background:#fcefe2;border-color:var(--accent);color:#8a4b16;font-weight:600}
@@ -84,9 +88,12 @@ button.watch.watched{background:#e9f3e9;color:#2f7d32;border-color:#bcdcbc;curso
         <label>Airport</label>
         <input id="depCode" placeholder="YYZ" value="YYZ" style="width:90px">
       </div>
-      <div class="field">
-        <label>Arrival country</label>
-        <input id="country" placeholder="e.g. China" value="China">
+      <div class="field" style="position:relative">
+        <label>Destination (country or city)</label>
+        <input id="country" placeholder="Type a country or city…" value="China"
+               autocomplete="off" role="combobox" aria-autocomplete="list"
+               aria-expanded="false" aria-controls="suggestList">
+        <ul id="suggestList" class="suggest" role="listbox" style="display:none"></ul>
       </div>
       <div class="field" style="justify-content:flex-end">
         <label>&nbsp;</label>
@@ -213,17 +220,193 @@ async function health(){
   }catch(e){ $('#status').innerHTML='<span class="warn">Backend not reachable.</span>'; }
 }
 
-$('#loadCities').onclick = async ()=>{
-  const country = $('#country').value.trim(); if(!country) return;
-  $('#loadCities').disabled=true; $('#loadCities').textContent='Asking model…';
+// --------------------------- destination autocomplete (#55) ---------------------------
+// A debounced type-ahead over GET /api/suggest. Picking a COUNTRY REPLACES the
+// chip set with that country's seed-first top_cities expansion (same flow as the
+// old "Get top cities" button). Picking a CITY APPENDS just that city as a chip
+// (on:true), supporting MULTIPLE city selections and mixing with a country set.
+let SUGGESTIONS = [];   // current suggestion list from /api/suggest
+let SUGG_ACTIVE = -1;   // index of keyboard-highlighted suggestion (-1 = none)
+let SUGG_TIMER = null;  // debounce timer handle
+let SUGGEST_SEQ = 0;    // monotonic request token — a response is applied only if
+                        // it carries the latest token (stale responses are dropped)
+let EXPAND_SEQ = 0;     // monotonic token for /api/top-cities expansions — single-
+                        // flight guard so only the LATEST expansion applies its chips
+
+// expandCountry: run the seed-first /api/top-cities expansion and REPLACE CITIES
+// with that country's set, every chip UNCHECKED (on:false) regardless of the
+// `optional` flag. A country expansion no longer pre-selects anything, so it
+// can't auto-run a huge search — the user explicitly opts in to the cities they
+// want by clicking chips. (A directly-picked CITY via addCity() stays on:true.)
+// Single-flight guarded: a slow expansion (e.g. a non-seed country via the LLM)
+// that resolves AFTER the user picked another country is dropped, so the slower
+// response can't apply last and show chips for the wrong country. (codex review)
+async function expandCountry(country){
+  if(!country) return;
+  const seq = ++EXPAND_SEQ;   // this expansion's token (latest wins)
   try{
     const r = await (await fetch('/api/top-cities',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({country, n:6})})).json();
-    CITIES = (r.cities||[]).map(c=>({...c,on:!c.optional}));
+    if(seq !== EXPAND_SEQ) return;   // a newer expansion superseded us — drop this
+    CITIES = (r.cities||[]).map(c=>({...c,on:false}));
     drawChips();
-  }catch(e){ alert('Could not load cities: '+e); }
+  }catch(e){ if(seq === EXPAND_SEQ) alert('Could not load cities: '+e); }
+}
+
+// Fallback "Get top cities →" button: expands whatever country is typed. The
+// type-ahead covers this too (picking a country suggestion), but the explicit
+// button stays as a discoverable affordance for a known country name.
+$('#loadCities').onclick = async ()=>{
+  const country = $('#country').value.trim(); if(!country) return;
+  $('#loadCities').disabled=true; $('#loadCities').textContent='Asking model…';
+  await expandCountry(country);
   $('#loadCities').disabled=false; $('#loadCities').textContent='Get top cities →';
 };
+
+// addCity: SELECT one city chip. If the city already exists (e.g. a country
+// expansion rendered it on:false), turn that existing chip ON instead of
+// returning a no-op — otherwise picking it from autocomplete would be ignored
+// and Run would still have no selected destination. Otherwise APPEND it
+// (on:true). Dedup by IATA, case-insensitive.
+function addCity(city, iata){
+  if(!iata) return;
+  const existing = CITIES.find(c=>c.iata.toLowerCase()===iata.toLowerCase());
+  if(existing){
+    existing.on = true;   // select the already-present chip (codex review)
+    ++EXPAND_SEQ;         // invalidate any in-flight expansion, as below
+    drawChips();
+    return;
+  }
+  // Invalidate any in-flight country expansion: bumping the token makes its
+  // seq === EXPAND_SEQ guard fail, so a slow /api/top-cities response that
+  // resolves after this pick can no longer REPLACE CITIES and delete the chip
+  // the user just added. A direct chip-set mutation outside an expansion must
+  // win over an expansion that was already in flight. (codex review)
+  ++EXPAND_SEQ;
+  CITIES.push({city: city||iata, iata, on:true});
+  drawChips();
+}
+
+const sList = $('#suggestList');
+const sInput = $('#country');
+
+function closeSuggest(){
+  // Cancel any pending debounce timer so a queued fetchSuggest() can't fire AFTER
+  // we close. Without this, a timer scheduled before the close would still run,
+  // mint a FRESH token (++SUGGEST_SEQ inside fetchSuggest), pass stale() while the
+  // input still matches + is focused, and REOPEN the dropdown right after Escape/
+  // clear/blur/pick. (codex review)
+  if(SUGG_TIMER){ clearTimeout(SUGG_TIMER); SUGG_TIMER = null; }
+  // Bump the request token so any /api/suggest response still in flight when we
+  // close (Escape, clear, blur, outside-click, or a pick) is treated as stale and
+  // dropped — a slow OLD response can no longer reopen this dropdown.
+  SUGGEST_SEQ++;
+  SUGGESTIONS = []; SUGG_ACTIVE = -1;
+  sList.style.display='none'; sList.innerHTML='';
+  sInput.setAttribute('aria-expanded','false');
+}
+
+// renderSuggest: paint the dropdown from SUGGESTIONS. All values escapeHtml'd so
+// a crafted country/city name can never reach the DOM as live markup (#34 rule).
+function renderSuggest(){
+  if(!SUGGESTIONS.length){ closeSuggest(); return; }
+  sList.innerHTML = SUGGESTIONS.map((s,i)=>{
+    const active = i===SUGG_ACTIVE ? ' active' : '';
+    let label, meta;
+    if(s.type==='country'){
+      label = escapeHtml(s.name);
+      meta = 'country';
+    } else {
+      label = escapeHtml(s.city) + ' (' + escapeHtml(s.iata) + ')';
+      meta = escapeHtml(s.country);
+    }
+    return '<li class="'+active.trim()+'" role="option" data-i="'+i+'">'+
+      '<span>'+label+'</span><span class="smeta">· '+escapeHtml(meta)+'</span></li>';
+  }).join('');
+  sList.style.display='block';
+  sInput.setAttribute('aria-expanded','true');
+  sList.querySelectorAll('li').forEach(li=>{
+    // mousedown (not click) so selection fires before the input's blur closes us.
+    li.addEventListener('mousedown', ev=>{ ev.preventDefault(); pickSuggestion(parseInt(li.dataset.i)); });
+  });
+}
+
+// pickSuggestion: act on the chosen suggestion — country expands (replace), city appends.
+function pickSuggestion(i){
+  const s = SUGGESTIONS[i];
+  if(!s) return;
+  if(s.type==='country'){
+    sInput.value = s.name;
+    expandCountry(s.name);
+  } else {
+    addCity(s.city, s.iata);
+    // Leave the input cleared so the user can keep adding more cities.
+    sInput.value = '';
+  }
+  closeSuggest();
+}
+
+async function fetchSuggest(q){
+  // Capture this request's token. We only apply the response if it is STILL the
+  // latest request, the query still matches the live input, and the field still
+  // has focus — otherwise the user has typed on, cleared, Escaped, or tabbed away
+  // and this (possibly slow) response is stale: drop it silently.
+  const seq = ++SUGGEST_SEQ;
+  const stale = () => seq !== SUGGEST_SEQ
+    || q !== sInput.value.trim()
+    || document.activeElement !== sInput;
+  try{
+    const r = await fetch('/api/suggest?q='+encodeURIComponent(q));
+    if(stale()) return;               // ignore late response for an abandoned query
+    if(!r.ok){ closeSuggest(); return; }
+    const data = await r.json();
+    if(stale()) return;               // re-check after the JSON body resolves too
+    SUGGESTIONS = data.suggestions || [];
+    SUGG_ACTIVE = -1;
+    renderSuggest();
+  }catch(e){ if(!stale()) closeSuggest(); }
+}
+
+sInput.addEventListener('input', ()=>{
+  const q = sInput.value.trim();
+  // The query just CHANGED, so the currently-shown SUGGESTIONS are stale: clear and
+  // hide them NOW (and bump SUGGEST_SEQ to invalidate any in-flight response) so that
+  // during the 200ms debounce + fetch window an ArrowDown/Enter or click can't pick an
+  // OLD result for the new text (type 'chi', replace with 'hnd', quick-select → must
+  // not yield China). closeSuggest() cancels the timer, empties SUGGESTIONS, hides the
+  // list, and ++SUGGEST_SEQ — exactly what we need before scheduling the fresh fetch.
+  // (codex review)
+  closeSuggest();
+  if(!q){ return; }
+  SUGG_TIMER = setTimeout(()=>fetchSuggest(q), 200);  // ~200ms debounce
+});
+
+sInput.addEventListener('keydown', ev=>{
+  // Escape must ALWAYS cancel a pending debounce/request, even when the dropdown
+  // is still hidden (user pressed Escape inside the 200ms debounce, before the
+  // suggestion list opened). Without this, the early return below skips
+  // closeSuggest(), the queued SUGG_TIMER survives, and the delayed /api/suggest
+  // reopens suggestions AFTER the user already dismissed. (codex review)
+  if(ev.key==='Escape'){ closeSuggest(); return; }
+  if(sList.style.display==='none') return;
+  if(ev.key==='ArrowDown'){
+    ev.preventDefault();
+    SUGG_ACTIVE = Math.min(SUGG_ACTIVE+1, SUGGESTIONS.length-1);
+    renderSuggest();
+  } else if(ev.key==='ArrowUp'){
+    ev.preventDefault();
+    SUGG_ACTIVE = Math.max(SUGG_ACTIVE-1, 0);
+    renderSuggest();
+  } else if(ev.key==='Enter'){
+    if(SUGG_ACTIVE>=0){ ev.preventDefault(); pickSuggestion(SUGG_ACTIVE); }
+  }
+});
+
+// Close on blur (slight delay so a mousedown pick can complete) and outside-click.
+sInput.addEventListener('blur', ()=>{ setTimeout(closeSuggest, 120); });
+document.addEventListener('click', ev=>{
+  if(ev.target!==sInput && !sList.contains(ev.target)) closeSuggest();
+});
 
 function drawChips(){
   const box=$('#cities'); box.innerHTML='';
