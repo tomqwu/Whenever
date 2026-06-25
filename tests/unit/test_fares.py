@@ -1,10 +1,14 @@
 import app as appmod
 
 
-def _amadeus_offer(grand_total, segs):
+def _amadeus_offer(grand_total, segs, durations=("PT2H", "PT2H")):
+    """Build a 2-itinerary (out+return) offer. `durations` are ISO-8601 leg durations."""
     return {
         "price": {"grandTotal": str(grand_total)},
-        "itineraries": [{"segments": [{} for _ in range(segs)]}],
+        "itineraries": [
+            {"segments": [{} for _ in range(segs)], "duration": durations[0]},
+            {"segments": [{} for _ in range(segs)], "duration": durations[1]},
+        ],
     }
 
 
@@ -40,13 +44,17 @@ def test_amadeus_fare_none_without_token(monkeypatch):
 def test_amadeus_fare_picks_cheapest_and_nonstop(monkeypatch, fake_resp):
     monkeypatch.setattr(appmod, "amadeus_token", lambda: "T")
     offers = [
-        _amadeus_offer(8000, 2),   # 1 stop, cheapest
-        _amadeus_offer(14000, 1),  # nonstop
+        _amadeus_offer(8000, 2, durations=("PT5H", "PT5H")),   # 1 stop, cheapest -> 600
+        _amadeus_offer(14000, 1, durations=("PT2H", "PT2H")),  # nonstop -> 240
     ]
     monkeypatch.setattr(appmod.requests, "get",
                         lambda *a, **k: fake_resp({"data": offers}, status=200))
     res = appmod.amadeus_fare("YYZ", "PVG", "2026-12-12", "2027-01-04", 2, 0)
-    assert res == {"cheapest_cad": 8000, "stops": 1, "nonstop_cad": 14000, "source": "amadeus"}
+    # duration_min = cheapest itinerary (PT5H+PT5H=600); nonstop_duration_min = chosen
+    # NONSTOP offer's own duration (PT2H+PT2H=240), distinct from the cheapest.
+    assert res == {"cheapest_cad": 8000, "stops": 1, "nonstop_cad": 14000,
+                   "source": "amadeus", "duration_min": 600,
+                   "nonstop_duration_min": 240}
 
 
 def test_amadeus_fare_non_200(monkeypatch, fake_resp):
@@ -69,8 +77,10 @@ def test_travelpayouts_none_without_token(monkeypatch):
 def test_travelpayouts_scales_and_builds_book_link(monkeypatch, fake_resp):
     monkeypatch.setattr(appmod, "TRAVELPAYOUTS_TOKEN", "tok")
     data = [
-        {"price": 1000, "transfers": 1, "return_transfers": 0, "link": "/deal/abc"},
-        {"price": 1500, "transfers": 0, "return_transfers": 0, "link": "/ns"},
+        {"price": 1000, "transfers": 1, "return_transfers": 0, "link": "/deal/abc",
+         "duration": 900},
+        {"price": 1500, "transfers": 0, "return_transfers": 0, "link": "/ns",
+         "duration": 600},
     ]
     monkeypatch.setattr(appmod.requests, "get",
                         lambda *a, **k: fake_resp({"data": data}, status=200))
@@ -81,6 +91,9 @@ def test_travelpayouts_scales_and_builds_book_link(monkeypatch, fake_resp):
     assert res["stops"] == 1
     assert res["source"] == "travelpayouts"
     assert res["book"] == "https://www.aviasales.com/deal/abc"
+    # duration_min = cheapest itinerary (900); nonstop_duration_min = chosen nonstop (600)
+    assert res["duration_min"] == 900
+    assert res["nonstop_duration_min"] == 600
 
 
 def test_travelpayouts_non_200(monkeypatch, fake_resp):
@@ -129,24 +142,30 @@ def test_get_fare_no_data(monkeypatch):
     monkeypatch.setattr(appmod, "travelpayouts_fare", lambda *a: None)
     monkeypatch.setattr(appmod, "kiwi_fare", lambda *a: None)
     res = appmod.get_fare("YYZ", "PVG", "d", "r", 1, 0)
-    assert res == {"cheapest_cad": None, "stops": None, "nonstop_cad": None, "source": "no-data"}
+    assert res == {"cheapest_cad": None, "stops": None, "nonstop_cad": None,
+                   "source": "no-data", "duration_min": None,
+                   "nonstop_duration_min": None}
 
 
 # ---------------------------------------------------------------------------
 # kiwi_fare tests
 # ---------------------------------------------------------------------------
 
-def _kiwi_itinerary(price, route_segments):
+def _kiwi_itinerary(price, route_segments, duration=None):
     """Build a minimal Tequila-shaped itinerary dict.
 
     route_segments: list of (return_flag,) tuples, e.g.
       [(0,), (0,), (1,), (1,)] = 2 outbound + 2 return segments (each 1 stop per direction)
+    duration: optional Tequila `duration` value (dict/seconds) for duration_min.
     """
-    return {
+    itin = {
         "price": price,
         "deep_link": f"https://www.kiwi.com/deep?p={price}",
         "route": [{"return": flag} for flag in route_segments],
     }
+    if duration is not None:
+        itin["duration"] = duration
+    return itin
 
 
 def test_kiwi_fare_none_without_key(monkeypatch):
@@ -158,10 +177,10 @@ def test_kiwi_fare_none_without_key(monkeypatch):
 def test_kiwi_fare_happy_path(monkeypatch, fake_resp):
     """Happy path: two itineraries (1-stop cheapest + nonstop pricier) normalize correctly."""
     monkeypatch.setattr(appmod, "KIWI_API_KEY", "k")
-    # 1-stop outbound (2 segs), 1-stop return (2 segs) = max stops = 1
-    itin_cheap = _kiwi_itinerary(7000, [0, 0, 1, 1])
-    # nonstop: 1 outbound + 1 return = max stops = 0
-    itin_nonstop = _kiwi_itinerary(9500, [0, 1])
+    # 1-stop outbound (2 segs), 1-stop return (2 segs) = max stops = 1; 52500s -> 875 min
+    itin_cheap = _kiwi_itinerary(7000, [0, 0, 1, 1], duration={"total": 52500})
+    # nonstop: 1 outbound + 1 return = max stops = 0; 36000s -> 600 min
+    itin_nonstop = _kiwi_itinerary(9500, [0, 1], duration={"total": 36000})
     payload = {"data": [itin_cheap, itin_nonstop]}
     captured_urls = []
 
@@ -178,6 +197,9 @@ def test_kiwi_fare_happy_path(monkeypatch, fake_resp):
     assert res["nonstop_cad"] == 9500
     assert res["source"] == "kiwi"
     assert res["book"] == "https://www.kiwi.com/deep?p=7000"
+    # duration_min = cheapest itinerary (875); nonstop_duration_min = chosen nonstop (600)
+    assert res["duration_min"] == 875
+    assert res["nonstop_duration_min"] == 600
 
 
 def test_kiwi_fare_non_200(monkeypatch, fake_resp):
@@ -217,6 +239,8 @@ def test_kiwi_fare_no_nonstop(monkeypatch, fake_resp):
     assert res["cheapest_cad"] == 6000
     assert res["nonstop_cad"] is None
     assert res["source"] == "kiwi"
+    # no nonstop itinerary → nonstop_duration_min is None
+    assert res["nonstop_duration_min"] is None
 
 
 def test_providers_configured_includes_kiwi_when_set(monkeypatch):
@@ -431,6 +455,217 @@ def test_kiwi_fare_json_decode_error(monkeypatch):
 
     monkeypatch.setattr(appmod.requests, "get", lambda *a, **k: BrokenResp())
     assert appmod.kiwi_fare("YYZ", "PVG", "2026-12-12", "2027-01-04", 2, 0) is None
+
+
+# ---------------------------------------------------------------------------
+# duration_min: ISO parser + per-provider normalization (present / absent)
+# ---------------------------------------------------------------------------
+
+import pytest
+
+
+@pytest.mark.parametrize("iso,expected", [
+    ("PT14H35M", 875),     # combined
+    ("PT14H", 840),        # hours only
+    ("PT35M", 35),         # minutes only
+    ("PT0H0M", 0),         # explicit zero
+    (" PT2H30M ", 150),    # surrounding whitespace tolerated
+])
+def test_parse_iso_duration_valid(iso, expected):
+    assert appmod.parse_iso_duration(iso) == expected
+
+
+@pytest.mark.parametrize("bad", [None, "", "14H35M", "PT", "garbage", 875, "P1D"])
+def test_parse_iso_duration_invalid(bad):
+    assert appmod.parse_iso_duration(bad) is None
+
+
+def test_amadeus_duration_sums_iso_legs(monkeypatch, fake_resp):
+    """amadeus duration_min = sum of each itinerary's ISO duration (PT14H35M -> 875)."""
+    monkeypatch.setattr(appmod, "amadeus_token", lambda: "T")
+    # cheapest offer: outbound PT14H35M (875) + return PT0H0M (0) -> 875
+    offers = [_amadeus_offer(8000, 1, durations=("PT14H35M", "PT0H0M"))]
+    monkeypatch.setattr(appmod.requests, "get",
+                        lambda *a, **k: fake_resp({"data": offers}, status=200))
+    res = appmod.amadeus_fare("YYZ", "PVG", "2026-12-12", "2027-01-04", 2, 0)
+    assert res["duration_min"] == 875
+
+
+def test_amadeus_duration_none_when_absent(monkeypatch, fake_resp):
+    """A missing itinerary duration → duration_min None (no fabrication)."""
+    monkeypatch.setattr(appmod, "amadeus_token", lambda: "T")
+    offer = {
+        "price": {"grandTotal": "8000"},
+        "itineraries": [
+            {"segments": [{}]},  # no 'duration' key
+            {"segments": [{}], "duration": "PT3H"},
+        ],
+    }
+    monkeypatch.setattr(appmod.requests, "get",
+                        lambda *a, **k: fake_resp({"data": [offer]}, status=200))
+    res = appmod.amadeus_fare("YYZ", "PVG", "2026-12-12", "2027-01-04", 2, 0)
+    assert res["duration_min"] is None
+
+
+def test_travelpayouts_duration_field(monkeypatch, fake_resp):
+    """travelpayouts uses `duration` (minutes) of the cheapest item."""
+    monkeypatch.setattr(appmod, "TRAVELPAYOUTS_TOKEN", "tok")
+    data = [{"price": 1000, "transfers": 1, "return_transfers": 0,
+             "link": "/d", "duration": 1230}]
+    monkeypatch.setattr(appmod.requests, "get",
+                        lambda *a, **k: fake_resp({"data": data}, status=200))
+    res = appmod.travelpayouts_fare("YYZ", "PVG", "2026-12-12", "2027-01-04", 2, 0)
+    assert res["duration_min"] == 1230
+
+
+def test_travelpayouts_duration_to_back_sum(monkeypatch, fake_resp):
+    """When `duration` is absent, sum duration_to + duration_back."""
+    monkeypatch.setattr(appmod, "TRAVELPAYOUTS_TOKEN", "tok")
+    data = [{"price": 1000, "transfers": 0, "return_transfers": 0,
+             "duration_to": 600, "duration_back": 630}]
+    monkeypatch.setattr(appmod.requests, "get",
+                        lambda *a, **k: fake_resp({"data": data}, status=200))
+    res = appmod.travelpayouts_fare("YYZ", "PVG", "2026-12-12", "2027-01-04", 2, 0)
+    assert res["duration_min"] == 1230
+
+
+def test_travelpayouts_duration_none_when_absent(monkeypatch, fake_resp):
+    """No duration fields at all → duration_min None."""
+    monkeypatch.setattr(appmod, "TRAVELPAYOUTS_TOKEN", "tok")
+    data = [{"price": 1000, "transfers": 0, "return_transfers": 0}]
+    monkeypatch.setattr(appmod.requests, "get",
+                        lambda *a, **k: fake_resp({"data": data}, status=200))
+    res = appmod.travelpayouts_fare("YYZ", "PVG", "2026-12-12", "2027-01-04", 2, 0)
+    assert res["duration_min"] is None
+
+
+def _kiwi_itin_dur(price, route_segments, duration):
+    it = _kiwi_itinerary(price, route_segments)
+    if duration is not None:
+        it["duration"] = duration
+    return it
+
+
+def test_kiwi_duration_total_seconds_to_minutes(monkeypatch, fake_resp):
+    """kiwi `duration` dict total seconds -> minutes for the cheapest itinerary."""
+    monkeypatch.setattr(appmod, "KIWI_API_KEY", "k")
+    itin = _kiwi_itin_dur(7000, [0, 1],
+                          {"departure": 1000, "return": 2000, "total": 52500})
+    monkeypatch.setattr(appmod.requests, "get",
+                        lambda *a, **k: fake_resp({"data": [itin]}, status=200))
+    res = appmod.kiwi_fare("YYZ", "PVG", "2026-12-12", "2027-01-04", 2, 0)
+    assert res["duration_min"] == 875  # 52500s / 60
+
+
+def test_kiwi_duration_departure_plus_return(monkeypatch, fake_resp):
+    """No `total`: sum departure+return seconds -> minutes."""
+    monkeypatch.setattr(appmod, "KIWI_API_KEY", "k")
+    itin = _kiwi_itin_dur(7000, [0, 1], {"departure": 27000, "return": 25500})
+    monkeypatch.setattr(appmod.requests, "get",
+                        lambda *a, **k: fake_resp({"data": [itin]}, status=200))
+    res = appmod.kiwi_fare("YYZ", "PVG", "2026-12-12", "2027-01-04", 2, 0)
+    assert res["duration_min"] == 875  # (27000+25500)/60
+
+
+def test_kiwi_duration_bare_number(monkeypatch, fake_resp):
+    """A bare numeric `duration` (seconds) -> minutes."""
+    monkeypatch.setattr(appmod, "KIWI_API_KEY", "k")
+    itin = _kiwi_itin_dur(7000, [0, 1], 52500)
+    monkeypatch.setattr(appmod.requests, "get",
+                        lambda *a, **k: fake_resp({"data": [itin]}, status=200))
+    res = appmod.kiwi_fare("YYZ", "PVG", "2026-12-12", "2027-01-04", 2, 0)
+    assert res["duration_min"] == 875
+
+
+def test_kiwi_duration_none_when_absent(monkeypatch, fake_resp):
+    """No `duration` key → duration_min None."""
+    monkeypatch.setattr(appmod, "KIWI_API_KEY", "k")
+    itin = _kiwi_itin_dur(7000, [0, 1], None)
+    monkeypatch.setattr(appmod.requests, "get",
+                        lambda *a, **k: fake_resp({"data": [itin]}, status=200))
+    res = appmod.kiwi_fare("YYZ", "PVG", "2026-12-12", "2027-01-04", 2, 0)
+    assert res["duration_min"] is None
+
+
+def test_kiwi_duration_empty_dict_none(monkeypatch, fake_resp):
+    """A `duration` dict with no usable keys → duration_min None."""
+    monkeypatch.setattr(appmod, "KIWI_API_KEY", "k")
+    itin = _kiwi_itin_dur(7000, [0, 1], {"foo": 1})
+    monkeypatch.setattr(appmod.requests, "get",
+                        lambda *a, **k: fake_resp({"data": [itin]}, status=200))
+    res = appmod.kiwi_fare("YYZ", "PVG", "2026-12-12", "2027-01-04", 2, 0)
+    assert res["duration_min"] is None
+
+
+def test_amadeus_duration_partial_legs_none(monkeypatch, fake_resp):
+    """If one leg's duration is malformed (unparseable), the total is None."""
+    monkeypatch.setattr(appmod, "amadeus_token", lambda: "T")
+    offer = {
+        "price": {"grandTotal": "8000"},
+        "itineraries": [
+            {"segments": [{}], "duration": "PT3H"},
+            {"segments": [{}], "duration": "bogus"},  # unparseable → None
+        ],
+    }
+    monkeypatch.setattr(appmod.requests, "get",
+                        lambda *a, **k: fake_resp({"data": [offer]}, status=200))
+    res = appmod.amadeus_fare("YYZ", "PVG", "2026-12-12", "2027-01-04", 2, 0)
+    assert res["duration_min"] is None
+
+
+def test_travelpayouts_duration_unparseable_none(monkeypatch, fake_resp):
+    """A non-numeric `duration` → duration_min None (ValueError swallowed)."""
+    monkeypatch.setattr(appmod, "TRAVELPAYOUTS_TOKEN", "tok")
+    data = [{"price": 1000, "transfers": 0, "return_transfers": 0, "duration": "abc"}]
+    monkeypatch.setattr(appmod.requests, "get",
+                        lambda *a, **k: fake_resp({"data": data}, status=200))
+    res = appmod.travelpayouts_fare("YYZ", "PVG", "2026-12-12", "2027-01-04", 2, 0)
+    assert res["duration_min"] is None
+
+
+def test_travelpayouts_duration_to_back_unparseable_none(monkeypatch, fake_resp):
+    """Non-numeric duration_to/back → duration_min None."""
+    monkeypatch.setattr(appmod, "TRAVELPAYOUTS_TOKEN", "tok")
+    data = [{"price": 1000, "transfers": 0, "return_transfers": 0,
+             "duration_to": "x", "duration_back": "y"}]
+    monkeypatch.setattr(appmod.requests, "get",
+                        lambda *a, **k: fake_resp({"data": data}, status=200))
+    res = appmod.travelpayouts_fare("YYZ", "PVG", "2026-12-12", "2027-01-04", 2, 0)
+    assert res["duration_min"] is None
+
+
+def test_kiwi_duration_unparseable_dict_none(monkeypatch, fake_resp):
+    """A `duration` dict with non-numeric total → duration_min None (ValueError swallowed)."""
+    monkeypatch.setattr(appmod, "KIWI_API_KEY", "k")
+    itin = _kiwi_itin_dur(7000, [0, 1], {"total": "not-a-number"})
+    monkeypatch.setattr(appmod.requests, "get",
+                        lambda *a, **k: fake_resp({"data": [itin]}, status=200))
+    res = appmod.kiwi_fare("YYZ", "PVG", "2026-12-12", "2027-01-04", 2, 0)
+    assert res["duration_min"] is None
+
+
+def test_serpapi_duration_always_none_outbound_only(monkeypatch, fake_resp):
+    """serpapi duration_min/nonstop_duration_min are always None: the single-call
+    round-trip response is outbound-only, so total_duration would understate the true
+    round-trip flight time (matches the nonstop_cad=None contract). Even when entries
+    carry total_duration, the normalized dict must NOT expose it."""
+    monkeypatch.setattr(appmod, "SERPAPI_KEY", "k")
+    payload = {
+        "best_flights": [
+            {"price": 3100, "layovers": [{"duration": 60}], "total_duration": 1200,
+             "flights": [], "type": "Round trip"},
+        ],
+        "other_flights": [
+            {"price": 2675, "layovers": [{"duration": 90}], "total_duration": 875,
+             "flights": [], "type": "Round trip"},
+        ],
+    }
+    monkeypatch.setattr(appmod.requests, "get",
+                        lambda *a, **k: fake_resp(payload, status=200))
+    res = appmod.serpapi_fare("YYZ", "PVG", "2026-12-12", "2027-01-04", 2, 0)
+    assert res["cheapest_cad"] == 2675
+    assert res["duration_min"] is None          # outbound-only: not exposed as round-trip
+    assert res["nonstop_duration_min"] is None
 
 
 def test_fallback_chain_reaches_kiwi(monkeypatch):

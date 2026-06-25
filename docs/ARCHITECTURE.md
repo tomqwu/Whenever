@@ -67,12 +67,29 @@ def get_fare(origin, dest, dep, ret, adults, children):
 Each provider returns a normalized dict:
 
 ```json
-{ "cheapest_cad": 8298, "stops": 1, "nonstop_cad": 14756,
+{ "cheapest_cad": 8298, "stops": 1, "duration_min": 875, "nonstop_cad": 14756,
   "source": "travelpayouts", "book": "https://..." }
 ```
 
+Each price line is paired with **its own** stops/duration (no mixed itineraries):
+`duration_min` is the cheapest itinerary's round-trip time (pairs with
+`cheapest_cad` + `stops`), `nonstop_duration_min` is the nonstop itinerary's
+(pairs with `nonstop_cad`, 0 stops), and `_build_cell` derives
+`chosen_duration_min` — the duration of the selected fare (`nonstop_duration_min`
+when nonstop is chosen, else `duration_min`) — which pairs with `chosen_cad` and
+feeds the best/summary/recommendation. Durations are parsed from each provider's
+real data — amadeus ISO-8601 `itineraries[].duration` summed across legs,
+travelpayouts `duration`/`duration_to`+`duration_back`, kiwi Tequila `duration`
+seconds. SerpApi durations are always `null`: its single-call round-trip response
+describes only the outbound leg (matching its `nonstop_cad=null` contract), so
+exposing `total_duration` would understate the true round-trip time. Any of these
+fields is `null` whenever its itinerary's duration is unavailable (never
+fabricated, and never borrowed from another itinerary), and the best-value
+recommendation factors `chosen_duration_min` in (price is balanced against total
+flight time).
+
 **Provider priority (first match wins):**
-1. **SerpApi / Google Flights** (`SERPAPI_KEY`) — live Google Flights results; best coverage for long-haul exact-date searches (e.g. Toronto → China Dec 2026). Prices are party totals in CAD (not per-ticket). No direct booking URL; falls back to Kayak link. The single-call round-trip response exposes only the outbound leg, so `nonstop_cad` is not populated for this provider (no false round-trip nonstop), and `stops` reflects the outbound leg only.
+1. **SerpApi / Google Flights** (`SERPAPI_KEY`) — live Google Flights results; best coverage for long-haul exact-date searches (e.g. Toronto → China Dec 2026). Prices are party totals in CAD (not per-ticket). No direct booking URL; falls back to Kayak link. The single-call round-trip response exposes only the outbound leg, so `nonstop_cad` is not populated for this provider (no false round-trip nonstop), `stops` reflects the outbound leg only, and `duration_min` is `null` (total round-trip duration unavailable; a future return-leg fetch could populate it).
 2. **Amadeus Self-Service** (`AMADEUS_CLIENT_ID` + `AMADEUS_CLIENT_SECRET`) — test environment; limited inventory.
 3. **Travelpayouts / Aviasales** (`TRAVELPAYOUTS_TOKEN`) — cached market fares; per-ticket price scaled to party total.
 4. **Kiwi / Tequila** (`KIWI_API_KEY`) — real fares with booking deep-links.
@@ -153,8 +170,9 @@ job storage and no `GET /api/export/<job_id>` route.
 **PDF library:** `fpdf2` (pure-Python; pip-only; no system libraries such as pango or
 cairo are required). The PDF is built programmatically — no HTML template is used.
 
-**CSV columns:** `city, iata, dep_date, ret_date, cheapest_cad, stops, nonstop_cad,
-chosen, chosen_cad, source, book`. One row per `(city, dep_date, ret_date)` matrix cell.
+**CSV columns:** `city, iata, dep_date, ret_date, cheapest_cad, stops, duration_min,
+nonstop_cad, nonstop_duration_min, chosen, chosen_cad, chosen_duration_min, source,
+book`. One row per `(city, dep_date, ret_date)` matrix cell.
 `None`/no-data cells render as empty strings.
 
 **Real-data guardrail:** export routes call `run_search` which calls `get_fare`.

@@ -26,7 +26,11 @@ def _patch_common(monkeypatch):
     monkeypatch.setattr(appmod, "ollama_ok", lambda: True)
     monkeypatch.setattr(appmod, "get_fare", lambda *a, **k: {
         "cheapest_cad": 8000, "stops": 1, "nonstop_cad": 8500,
-        "source": "test", "book": "https://example.com/book",
+        "source": "test", "book": "https://example.com/book", "duration_min": 875,
+        # nonstop chosen (8500 within 25% of 8000): the cheapest line shows
+        # duration_min and the summary/nonstop line uses nonstop_duration_min;
+        # both are 875 here so '14h 35m' renders in cell + card alike.
+        "nonstop_duration_min": 875,
     })
     monkeypatch.setattr(appmod, "build_recommendation",
                         lambda *a, **k: "Best value: test recommendation")

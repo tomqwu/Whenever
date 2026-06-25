@@ -33,8 +33,10 @@ def _make_result():
                         {
                             "dep": "2026-12-12", "ret": "2027-01-04",
                             "cheapest_cad": 8000, "stops": 1,
-                            "nonstop_cad": 8500, "chosen": "cheapest",
-                            "chosen_cad": 8000,
+                            "duration_min": 875,
+                            "nonstop_cad": 8500, "nonstop_duration_min": 600,
+                            "chosen": "cheapest", "chosen_stops": 1,
+                            "chosen_cad": 8000, "chosen_duration_min": 875,
                             "source": "travelpayouts",
                             "book": "https://www.aviasales.com/link1",
                         },
@@ -52,8 +54,10 @@ def _make_result():
                         {
                             "dep": "2026-12-19", "ret": "2027-01-04",
                             "cheapest_cad": 9000, "stops": 0,
-                            "nonstop_cad": 9000, "chosen": "nonstop",
-                            "chosen_cad": 9000,
+                            "duration_min": 700,
+                            "nonstop_cad": 9000, "nonstop_duration_min": 700,
+                            "chosen": "nonstop", "chosen_stops": 0,
+                            "chosen_cad": 9000, "chosen_duration_min": 700,
                             "source": "travelpayouts",
                             "book": "https://www.aviasales.com/link2",
                         },
@@ -70,7 +74,8 @@ def _make_result():
                 "best": {
                     "dep": "2026-12-19", "ret": "2027-01-11",
                     "cheapest_cad": 7500, "chosen_cad": 7500,
-                    "chosen": "cheapest", "stops": 2,
+                    "chosen": "cheapest", "stops": 2, "chosen_stops": 2,
+                    "duration_min": 950, "chosen_duration_min": 950,
                     "source": "travelpayouts",
                 },
             },
@@ -92,7 +97,8 @@ def _make_result():
                 "best": {
                     "dep": "2026-12-12", "ret": "2027-01-04",
                     "cheapest_cad": 7800, "chosen_cad": 7800,
-                    "chosen": "cheapest", "stops": 1,
+                    "chosen": "cheapest", "stops": 1, "chosen_stops": 1,
+                    "duration_min": 820, "chosen_duration_min": 820,
                     "source": "travelpayouts",
                 },
             },
@@ -153,8 +159,10 @@ class TestRenderCsv:
         header = next(reader)
         assert header == [
             "city", "iata", "dep_date", "ret_date",
-            "cheapest_cad", "stops", "nonstop_cad",
-            "chosen", "chosen_cad", "source", "book",
+            "cheapest_cad", "stops", "duration_min",
+            "nonstop_cad", "nonstop_duration_min",
+            "chosen", "chosen_cad", "chosen_stops", "chosen_duration_min",
+            "source", "book",
         ]
 
     def test_data_rows_count(self):
@@ -177,11 +185,15 @@ class TestRenderCsv:
         assert row[3] == "2027-01-04" # ret_date
         assert row[4] == "8000"       # cheapest_cad
         assert row[5] == "1"          # stops
-        assert row[6] == "8500"       # nonstop_cad
-        assert row[7] == "cheapest"   # chosen
-        assert row[8] == "8000"       # chosen_cad
-        assert row[9] == "travelpayouts" # source
-        assert row[10] == "https://www.aviasales.com/link1"  # book
+        assert row[6] == "875"        # duration_min (cheapest itinerary)
+        assert row[7] == "8500"       # nonstop_cad
+        assert row[8] == "600"        # nonstop_duration_min (nonstop itinerary)
+        assert row[9] == "cheapest"   # chosen
+        assert row[10] == "8000"      # chosen_cad
+        assert row[11] == "1"         # chosen_stops (== stops, cheapest chosen)
+        assert row[12] == "875"       # chosen_duration_min (== duration_min here)
+        assert row[13] == "travelpayouts" # source
+        assert row[14] == "https://www.aviasales.com/link1"  # book
 
     def test_no_data_cell_renders_empty_strings_not_crash(self):
         """A cell with cheapest_cad=None must render empty strings, never crash."""
@@ -193,8 +205,12 @@ class TestRenderCsv:
         assert row[0] == "Shanghai"
         assert row[2] == "2026-12-12"
         assert row[3] == "2027-01-11"
-        assert row[4] == ""   # cheapest_cad is None → empty
-        assert row[8] == ""   # chosen_cad is None → empty
+        assert row[4] == ""    # cheapest_cad is None → empty
+        assert row[6] == ""    # duration_min is None → empty
+        assert row[8] == ""    # nonstop_duration_min is None → empty
+        assert row[10] == ""   # chosen_cad is None → empty
+        assert row[11] == ""   # chosen_stops is None → empty
+        assert row[12] == ""   # chosen_duration_min is None → empty
 
     def test_nonstop_chosen_cell(self):
         from export import render_csv
@@ -202,10 +218,13 @@ class TestRenderCsv:
         rows = list(csv.reader(io.StringIO(out)))
         # Third data row: Shanghai, dep 2026-12-19, ret 2027-01-04 (nonstop)
         row = rows[3]
-        assert row[7] == "nonstop"
-        assert row[8] == "9000"
-        assert row[5] == "0"     # stops
-        assert row[6] == "9000"  # nonstop_cad
+        assert row[9] == "nonstop"
+        assert row[10] == "9000"     # chosen_cad
+        assert row[5] == "0"         # stops
+        assert row[7] == "9000"      # nonstop_cad
+        assert row[8] == "700"       # nonstop_duration_min
+        assert row[11] == "0"        # chosen_stops (0 for nonstop)
+        assert row[12] == "700"      # chosen_duration_min (== nonstop here)
 
     def test_empty_results_still_produces_header(self):
         from export import render_csv
@@ -237,6 +256,15 @@ class TestRenderPdf:
         from export import render_pdf
         out = render_pdf(_make_result())
         assert isinstance(out, bytes)
+
+    def test_fmt_dur_helper(self):
+        from export import _fmt_dur
+        assert _fmt_dur(875) == "14h 35m"
+        assert _fmt_dur(0) == "0h 0m"
+        assert _fmt_dur(None) == ""
+        # non-numeric / unparseable → "" (never crashes)
+        assert _fmt_dur("nope") == ""
+        assert _fmt_dur(object()) == ""
 
     def test_starts_with_pdf_magic(self):
         from export import render_pdf
@@ -285,6 +313,52 @@ class TestRenderPdf:
         out = render_pdf(result)
         assert isinstance(out, bytes)
         assert out[:4] == b"%PDF"
+
+    def test_pdf_includes_duration_text(self):
+        """The PDF must render total flight duration (e.g. '14h 35m') somewhere.
+
+        fpdf2 deflates content streams, so decompress them and assert the
+        human-readable duration appears (the Shanghai cell has duration_min=875).
+        """
+        import re
+        import zlib
+        from export import render_pdf
+        out = render_pdf(_make_result())
+        blob = b""
+        for m in re.finditer(rb"stream\r?\n(.*?)\r?\nendstream", out, re.S):
+            try:
+                blob += zlib.decompress(m.group(1))
+            except Exception:
+                pass
+        assert b"14h 35m" in blob
+
+    def test_pdf_best_summary_uses_chosen_stops(self):
+        """The 'Best:' summary must pair the CHOSEN stop count with its duration —
+        a nonstop best renders '(nonstop, ...)' / '(0 stops...)', never the
+        cheapest itinerary's stop count (codex P2: no 'nonstop (1 stop,...)')."""
+        import re
+        import zlib
+        from export import render_pdf
+        result = _make_result()
+        # Make the first city's best a nonstop whose cheapest line had 2 stops.
+        result["results"][0]["best"] = {
+            "dep": "2026-12-19", "ret": "2027-01-04",
+            "cheapest_cad": 9000, "chosen_cad": 9000,
+            "chosen": "nonstop", "stops": 2, "chosen_stops": 0,
+            "duration_min": 875, "chosen_duration_min": 700,
+            "source": "travelpayouts",
+        }
+        out = render_pdf(result)
+        blob = b""
+        for m in re.finditer(rb"stream\r?\n(.*?)\r?\nendstream", out, re.S):
+            try:
+                blob += zlib.decompress(m.group(1))
+            except Exception:
+                pass
+        # PDF escapes '(' as '\\('; the summary pairs the chosen 'nonstop' label
+        # (chosen_stops==0) with the nonstop's 11h 40m duration.
+        assert rb"nonstop \(nonstop, 11h 40m\)" in blob
+        assert b"2 stop" not in blob         # the cheapest fare's count must not leak
 
     def test_non_latin1_city_does_not_crash(self):
         """Non-Latin-1 city names (e.g. 'Łódź', '東京') must not raise.

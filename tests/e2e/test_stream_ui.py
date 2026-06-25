@@ -43,6 +43,36 @@ def test_streaming_search_full_flow(seed_live_server, page):
     assert "$" in price_text, f"Expected a $ price in cell, got: {price_text!r}"
 
 
+def test_streaming_search_renders_duration(seed_live_server, page):
+    """Total flight duration (#53) must render in a grid cell AND the summary card.
+
+    The shared e2e fare stub returns duration_min=875 → '14h 35m'.
+    """
+    page.goto(seed_live_server)
+    page.click("#loadCities")
+    page.wait_for_selector(".chip")
+    page.click("#run")
+
+    # Stream complete
+    page.wait_for_selector("#rec", state="visible", timeout=15000)
+
+    # A grid cell's .stops line shows "1 stop · 14h 35m"
+    page.wait_for_function(
+        "() => [...document.querySelectorAll('td .stops')]"
+        ".some(e => e.textContent.includes('14h 35m'))",
+        timeout=15000,
+    )
+    stops_texts = page.eval_on_selector_all(
+        "td .stops", "els => els.map(e => e.textContent)")
+    assert any("14h 35m" in t and "stop" in t for t in stops_texts), \
+        f"Expected 'stop · 14h 35m' in a cell, got: {stops_texts!r}"
+
+    # The summary card meta also names the duration.
+    card_meta = page.inner_text("#card-meta-0")
+    assert "14h 35m" in card_meta, \
+        f"Expected duration in summary card meta, got: {card_meta!r}"
+
+
 def test_streaming_search_run_button_re_enabled(seed_live_server, page):
     """After stream completes, the run button must be re-enabled."""
     page.goto(seed_live_server)

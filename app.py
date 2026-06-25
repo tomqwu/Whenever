@@ -193,6 +193,27 @@ def resolve_airport(city):
         return ""
 
 # --------------------------- fares --------------------------------
+_ISO_DURATION_RE = re.compile(r"^PT(?:(\d+)H)?(?:(\d+)M)?$")
+
+
+def parse_iso_duration(s):
+    """Parse an ISO-8601 time duration like ``PT14H35M`` to total minutes.
+
+    Handles hours-only (``PT14H``), minutes-only (``PT35M``) and combined
+    (``PT14H35M``) forms. Returns an int of total minutes, or ``None`` if the
+    input is missing, malformed, or has neither hours nor minutes. Never raises.
+    """
+    if not s or not isinstance(s, str):
+        return None
+    m = _ISO_DURATION_RE.match(s.strip())
+    if not m:
+        return None
+    hours, minutes = m.group(1), m.group(2)
+    if hours is None and minutes is None:
+        return None
+    return int(hours or 0) * 60 + int(minutes or 0)
+
+
 _amadeus_token = {"value": None, "exp": 0}
 
 def amadeus_token():
@@ -235,11 +256,26 @@ def amadeus_fare(origin, dest, dep, ret, adults, children):
     cheapest = min(offers, key=lambda o: float(o["price"]["grandTotal"]))
     nonstops = [o for o in offers if stops(o) == 0]
     ns = min(nonstops, key=lambda o: float(o["price"]["grandTotal"])) if nonstops else None
+
+    def duration(o):
+        """Sum each itinerary's ISO-8601 duration (outbound+return) to minutes.
+
+        Returns None if any leg's duration is absent/unparseable (don't fabricate).
+        ``o["itineraries"]`` is a list of dicts here (already validated by stops()),
+        and parse_iso_duration returns None for any missing/malformed value.
+        """
+        legs = [parse_iso_duration(it.get("duration")) for it in o["itineraries"]]
+        if not legs or any(d is None for d in legs):
+            return None
+        return sum(legs)
+
     return {
         "cheapest_cad": round(float(cheapest["price"]["grandTotal"])),
         "stops": stops(cheapest),
         "nonstop_cad": round(float(ns["price"]["grandTotal"])) if ns else None,
         "source": "amadeus",
+        "duration_min": duration(cheapest),
+        "nonstop_duration_min": duration(ns) if ns else None,
     }
 
 def travelpayouts_fare(origin, dest, dep, ret, adults, children):
@@ -270,12 +306,27 @@ def travelpayouts_fare(origin, dest, dep, ret, adults, children):
     ns = min(nonstops, key=lambda o: float(o["price"])) if nonstops else None
     link = cheapest.get("link")
     book = ("https://www.aviasales.com" + link) if link and link.startswith("/") else None
+
+    def duration(o):
+        """Total trip minutes: `duration` if present, else duration_to+duration_back."""
+        try:
+            if o.get("duration") is not None:
+                return int(round(float(o["duration"])))
+            to, back = o.get("duration_to"), o.get("duration_back")
+            if to is not None and back is not None:
+                return int(round(float(to) + float(back)))
+        except (TypeError, ValueError):
+            return None
+        return None
+
     return {
         "cheapest_cad": round(total(cheapest)),
         "stops": int(cheapest.get("transfers", 0)) + int(cheapest.get("return_transfers", 0)),
         "nonstop_cad": round(total(ns)) if ns else None,
         "source": "travelpayouts",
         "book": book,
+        "duration_min": duration(cheapest),
+        "nonstop_duration_min": duration(ns) if ns else None,
     }
 
 def kiwi_fare(origin, dest, dep, ret, adults, children):
@@ -311,8 +362,32 @@ def kiwi_fare(origin, dest, dep, ret, adults, children):
     if not data:
         return None
 
+    def itin_duration(itin):
+        """Total trip minutes from Tequila `duration`.
+
+        `duration` is either a dict {"departure":sec,"return":sec,"total":sec} or
+        a bare number of seconds. Prefer total, else departure+return. Seconds →
+        minutes. Returns None if absent/unparseable (don't fabricate).
+        """
+        dur = itin.get("duration")
+        try:
+            if isinstance(dur, dict):
+                if dur.get("total") is not None:
+                    secs = float(dur["total"])
+                elif dur.get("departure") is not None and dur.get("return") is not None:
+                    secs = float(dur["departure"]) + float(dur["return"])
+                else:
+                    return None
+            elif isinstance(dur, (int, float)):
+                secs = float(dur)
+            else:
+                return None
+        except (TypeError, ValueError):
+            return None
+        return int(round(secs / 60.0))
+
     def parse_itin(itin):
-        """Return (price_int, max_stops, is_nonstop, deep_link) or raise."""
+        """Return (price_int, max_stops, is_nonstop, deep_link, duration_min) or raise."""
         price = int(round(float(itin["price"])))
         route = itin["route"]
         outbound = [seg for seg in route if seg["return"] == 0]
@@ -321,7 +396,7 @@ def kiwi_fare(origin, dest, dep, ret, adults, children):
         in_stops = len(inbound) - 1
         max_stops = max(out_stops, in_stops)
         is_ns = max_stops == 0
-        return price, max_stops, is_ns, itin.get("deep_link")
+        return price, max_stops, is_ns, itin.get("deep_link"), itin_duration(itin)
 
     try:
         parsed = [parse_itin(it) for it in data]
@@ -338,6 +413,8 @@ def kiwi_fare(origin, dest, dep, ret, adults, children):
         "nonstop_cad": ns[0] if ns else None,
         "source": "kiwi",
         "book": cheapest[3],
+        "duration_min": cheapest[4],
+        "nonstop_duration_min": ns[4] if ns else None,
     }
 
 
@@ -389,12 +466,19 @@ def serpapi_fare(origin, dest, dep, ret, adults, children):
     # confirm a true round-trip nonstop without an extra departure_token request;
     # to avoid mislabeling we don't claim nonstop for this provider.
     nonstop_cad = None
+    # SerpApi's single-call round-trip response is outbound-only, so total round-trip
+    # duration is not available (matching its nonstop_cad=None contract); a future
+    # return-leg fetch (departure_token) could populate it.
+    duration_min = None
+    nonstop_duration_min = None
     return {
         "cheapest_cad": cheapest_cad,
         "stops": stops,
         "nonstop_cad": nonstop_cad,
         "source": "serpapi",
         "book": None,
+        "duration_min": duration_min,
+        "nonstop_duration_min": nonstop_duration_min,
     }
 
 
@@ -407,7 +491,9 @@ def _get_fare_uncached(origin, dest, dep, ret, adults, children):
                 return res
         except Exception:
             continue
-    return {"cheapest_cad": None, "stops": None, "nonstop_cad": None, "source": "no-data"}
+    return {"cheapest_cad": None, "stops": None, "nonstop_cad": None,
+            "source": "no-data", "duration_min": None,
+            "nonstop_duration_min": None}
 
 
 def get_fare(origin, dest, dep, ret, adults, children):
@@ -488,9 +574,11 @@ def date_range(start_iso, count):
 def _build_cell(origin, code, dep, ret, adults, child_ages, fare, threshold):
     """Build the cell dict for a single dep×ret combo.
 
-    fare: dict from get_fare() with keys cheapest_cad, stops, nonstop_cad, source, book.
+    fare: dict from get_fare() with keys cheapest_cad, stops, nonstop_cad, source, book,
+    duration_min, nonstop_duration_min.
     threshold: float fraction (e.g. 0.25 for 25 %).
-    Returns dict with keys: dep, ret, cheapest_cad, stops, nonstop_cad, chosen, chosen_cad, source, book.
+    Returns dict with keys: dep, ret, cheapest_cad, stops, nonstop_cad, chosen,
+    chosen_cad, source, duration_min, nonstop_duration_min, chosen_duration_min, book.
     """
     cheap = fare.get("cheapest_cad")
     ns = fare.get("nonstop_cad")
@@ -498,11 +586,28 @@ def _build_cell(origin, code, dep, ret, adults, child_ages, fare, threshold):
     chosen_cad = cheap
     if ns and cheap and ns <= cheap * (1 + threshold):
         chosen, chosen_cad = "nonstop", ns
+    # Keep each price line paired with ITS OWN stops/duration (codex P2):
+    #   - duration_min ALWAYS = cheapest itinerary's duration (pairs with cheapest_cad + stops)
+    #   - nonstop_duration_min = nonstop itinerary's duration (pairs with nonstop_cad, 0 stops)
+    #   - chosen_duration_min = duration of the SELECTED fare (pairs with chosen_cad)
+    # Each carries None (no fabrication) when its itinerary's duration is unavailable.
+    duration_min = fare.get("duration_min")
+    nonstop_duration_min = fare.get("nonstop_duration_min")
+    chosen_duration_min = nonstop_duration_min if chosen == "nonstop" else duration_min
+    stops = fare.get("stops")
+    # chosen_stops pairs with chosen_cad + chosen_duration_min: a nonstop has 0 stops
+    # by definition, otherwise it's the cheapest itinerary's stop count (codex P2:
+    # never pair the nonstop's duration with the connecting fare's stop count).
+    chosen_stops = 0 if chosen == "nonstop" else stops
     return {
         "dep": dep, "ret": ret,
-        "cheapest_cad": cheap, "stops": fare.get("stops"),
+        "cheapest_cad": cheap, "stops": stops,
         "nonstop_cad": ns, "chosen": chosen, "chosen_cad": chosen_cad,
+        "chosen_stops": chosen_stops,
         "source": fare.get("source"),
+        "duration_min": duration_min,
+        "nonstop_duration_min": nonstop_duration_min,
+        "chosen_duration_min": chosen_duration_min,
         "book": fare.get("book") or kayak_link(origin, code, dep, ret, adults, child_ages),
     }
 
@@ -734,7 +839,9 @@ def api_search_stream():
             try:
                 fare = get_fare(origin, code, dep, ret, adults, children)
             except Exception:
-                fare = {"cheapest_cad": None, "stops": None, "nonstop_cad": None, "source": "no-data"}
+                fare = {"cheapest_cad": None, "stops": None, "nonstop_cad": None,
+                        "source": "no-data", "duration_min": None,
+                        "nonstop_duration_min": None}
             cell = _build_cell(origin, code, dep, ret, adults, child_ages, fare, threshold)
             return di, cell
 
@@ -763,6 +870,9 @@ def api_search_stream():
                     "dep": dep, "ret": ret,
                     "cheapest_cad": None, "stops": None, "nonstop_cad": None,
                     "chosen": "cheapest", "chosen_cad": None, "source": "no-data",
+                    "chosen_stops": None,
+                    "duration_min": None, "nonstop_duration_min": None,
+                    "chosen_duration_min": None,
                     "book": kayak_link(origin, code, dep, ret, adults, child_ages),
                 }) for ret in ret_dates]
                 for dep in dep_dates
@@ -1009,13 +1119,23 @@ def api_watch_remove(watch_id):
     return jsonify({"ok": True})
 
 
+def _fmt_duration(minutes):
+    """Render total minutes as a human "Xh Ym" string, or None if minutes is None."""
+    if minutes is None:
+        return None
+    h, m = divmod(int(minutes), 60)
+    return f"{h}h {m}m"
+
+
 def build_recommendation(origin, results, adults, child_ages, families):
     bests = [{"city": r["city"], "iata": r["iata"],
               "price_per_family": r["best"]["chosen_cad"] if r["best"] else None,
               "dep": r["best"]["dep"] if r["best"] else None,
               "ret": r["best"]["ret"] if r["best"] else None,
               "chosen": r["best"]["chosen"] if r["best"] else None,
-              "stops": r["best"]["stops"] if r["best"] else None}
+              "stops": r["best"].get("chosen_stops") if r["best"] else None,
+              "duration_min": r["best"].get("chosen_duration_min") if r["best"] else None,
+              "duration": _fmt_duration(r["best"].get("chosen_duration_min")) if r["best"] else None}
              for r in results]
     summary = (f"From {origin}, {adults} adults + {len(child_ages)} kids, "
                f"{families} family/families. Per-family best options: "
@@ -1023,9 +1143,13 @@ def build_recommendation(origin, results, adults, child_ages, families):
     prompt = (
         "You are a savvy travel planner for someone with FLEXIBLE dates who wants the most "
         "cost-effective vacation. The data below was COLLECTED FROM LIVE FLIGHT APIs (prices are "
-        "CAD per family). Analyze ONLY this data — do not invent prices. Pick the single "
-        "best-value trip and explain in 2-3 short sentences why (balance price, stops/nonstop, "
-        "and dates). Then give a one-line runner-up. Be concise.\n\n" + summary
+        "CAD per family; `duration_min` is total round-trip flight time in minutes, `duration` is "
+        "the same as a human-readable string, and may be null when unknown). Analyze ONLY this "
+        "data — do not invent prices or durations. Pick the single best-value trip and explain in "
+        "2-3 short sentences why, balancing price, stops/nonstop, dates AND total flight duration. "
+        "Do NOT recommend a much-longer flight (e.g. one taking roughly 2x the fastest comparable "
+        "option) merely because it is the cheapest — a modest saving rarely justifies a vastly "
+        "longer trip. Then give a one-line runner-up. Be concise.\n\n" + summary
     )
     try:
         return ollama_chat(prompt)

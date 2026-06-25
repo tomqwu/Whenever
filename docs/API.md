@@ -68,16 +68,32 @@ You may instead pass explicit `dep_dates` / `ret_dates` arrays.
   "results": [
     {
       "city": "Shanghai", "iata": "PVG",
-      "best": { "dep": "2026-12-15", "ret": "2027-01-07", "chosen_cad": 8123, "chosen": "cheapest", "stops": 1 },
+      "best": { "dep": "2026-12-15", "ret": "2027-01-07", "chosen_cad": 8123, "chosen": "cheapest", "stops": 1, "chosen_duration_min": 875 },
       "grid": [
         [ { "dep": "...", "ret": "...", "cheapest_cad": 8298, "stops": 1,
-            "nonstop_cad": 14756, "chosen": "cheapest", "chosen_cad": 8298,
+            "duration_min": 875, "nonstop_cad": 14756, "nonstop_duration_min": 720,
+            "chosen": "cheapest", "chosen_cad": 8298, "chosen_duration_min": 875,
             "source": "travelpayouts", "book": "https://..." } ]
       ]
     }
   ]
 }
 ```
+
+Each price line is paired with **its own** stops/duration (no mixed itineraries):
+
+- `duration_min` is the round-trip flight time of the **cheapest** itinerary — it
+  pairs with `cheapest_cad` + `stops`.
+- `nonstop_duration_min` is the round-trip time of the **nonstop** itinerary — it
+  pairs with `nonstop_cad` (nonstop = 0 stops).
+- `chosen_duration_min` is the duration of the **selected** fare — it pairs with
+  `chosen_cad` (`nonstop_duration_min` when the nonstop is chosen, else
+  `duration_min`). The `best` summary uses `chosen_duration_min`.
+
+Each is `null` when its itinerary's duration is unavailable (never fabricated, and
+never borrowed from another itinerary). For SerpApi these are always `null`: its
+single-call round-trip response is outbound-only (matching `nonstop_cad=null`), so
+round-trip durations cannot be derived.
 
 Cells with no API result have `"cheapest_cad": null, "source": "no-data"`.
 
@@ -104,7 +120,7 @@ Use this endpoint to populate the flight grid live as each cell's fare arrives.
 | type | When | Key fields |
 |------|------|------------|
 | `meta` | First line | `origin`, `adults`, `child_ages`, `families`, `dep_dates`, `ret_dates`, `providers`, `results` (array of `{city,iata}`), `total_cells` |
-| `cell` | One per cell, as completed | `dest_index` (index into `meta.results`), plus all fields from a `/api/search` grid cell: `dep`, `ret`, `cheapest_cad`, `stops`, `nonstop_cad`, `chosen`, `chosen_cad`, `source`, `book` |
+| `cell` | One per cell, as completed | `dest_index` (index into `meta.results`), plus all fields from a `/api/search` grid cell: `dep`, `ret`, `cheapest_cad`, `stops`, `duration_min`, `nonstop_cad`, `nonstop_duration_min`, `chosen`, `chosen_cad`, `chosen_duration_min`, `source`, `book` |
 | `recommendation` | After all cells | `text` (same string as `/api/search`'s `recommendation` field) |
 | `done` | Last line | _(no extra fields)_ |
 
