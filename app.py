@@ -12,7 +12,7 @@ from functools import lru_cache
 import requests
 import yaml
 from dotenv import load_dotenv
-from flask import Flask, request, jsonify, render_template, Response
+from flask import Flask, request, jsonify, render_template, Response, stream_with_context
 import export
 
 load_dotenv()  # load .env if present; real shell env vars take precedence (override=False default)
@@ -472,6 +472,28 @@ def date_range(start_iso, count):
         return []
     return [(d + dt.timedelta(days=i)).isoformat() for i in range(count)]
 
+def _build_cell(origin, code, dep, ret, adults, child_ages, fare, threshold):
+    """Build the cell dict for a single dep×ret combo.
+
+    fare: dict from get_fare() with keys cheapest_cad, stops, nonstop_cad, source, book.
+    threshold: float fraction (e.g. 0.25 for 25 %).
+    Returns dict with keys: dep, ret, cheapest_cad, stops, nonstop_cad, chosen, chosen_cad, source, book.
+    """
+    cheap = fare.get("cheapest_cad")
+    ns = fare.get("nonstop_cad")
+    chosen = "cheapest"
+    chosen_cad = cheap
+    if ns and cheap and ns <= cheap * (1 + threshold):
+        chosen, chosen_cad = "nonstop", ns
+    return {
+        "dep": dep, "ret": ret,
+        "cheapest_cad": cheap, "stops": fare.get("stops"),
+        "nonstop_cad": ns, "chosen": chosen, "chosen_cad": chosen_cad,
+        "source": fare.get("source"),
+        "book": fare.get("book") or kayak_link(origin, code, dep, ret, adults, child_ages),
+    }
+
+
 def run_search(origin, dests, adults, child_ages, dep_dates, ret_dates,
                threshold_pct=25, families=1):
     """Core best-value search shared by the web route and the CLI.
@@ -518,19 +540,7 @@ def run_search(origin, dests, adults, child_ages, dep_dates, ret_dates,
             row = []
             for ri, ret in enumerate(ret_dates):
                 f = fare_results[(di, dpi, ri)]
-                cheap = f.get("cheapest_cad")
-                ns = f.get("nonstop_cad")
-                chosen = "cheapest"
-                chosen_cad = cheap
-                if ns and cheap and ns <= cheap * (1 + threshold):
-                    chosen, chosen_cad = "nonstop", ns
-                row.append({
-                    "dep": dep, "ret": ret,
-                    "cheapest_cad": cheap, "stops": f.get("stops"),
-                    "nonstop_cad": ns, "chosen": chosen, "chosen_cad": chosen_cad,
-                    "source": f.get("source"),
-                    "book": f.get("book") or kayak_link(origin, code, dep, ret, adults, child_ages),
-                })
+                row.append(_build_cell(origin, code, dep, ret, adults, child_ages, f, threshold))
             grid.append(row)
         flat = [c for r in grid for c in r if c["chosen_cad"]]
         best = min(flat, key=lambda c: c["chosen_cad"]) if flat else None
@@ -586,6 +596,123 @@ def api_search():
         return jsonify(_SEARCH_ARGS_400), 400
     result = run_search(**args)
     return jsonify(result)
+
+
+@app.route("/api/search/stream", methods=["POST"])
+def api_search_stream():
+    """POST /api/search/stream — same body as /api/search.
+
+    Returns application/x-ndjson:
+      {"type":"meta", ...}           (first)
+      {"type":"cell", ...}           (one per cell, as completed)
+      {"type":"recommendation", ...} (after all cells)
+      {"type":"done"}                (last)
+
+    If the body is invalid, returns 400 JSON (not streamed).
+    """
+    b = request.get_json(force=True)
+    args = _search_args_from_body(b)
+    if args is None:
+        return jsonify(_SEARCH_ARGS_400), 400
+
+    # Capture all args now — generator must not touch `request` after this point.
+    origin = args["origin"]
+    dests = args["dests"]
+    adults = args["adults"]
+    child_ages = args["child_ages"]
+    dep_dates = args["dep_dates"]
+    ret_dates = args["ret_dates"]
+    threshold_pct = args["threshold_pct"]
+    families = args["families"]
+
+    @stream_with_context
+    def generate():
+        children = len(child_ages)
+        threshold = threshold_pct / 100.0
+
+        # Build the flat task list: (dest_index, code, dep, ret)
+        tasks = []
+        for di, dest in enumerate(dests):
+            code = (dest.get("iata") or "").upper()[:3]
+            for dep in dep_dates:
+                for ret in ret_dates:
+                    tasks.append((di, code, dep, ret))
+
+        total_cells = len(tasks)
+
+        # --- meta line ---
+        meta = {
+            "type": "meta",
+            "origin": origin,
+            "adults": adults,
+            "child_ages": child_ages,
+            "families": families,
+            "dep_dates": dep_dates,
+            "ret_dates": ret_dates,
+            "providers": providers_configured(),
+            "results": [{"city": d.get("city"), "iata": (d.get("iata") or "").upper()[:3]}
+                        for d in dests],
+            "total_cells": total_cells,
+        }
+        yield json.dumps(meta) + "\n"
+
+        # --- cell lines (as completed) ---
+        # Accumulate cells in order for the final recommendation.
+        # cells_by_dest[di] collects bare cell dicts (as returned by _build_cell).
+        cells_by_dest: dict = {di: [] for di in range(len(dests))}
+
+        def _fetch(task):
+            di, code, dep, ret = task
+            try:
+                fare = get_fare(origin, code, dep, ret, adults, children)
+            except Exception:
+                fare = {"cheapest_cad": None, "stops": None, "nonstop_cad": None, "source": "no-data"}
+            cell = _build_cell(origin, code, dep, ret, adults, child_ages, fare, threshold)
+            return di, cell
+
+        workers = max(1, SEARCH_CONCURRENCY)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {pool.submit(_fetch, t): t for t in tasks}
+            for fut in concurrent.futures.as_completed(futures):
+                di, cell = fut.result()
+                cells_by_dest[di].append(cell)
+                line = {"type": "cell", "dest_index": di, **cell}
+                yield json.dumps(line) + "\n"
+
+        # --- recommendation line ---
+        # Reconstruct `results` in dest order (same shape as run_search output)
+        # so the streamed recommendation is DETERMINISTIC and identical to what
+        # /api/search (run_search) would produce. Cells arrive in as_completed
+        # order, so we must re-index them by (dep, ret) and rebuild the grid in
+        # the ORIGINAL dep×ret order; `best` is then min(chosen_cad) over that
+        # ordered flat list, so ties resolve to the SAME cell run_search picks.
+        results = []
+        for di, dest in enumerate(dests):
+            code = (dest.get("iata") or "").upper()[:3]
+            grid_cells = {(c["dep"], c["ret"]): c for c in cells_by_dest[di]}
+            grid = [
+                [grid_cells.get((dep, ret), {
+                    "dep": dep, "ret": ret,
+                    "cheapest_cad": None, "stops": None, "nonstop_cad": None,
+                    "chosen": "cheapest", "chosen_cad": None, "source": "no-data",
+                    "book": kayak_link(origin, code, dep, ret, adults, child_ages),
+                }) for ret in ret_dates]
+                for dep in dep_dates
+            ]
+            flat = [c for row in grid for c in row if c["chosen_cad"]]
+            best = min(flat, key=lambda c: c["chosen_cad"]) if flat else None
+            results.append({
+                "city": dest.get("city"), "iata": code,
+                "grid": grid, "best": best,
+            })
+
+        rec_text = build_recommendation(origin, results, adults, child_ages, families)
+        yield json.dumps({"type": "recommendation", "text": rec_text}) + "\n"
+
+        # --- done line ---
+        yield json.dumps({"type": "done"}) + "\n"
+
+    return Response(generate(), mimetype="application/x-ndjson")
 
 
 @app.route("/api/export/csv", methods=["POST"])

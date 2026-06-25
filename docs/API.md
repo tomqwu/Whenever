@@ -86,3 +86,44 @@ Cells with no API result have `"cheapest_cad": null, "source": "no-data"`.
 | Status | Condition |
 |--------|-----------|
 | 400    | `origin`, `destinations`, or dates are missing/empty/malformed (`{"error": "origin, destinations and dates required"}`) |
+
+---
+
+### `POST /api/search/stream`
+
+Streaming variant of `/api/search`. Accepts an **identical request body** but returns
+results incrementally as `application/x-ndjson` (one JSON object per line, newline-delimited).
+Use this endpoint to populate the flight grid live as each cell's fare arrives.
+
+**Body:** identical to `POST /api/search` (see above).
+
+**Response:** `200 application/x-ndjson` — one compact JSON object per line:
+
+#### Line types (in order)
+
+| type | When | Key fields |
+|------|------|------------|
+| `meta` | First line | `origin`, `adults`, `child_ages`, `families`, `dep_dates`, `ret_dates`, `providers`, `results` (array of `{city,iata}`), `total_cells` |
+| `cell` | One per cell, as completed | `dest_index` (index into `meta.results`), plus all fields from a `/api/search` grid cell: `dep`, `ret`, `cheapest_cad`, `stops`, `nonstop_cad`, `chosen`, `chosen_cad`, `source`, `book` |
+| `recommendation` | After all cells | `text` (same string as `/api/search`'s `recommendation` field) |
+| `done` | Last line | _(no extra fields)_ |
+
+#### Example stream
+
+```ndjson
+{"type":"meta","origin":"YYZ","adults":2,"child_ages":[11,9],"families":3,"dep_dates":["2026-12-12","2026-12-13"],"ret_dates":["2027-01-04","2027-01-05"],"providers":["travelpayouts"],"results":[{"city":"Shanghai","iata":"PVG"}],"total_cells":4}
+{"type":"cell","dest_index":0,"dep":"2026-12-13","ret":"2027-01-05","cheapest_cad":8400,"stops":1,"nonstop_cad":null,"chosen":"cheapest","chosen_cad":8400,"source":"travelpayouts","book":"https://..."}
+{"type":"cell","dest_index":0,"dep":"2026-12-12","ret":"2027-01-04","cheapest_cad":8000,"stops":1,"nonstop_cad":8500,"chosen":"cheapest","chosen_cad":8000,"source":"travelpayouts","book":"https://..."}
+...
+{"type":"recommendation","text":"Best value: Shanghai on 2026-12-12 at CA$8,000/family."}
+{"type":"done"}
+```
+
+Cells arrive in **completion order** (whichever future resolves first), not in dep×ret order.
+The `dest_index` field maps each cell back to the correct city in `meta.results`.
+
+**Errors** — returned as plain JSON (not streamed):
+
+| Status | Condition |
+|--------|-----------|
+| 400 | Same validation as `/api/search`: missing/empty `origin`, `destinations`, or dates |
