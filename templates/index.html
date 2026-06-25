@@ -131,6 +131,20 @@ function fmtDate(iso){
 }
 function money(v){ return v==null?'—':'$'+Math.round(v).toLocaleString('en-CA'); }
 
+// escapeHtml: HTML-escape a value so no untrusted string (from the server,
+// the model, or a URL-derived share hash) can reach the DOM as live markup.
+// Escapes & < > " ' — the five chars that matter inside element text and
+// double/single-quoted attributes. Coerces non-strings to string first.
+function escapeHtml(s) {
+  if (s == null) return '';
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 // mdInline: safely render basic markdown from model output into HTML.
 // 1. HTML-escape first (XSS safety) so no raw tags from model can execute.
 // 2. Convert **bold** to <strong>bold</strong>.
@@ -138,8 +152,8 @@ function money(v){ return v==null?'—':'$'+Math.round(v).toLocaleString('en-CA'
 // 4. Strip any leftover stray **.
 function mdInline(s) {
   if (!s) return '';
-  // Step 1: HTML-escape
-  const esc = s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  // Step 1: HTML-escape (shared helper — see escapeHtml above / #34)
+  const esc = escapeHtml(s);
   // Step 2: **bold** → <strong>bold</strong>
   const bolded = esc.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
   // Step 3: newlines → <br>
@@ -168,10 +182,10 @@ async function health(){
     const s=$('#status');
     const prov = (h.providers||[]);
     let modelPart = h.ollama
-      ? `Local model <b>${h.model}</b> connected (analyzes results)`
-      : `<span class="warn">Ollama not reachable</span> — run <code>ollama serve</code> &amp; pull <b>${h.model}</b>`;
+      ? `Local model <b>${escapeHtml(h.model)}</b> connected (analyzes results)`
+      : `<span class="warn">Ollama not reachable</span> — run <code>ollama serve</code> &amp; pull <b>${escapeHtml(h.model)}</b>`;
     let farePart = prov.length
-      ? `flight data: <b>${prov.join(', ')}</b>`
+      ? `flight data: <b>${escapeHtml(prov.join(', '))}</b>`
       : `<span class="warn">no flight API configured</span> — set TRAVELPAYOUTS_TOKEN or Amadeus keys to fetch real prices`;
     s.innerHTML = modelPart + ' · ' + farePart;
   }catch(e){ $('#status').innerHTML='<span class="warn">Backend not reachable.</span>'; }
@@ -210,13 +224,14 @@ $('#depCity').addEventListener('change', async ()=>{
 });
 
 function _cellHtml(c, thr) {
-  if (c.cheapest_cad == null) return '<td class="err" data-k="' + c.dep + '|' + c.ret + '">n/a</td>';
+  const key = escapeHtml(c.dep + '|' + c.ret);
+  if (c.cheapest_cad == null) return '<td class="err" data-k="' + key + '">n/a</td>';
   const pickNS = c.nonstop_cad && c.cheapest_cad && c.nonstop_cad <= c.cheapest_cad * thr;
   const cls = pickNS ? 'pick-ns' : '';
-  let inner = '<a class="price" href="' + c.book + '" target="_blank" rel="noopener">' + money(c.cheapest_cad) + '</a>' +
+  let inner = '<a class="price" href="' + escapeHtml(c.book) + '" target="_blank" rel="noopener">' + money(c.cheapest_cad) + '</a>' +
     '<div class="stops">' + (c.stops != null ? c.stops + ' stop' + (c.stops === 1 ? '' : 's') : '') + '</div>';
   if (c.nonstop_cad) inner += '<div class="ns">ns ' + money(c.nonstop_cad) + '</div>';
-  return '<td class="' + cls + '" data-k="' + c.dep + '|' + c.ret + '">' + inner + '</td>';
+  return '<td class="' + cls + '" data-k="' + key + '">' + inner + '</td>';
 }
 
 $('#run').onclick = async () => {
@@ -291,7 +306,7 @@ $('#run').onclick = async () => {
           const card = document.createElement('div');
           card.className = 'card';
           card.id = 'card-' + di;
-          card.innerHTML = '<div class="city">' + r.city + ' <small>(' + r.iata + ')</small></div>' +
+          card.innerHTML = '<div class="city">' + escapeHtml(r.city) + ' <small>(' + escapeHtml(r.iata) + ')</small></div>' +
             '<div class="price" id="card-price-' + di + '">…</div>' +
             '<div class="meta" id="card-meta-' + di + '">searching…</div>' +
             '<div class="meta">group ×' + fams + ': <span id="card-group-' + di + '">…</span></div>';
@@ -301,14 +316,14 @@ $('#run').onclick = async () => {
           const blk = document.createElement('div');
           blk.className = 'cityblock';
           blk.id = 'blk-' + di;
-          let html = '<h2>' + r.city + ' <small>(' + r.iata + ')</small></h2>' +
+          let html = '<h2>' + escapeHtml(r.city) + ' <small>(' + escapeHtml(r.iata) + ')</small></h2>' +
             '<table id="tbl-' + di + '"><thead><tr><th>dep \\ ret</th>' +
-            evt.ret_dates.map(d => '<th>' + fmtDate(d) + '</th>').join('') +
+            evt.ret_dates.map(d => '<th>' + escapeHtml(fmtDate(d)) + '</th>').join('') +
             '</tr></thead><tbody>';
           evt.dep_dates.forEach(dep => {
-            html += '<tr><td class="rowh">' + fmtDate(dep) + '</td>';
+            html += '<tr><td class="rowh">' + escapeHtml(fmtDate(dep)) + '</td>';
             evt.ret_dates.forEach(ret => {
-              html += '<td class="loading" data-k="' + dep + '|' + ret + '">…</td>';
+              html += '<td class="loading" data-k="' + escapeHtml(dep + '|' + ret) + '">…</td>';
             });
             html += '</tr>';
           });
@@ -422,7 +437,7 @@ $('#run').onclick = async () => {
         const prov = (metaInfo.providers || []);
         const pax = (metaInfo.adults || 0) + (metaInfo.child_ages || []).length;
         $('#foot').innerHTML = (prov.length
-            ? 'Live flight data via <b>' + prov.join(', ') + '</b>. The model analyzes these real fares — it does not generate prices. '
+            ? 'Live flight data via <b>' + escapeHtml(prov.join(', ')) + '</b>. The model analyzes these real fares — it does not generate prices. '
             : '<span class="estimate-flag">no flight API</span> Set TRAVELPAYOUTS_TOKEN (or Amadeus keys) so the app can fetch real prices. ') +
           (sawNoData ? '<span class="warn">Some cells returned no fares from the API. </span>' : '') +
           'Per family of ' + pax + '. Prices CAD · click any price to open the booking.';
@@ -467,9 +482,9 @@ function render(data){
   data.results.forEach(r=>{
     const b=r.best;
     const card=document.createElement('div'); card.className='card';
-    card.innerHTML = `<div class="city">${r.city} <small>(${r.iata})</small></div>`+
+    card.innerHTML = `<div class="city">${escapeHtml(r.city)} <small>(${escapeHtml(r.iata)})</small></div>`+
       `<div class="price">${b?money(b.chosen_cad):'—'}</div>`+
-      `<div class="meta">${b?fmtDate(b.dep)+' → '+fmtDate(b.ret)+' · '+(b.chosen==='nonstop'?'nonstop':b.stops+' stop(s)'):'no fares'}</div>`+
+      `<div class="meta">${b?escapeHtml(fmtDate(b.dep))+' → '+escapeHtml(fmtDate(b.ret))+' · '+(b.chosen==='nonstop'?'nonstop':b.stops+' stop(s)'):'no fares'}</div>`+
       `<div class="meta">group ×${fams}: ${b?money(b.chosen_cad*fams):'—'}</div>`;
     sum.appendChild(card);
   });
@@ -478,10 +493,10 @@ function render(data){
   const rets = data.ret_dates;
   data.results.forEach(r=>{
     const blk=document.createElement('div'); blk.className='cityblock';
-    let html=`<h2>${r.city} <small>(${r.iata})</small></h2><table><thead><tr><th>dep \\ ret</th>`+
-      rets.map(d=>`<th>${fmtDate(d)}</th>`).join('')+'</tr></thead><tbody>';
+    let html=`<h2>${escapeHtml(r.city)} <small>(${escapeHtml(r.iata)})</small></h2><table><thead><tr><th>dep \\ ret</th>`+
+      rets.map(d=>`<th>${escapeHtml(fmtDate(d))}</th>`).join('')+'</tr></thead><tbody>';
     r.grid.forEach(row=>{
-      html+=`<tr><td class="rowh">${fmtDate(row[0].dep)}</td>`;
+      html+=`<tr><td class="rowh">${escapeHtml(fmtDate(row[0].dep))}</td>`;
       row.forEach(c=>{ html += _cellHtml(c, thr); });
       html+='</tr>';
     });
@@ -492,7 +507,7 @@ function render(data){
   const prov = (data.providers||[]);
   const noData = data.results.some(r=>r.grid.some(row=>row.some(c=>c.source==='no-data')));
   $('#foot').innerHTML = (prov.length
-      ? 'Live flight data via <b>'+prov.join(', ')+'</b>. The model analyzes these real fares — it does not generate prices. '
+      ? 'Live flight data via <b>'+escapeHtml(prov.join(', '))+'</b>. The model analyzes these real fares — it does not generate prices. '
       : '<span class="estimate-flag">no flight API</span> Set TRAVELPAYOUTS_TOKEN (or Amadeus keys) so the app can fetch real prices. ')+
     (noData?'<span class="warn">Some cells returned no fares from the API. </span>':'')+
     'Per family of '+(data.adults+data.child_ages.length)+'. Prices CAD · click any price to open the booking.';
@@ -551,6 +566,33 @@ $('#copyLink').onclick = () => {
   });
 };
 
+// Schema helpers for restoreFromHash: defense-in-depth coercion of a
+// URL-controlled share payload. Each returns a sanitized value or undefined
+// when the input is malformed; callers skip undefined fields.
+function _vStr(v, max) {
+  if (v == null) return undefined;
+  const s = String(v);
+  return s.length > max ? s.slice(0, max) : s;
+}
+function _vNum(v, lo, hi) {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return undefined;
+  return Math.min(hi, Math.max(lo, n));
+}
+function _vDate(v) {
+  // Strict ISO YYYY-MM-DD; reject anything else (including impossible months/days).
+  if (typeof v !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(v)) return undefined;
+  const d = new Date(v + 'T00:00:00');
+  if (isNaN(d.getTime())) return undefined;
+  // Round-trip to reject things like 2026-13-40 that Date may roll over.
+  const iso = d.toISOString().slice(0, 10);
+  return iso === v ? v : undefined;
+}
+function _vIata(v) {
+  if (typeof v !== 'string' || !/^[A-Za-z]{3}$/.test(v)) return undefined;
+  return v.toUpperCase();
+}
+
 function restoreFromHash() {
   const hash = location.hash;
   if (!hash.startsWith('#s=')) return;
@@ -558,21 +600,41 @@ function restoreFromHash() {
   try {
     obj = JSON.parse(decodeURIComponent(hash.slice(3)));
   } catch (_) { return; }
-  if ($('#depCity') && obj.depCity != null) $('#depCity').value = obj.depCity;
-  if ($('#depCode') && obj.depCode != null) $('#depCode').value = obj.depCode;
-  if ($('#country') && obj.country != null) $('#country').value = obj.country;
-  if ($('#adults') && obj.adults != null) $('#adults').value = obj.adults;
-  if ($('#families') && obj.families != null) $('#families').value = obj.families;
-  if ($('#depStart') && obj.dep_start != null) $('#depStart').value = obj.dep_start;
-  if ($('#depSpan') && obj.dep_span != null) $('#depSpan').value = obj.dep_span;
-  if ($('#retStart') && obj.ret_start != null) $('#retStart').value = obj.ret_start;
-  if ($('#retSpan') && obj.ret_span != null) $('#retSpan').value = obj.ret_span;
-  if ($('#thresh') && obj.nonstop_threshold != null) $('#thresh').value = obj.nonstop_threshold;
-  renderKids(obj.child_ages || []);
-  if (Array.isArray(obj.cities) && obj.cities.length > 0) {
-    CITIES = obj.cities.map(c => ({ city: c.city, iata: c.iata, on: true }));
-    drawChips();
-    $('#run').click();
+  if (!obj || typeof obj !== 'object') return;
+
+  const set = (id, val) => { if ($(id) && val !== undefined) $(id).value = val; };
+  set('#depCity', _vStr(obj.depCity, 80));
+  set('#depCode', _vIata(obj.depCode));
+  set('#country', _vStr(obj.country, 80));
+  set('#adults', _vNum(obj.adults, 1, 20));
+  set('#families', _vNum(obj.families, 1, 50));
+  set('#depStart', _vDate(obj.dep_start));
+  set('#depSpan', _vNum(obj.dep_span, 1, 14));
+  set('#retStart', _vDate(obj.ret_start));
+  set('#retSpan', _vNum(obj.ret_span, 1, 14));
+  set('#thresh', _vNum(obj.nonstop_threshold, 0, 500));
+
+  // child_ages: array of integers 0–17; drop non-numeric entries.
+  const ages = Array.isArray(obj.child_ages)
+    ? obj.child_ages.map(a => _vNum(a, 0, 17)).filter(a => a !== undefined)
+    : [];
+  renderKids(ages);
+
+  // cities: keep only entries with a valid 3-letter IATA; city coerced + capped.
+  if (Array.isArray(obj.cities)) {
+    const cities = obj.cities
+      .map(c => {
+        if (!c || typeof c !== 'object') return null;
+        const iata = _vIata(c.iata);
+        if (iata === undefined) return null;
+        return { city: _vStr(c.city, 80) || iata, iata: iata, on: true };
+      })
+      .filter(Boolean);
+    if (cities.length > 0) {
+      CITIES = cities;
+      drawChips();
+      $('#run').click();
+    }
   }
 }
 

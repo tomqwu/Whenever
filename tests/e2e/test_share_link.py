@@ -9,6 +9,10 @@ def test_share_hash_written_after_search(live_server, page):
     # Run search
     page.click("#run")
     page.wait_for_selector("#summary .card")
+    # The URL hash + Copy-link state are written on the later `done` event, not
+    # on `meta` (which fires the first card). Wait for the done-driven state
+    # (Copy-link enabled) before asserting the hash, or we race replaceState.
+    page.wait_for_selector("#copyLink:not([disabled])")
     # URL hash must contain share param
     assert "#s=" in page.url
     # Copy link button must be enabled
@@ -50,3 +54,62 @@ def test_malformed_hash_loads_default_form(live_server, page):
     page.click("#loadCities")
     page.wait_for_selector(".chip")
     assert page.query_selector(".chip") is not None
+
+
+def test_oversized_hash_falls_back_gracefully(live_server, page):
+    import json, urllib.parse
+    # Oversized / malformed payload: junk types everywhere, huge city name,
+    # bad IATA. Must drop the bad cities and keep the page usable.
+    share = {
+        "depCity": "X" * 100000,
+        "depCode": "not-a-code",
+        "country": {"nope": True},
+        "cities": [
+            {"city": "Bad", "iata": "TOOLONG"},
+            {"city": "Bad2", "iata": 123},
+            "not-an-object",
+        ],
+        "adults": "lots",
+        "dep_start": "2026-13-99",
+    }
+    hash_val = "#s=" + urllib.parse.quote(json.dumps(share))
+    page.goto(live_server + "/" + hash_val)
+    page.wait_for_timeout(500)
+    # Invalid depCode dropped → default YYZ retained.
+    assert page.input_value("#depCode") == "YYZ"
+    # All cities had invalid IATA → none restored → no auto-run / no crash.
+    # Page still works: load real chips.
+    page.click("#loadCities")
+    page.wait_for_selector(".chip")
+    assert page.query_selector(".chip") is not None
+
+
+def test_share_hash_city_xss_is_neutralized(live_server, page):
+    """A crafted share link with an <img onerror> city must NOT execute."""
+    import json, urllib.parse
+    payload = "<img src=x onerror=window.__xss=1>"
+    share = {
+        "depCity": "Toronto", "depCode": "YYZ", "country": "China",
+        # Valid IATA so the city is restored + auto-run renders it into the grid.
+        "cities": [{"city": payload, "iata": "PEK"}],
+        "adults": 2, "child_ages": [11, 9], "families": 1,
+        "dep_start": "2026-12-12", "dep_span": 2,
+        "ret_start": "2027-01-04", "ret_span": 2,
+        "nonstop_threshold": 25,
+    }
+    hash_val = "#s=" + urllib.parse.quote(json.dumps(share))
+    page.goto(live_server + "/" + hash_val)
+    # Auto-run renders the malicious city into summary card + <h2> heading.
+    page.wait_for_selector("#summary .card")
+    page.wait_for_timeout(500)
+    # 1. No script executed: the onerror handler never fired.
+    assert not page.evaluate("window.__xss")
+    # 2. No live <img> element was injected from the payload.
+    assert page.query_selector('img[src="x"]') is None
+    assert page.query_selector("#summary img") is None
+    assert page.query_selector("#grids img") is None
+    # 3. The value renders as inert text — the literal string is present in the
+    #    rendered card/heading text content.
+    summary_text = page.inner_text("#summary")
+    grids_text = page.inner_text("#grids")
+    assert payload in summary_text or payload in grids_text
