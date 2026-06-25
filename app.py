@@ -302,9 +302,15 @@ def rate_limited(bucket: str, limit_fn):
                 ts_list = [t for t in ts_list if now - t < window]
 
                 if len(ts_list) >= limit:
-                    # Compute seconds until the oldest timestamp ages out
-                    oldest = ts_list[0]
-                    retry_after = max(1, int(oldest + window - now) + 1)
+                    # Compute seconds until the oldest timestamp ages out.
+                    # With a limit <= 0 the endpoint is effectively disabled and
+                    # ts_list is empty on the first request, so guard the access:
+                    # fall back to the full window rather than indexing [0].
+                    if ts_list:
+                        oldest = ts_list[0]
+                        retry_after = max(1, int(oldest + window - now) + 1)
+                    else:
+                        retry_after = max(1, int(window))
                     resp = jsonify({"error": "rate limit exceeded, slow down"})
                     resp.status_code = 429
                     resp.headers["Retry-After"] = str(retry_after)

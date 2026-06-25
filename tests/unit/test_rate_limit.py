@@ -583,3 +583,37 @@ def test_retry_after_reflects_window(client, monkeypatch):
     retry_after = int(r.headers["Retry-After"])
     # Oldest timestamp is at t=1000; window ends at 1000+60=1060; now=1030 → ~30s remaining
     assert 25 <= retry_after <= 35, f"Unexpected Retry-After: {retry_after}"
+
+
+# ---------------------------------------------------------------------------
+# Zero / negative limit: empty-bucket guard (codex P2)
+# ---------------------------------------------------------------------------
+
+def test_search_bucket_zero_limit_returns_429_not_500(client, monkeypatch):
+    """A limit of 0 effectively disables the endpoint: the FIRST request hits
+    the 429 branch with an empty bucket. It must return a controlled 429 with
+    Retry-After=window, not an IndexError -> 500."""
+    monkeypatch.setattr(appmod, "RATE_LIMIT_ENABLED", True)
+    monkeypatch.setattr(appmod, "SEARCH_RATE_PER_MIN", 0)
+    monkeypatch.setattr(appmod, "RATE_LIMIT_WINDOW", 60)
+    monkeypatch.setattr(appmod, "run_search", lambda **kw: {"cells": [], "recommendation": None})
+    appmod._rate_state.clear()
+
+    r = client.post("/api/search", json=_SEARCH_BODY,
+                    headers={"X-Forwarded-For": "60.0.0.1"})
+    assert r.status_code == 429
+    assert int(r.headers["Retry-After"]) == 60
+
+
+def test_api_bucket_zero_limit_returns_429_not_500(client, monkeypatch):
+    """Same empty-bucket guard for the api bucket at limit 0."""
+    monkeypatch.setattr(appmod, "RATE_LIMIT_ENABLED", True)
+    monkeypatch.setattr(appmod, "API_RATE_PER_MIN", 0)
+    monkeypatch.setattr(appmod, "RATE_LIMIT_WINDOW", 60)
+    monkeypatch.setattr(appmod, "top_cities", lambda c, n: [{"city": "Paris", "iata": "CDG", "optional": False}])
+    appmod._rate_state.clear()
+
+    r = client.post("/api/top-cities", json={"country": "France", "n": 3},
+                    headers={"X-Forwarded-For": "61.0.0.1"})
+    assert r.status_code == 429
+    assert int(r.headers["Retry-After"]) == 60
