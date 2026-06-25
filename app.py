@@ -680,13 +680,15 @@ def api_search_stream():
                 yield json.dumps(line) + "\n"
 
         # --- recommendation line ---
-        # Reconstruct `results` in dest order (same shape as run_search output).
+        # Reconstruct `results` in dest order (same shape as run_search output)
+        # so the streamed recommendation is DETERMINISTIC and identical to what
+        # /api/search (run_search) would produce. Cells arrive in as_completed
+        # order, so we must re-index them by (dep, ret) and rebuild the grid in
+        # the ORIGINAL dep×ret order; `best` is then min(chosen_cad) over that
+        # ordered flat list, so ties resolve to the SAME cell run_search picks.
         results = []
         for di, dest in enumerate(dests):
             code = (dest.get("iata") or "").upper()[:3]
-            flat = [c for c in cells_by_dest[di] if c["chosen_cad"]]
-            best = min(flat, key=lambda c: c["chosen_cad"]) if flat else None
-            # Rebuild grid in dep/ret order for consistency.
             grid_cells = {(c["dep"], c["ret"]): c for c in cells_by_dest[di]}
             grid = [
                 [grid_cells.get((dep, ret), {
@@ -697,6 +699,8 @@ def api_search_stream():
                 }) for ret in ret_dates]
                 for dep in dep_dates
             ]
+            flat = [c for row in grid for c in row if c["chosen_cad"]]
+            best = min(flat, key=lambda c: c["chosen_cad"]) if flat else None
             results.append({
                 "city": dest.get("city"), "iata": code,
                 "grid": grid, "best": best,

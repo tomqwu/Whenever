@@ -79,3 +79,41 @@ def test_streaming_search_progress_bar(seed_live_server, page):
     page.wait_for_timeout(800)
     width = page.eval_on_selector("#prog", "el => el.style.width")
     assert width in ("0%", ""), f"Expected progress bar reset to 0%, got {width!r}"
+
+
+def test_streaming_no_fare_card_finalized(nofare_live_server, page):
+    """A city with no fares for every cell must finalize to '— / no fares / —'
+    (never left on the '…' placeholder) once the stream completes."""
+    page.goto(nofare_live_server)
+    page.click("#loadCities")
+    page.wait_for_selector(".chip")
+    page.click("#run")
+
+    # Wait for stream completion (recommendation visible).
+    page.wait_for_selector("#rec", state="visible", timeout=15000)
+
+    # Beijing (PEK) is the 2nd destination -> card index 1, all cells no-data.
+    # Its card must show '—' price and 'no fares' meta (not the '…' skeleton).
+    page.wait_for_function(
+        "() => { const el = document.getElementById('card-price-1'); "
+        "return el && el.textContent === '\\u2014'; }",
+        timeout=15000,
+    )
+    assert page.inner_text("#card-price-1") == "—"
+    assert page.inner_text("#card-meta-1") == "no fares"
+    assert page.inner_text("#card-group-1") == "—"
+
+    # No grid cell anywhere may still show the '…' loading placeholder.
+    loading_left = page.eval_on_selector_all(
+        "#grids td.loading", "els => els.length")
+    assert loading_left == 0, f"{loading_left} cells still loading after done"
+
+    # The no-fare city's cells must render the n/a (err) style.
+    pek_na = page.eval_on_selector_all(
+        "#blk-1 td.err", "els => els.length")
+    assert pek_na > 0, "Expected Beijing cells to render as n/a"
+
+    # Footer provenance must be restored (no flight API configured in tests).
+    foot = page.inner_text("#foot")
+    assert "Per family of" in foot, f"Footer not restored: {foot!r}"
+    assert "no fares" in foot, f"Footer missing no-fares warning: {foot!r}"

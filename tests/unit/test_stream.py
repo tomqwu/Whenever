@@ -251,3 +251,90 @@ def test_stream_tolerates_get_fare_exception(client, monkeypatch):
     # Recommendation must still have been emitted with the monkeypatched text
     rec = next(l for l in lines if l["type"] == "recommendation")
     assert rec["text"] == "fallback rec"
+
+
+# ---------------------------------------------------------------------------
+# Determinism: streamed recommendation picks the SAME best cell as run_search
+# when prices are TIED across different dep/ret positions.
+# ---------------------------------------------------------------------------
+
+# A fare table with TIED cheapest_cad (700) in TWO distinct dep/ret positions.
+# For PVG the tie is at (dep0, ret1) and (dep1, ret0); for run_search the
+# original-order min() resolves to the FIRST in dep×ret order: (dep0, ret1).
+_TIE_PRICES = {
+    ("PVG", "2026-12-12", "2027-01-04"): 900,
+    ("PVG", "2026-12-12", "2027-01-05"): 700,   # tie A (earlier in order)
+    ("PVG", "2026-12-13", "2027-01-04"): 700,   # tie B (later in order)
+    ("PVG", "2026-12-13", "2027-01-05"): 950,
+    ("PEK", "2026-12-12", "2027-01-04"): 1200,
+    ("PEK", "2026-12-12", "2027-01-05"): 1200,
+    ("PEK", "2026-12-13", "2027-01-04"): 1200,
+    ("PEK", "2026-12-13", "2027-01-05"): 1200,
+}
+
+
+def _tie_fare(origin, dest, dep, ret, adults, children):
+    return {
+        "cheapest_cad": _TIE_PRICES[(dest, dep, ret)],
+        "stops": 1, "nonstop_cad": None, "source": "test", "book": None,
+    }
+
+
+def _capture_best(monkeypatch):
+    """Patch build_recommendation to record the per-city `best` cells it sees;
+    return the recorder list (filled when build_recommendation is invoked)."""
+    captured = []
+
+    def recorder(origin, results, adults, child_ages, families):
+        captured.append([
+            None if r["best"] is None
+            else {"city": r["city"], "dep": r["best"]["dep"], "ret": r["best"]["ret"],
+                  "chosen_cad": r["best"]["chosen_cad"]}
+            for r in results
+        ])
+        return "rec"
+
+    monkeypatch.setattr(appmod, "build_recommendation", recorder)
+    return captured
+
+
+def test_streamed_best_matches_run_search_on_ties(client, monkeypatch):
+    """For tied prices in different dep/ret positions, the streamed best (used
+    for the recommendation) must resolve to the SAME cell run_search picks.
+
+    Because cells arrive in as_completed (nondeterministic) order, the stream
+    must rebuild the grid in ORIGINAL dep×ret order before computing
+    min(chosen_cad), so the tie resolves identically to /api/search.
+    """
+    monkeypatch.setattr(appmod, "get_fare", _tie_fare)
+
+    # 1) Capture what run_search picks.
+    rs_captured = _capture_best(monkeypatch)
+    appmod.run_search(
+        origin="YYZ",
+        dests=[{"city": "Shanghai", "iata": "PVG"}, {"city": "Beijing", "iata": "PEK"}],
+        adults=2, child_ages=[],
+        dep_dates=["2026-12-12", "2026-12-13"],
+        ret_dates=["2027-01-04", "2027-01-05"],
+    )
+    run_search_best = rs_captured[-1]
+
+    # 2) Capture what the streaming endpoint picks.
+    stream_captured = _capture_best(monkeypatch)
+    resp, _ = _stream_lines(client, {
+        "origin": "YYZ",
+        "destinations": [{"city": "Shanghai", "iata": "PVG"},
+                         {"city": "Beijing", "iata": "PEK"}],
+        "dep_dates": ["2026-12-12", "2026-12-13"],
+        "ret_dates": ["2027-01-04", "2027-01-05"],
+    })
+    assert resp.status_code == 200
+    stream_best = stream_captured[-1]
+
+    # The streamed best must be IDENTICAL to run_search's best, city-by-city.
+    assert stream_best == run_search_best
+    # And the PVG tie must resolve to the FIRST cell in dep×ret order.
+    pvg_best = next(b for b in stream_best if b and b["city"] == "Shanghai")
+    assert pvg_best["chosen_cad"] == 700
+    assert pvg_best["dep"] == "2026-12-12"
+    assert pvg_best["ret"] == "2027-01-05"

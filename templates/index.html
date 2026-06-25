@@ -222,6 +222,8 @@ $('#run').onclick = async () => {
 
   let cellsDone = 0, total = 0;
   const bestByCityIdx = {};  // dest_index -> best cell so far
+  let metaInfo = null;        // captured meta line (providers, pax, etc.)
+  let sawNoData = false;      // true if any cell returned no fares
 
   try {
     const response = await fetch('/api/search/stream', {
@@ -250,6 +252,7 @@ $('#run').onclick = async () => {
 
       if (evt.type === 'meta') {
         total = evt.total_cells;
+        metaInfo = evt;
         // Build skeleton: summary cards + grid tables
         const sum = $('#summary');
         sum.innerHTML = '';
@@ -289,6 +292,7 @@ $('#run').onclick = async () => {
 
       } else if (evt.type === 'cell') {
         const di = evt.dest_index;
+        if (evt.cheapest_cad == null) sawNoData = true;
         const key = evt.dep + '|' + evt.ret;
         const tbl = document.getElementById('tbl-' + di);
         if (tbl) {
@@ -328,8 +332,39 @@ $('#run').onclick = async () => {
         });
 
       } else if (evt.type === 'done') {
+        finalizeStream();
         $('#prog').style.width = '100%';
         setTimeout(() => { $('#prog').style.width = '0%'; }, 600);
+      }
+    }
+
+    function finalizeStream() {
+      // Finalize every city card that never got a "best" cell: match the old
+      // render() behavior for no-fare cities (— / no fares / —).
+      (metaInfo ? metaInfo.results : []).forEach((r, di) => {
+        if (bestByCityIdx[di]) return;
+        const priceEl = document.getElementById('card-price-' + di);
+        const metaEl = document.getElementById('card-meta-' + di);
+        const groupEl = document.getElementById('card-group-' + di);
+        if (priceEl) priceEl.textContent = '—';
+        if (metaEl) metaEl.textContent = 'no fares';
+        if (groupEl) groupEl.textContent = '—';
+      });
+      // Finalize any grid cell still on the "…" placeholder to the n/a style
+      // the old render() used for null cells.
+      document.querySelectorAll('#grids td.loading').forEach(td => {
+        td.className = 'err';
+        td.textContent = 'n/a';
+      });
+      // Restore footer provenance (replicates the old render() #foot logic).
+      if (metaInfo) {
+        const prov = (metaInfo.providers || []);
+        const pax = (metaInfo.adults || 0) + (metaInfo.child_ages || []).length;
+        $('#foot').innerHTML = (prov.length
+            ? 'Live flight data via <b>' + prov.join(', ') + '</b>. The model analyzes these real fares — it does not generate prices. '
+            : '<span class="estimate-flag">no flight API</span> Set TRAVELPAYOUTS_TOKEN (or Amadeus keys) so the app can fetch real prices. ') +
+          (sawNoData ? '<span class="warn">Some cells returned no fares from the API. </span>' : '') +
+          'Per family of ' + pax + '. Prices CAD · click any price to open the booking.';
       }
     }
 
