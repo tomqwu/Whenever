@@ -228,6 +228,8 @@ async function health(){
 let SUGGESTIONS = [];   // current suggestion list from /api/suggest
 let SUGG_ACTIVE = -1;   // index of keyboard-highlighted suggestion (-1 = none)
 let SUGG_TIMER = null;  // debounce timer handle
+let SUGGEST_SEQ = 0;    // monotonic request token — a response is applied only if
+                        // it carries the latest token (stale responses are dropped)
 
 // expandCountry: run the seed-first /api/top-cities expansion and REPLACE CITIES
 // with that country's set (required chips on, optional off) — same as before.
@@ -263,6 +265,10 @@ const sList = $('#suggestList');
 const sInput = $('#country');
 
 function closeSuggest(){
+  // Bump the request token so any /api/suggest response still in flight when we
+  // close (Escape, clear, blur, outside-click, or a pick) is treated as stale and
+  // dropped — a slow OLD response can no longer reopen this dropdown.
+  SUGGEST_SEQ++;
   SUGGESTIONS = []; SUGG_ACTIVE = -1;
   sList.style.display='none'; sList.innerHTML='';
   sInput.setAttribute('aria-expanded','false');
@@ -309,14 +315,24 @@ function pickSuggestion(i){
 }
 
 async function fetchSuggest(q){
+  // Capture this request's token. We only apply the response if it is STILL the
+  // latest request, the query still matches the live input, and the field still
+  // has focus — otherwise the user has typed on, cleared, Escaped, or tabbed away
+  // and this (possibly slow) response is stale: drop it silently.
+  const seq = ++SUGGEST_SEQ;
+  const stale = () => seq !== SUGGEST_SEQ
+    || q !== sInput.value.trim()
+    || document.activeElement !== sInput;
   try{
     const r = await fetch('/api/suggest?q='+encodeURIComponent(q));
+    if(stale()) return;               // ignore late response for an abandoned query
     if(!r.ok){ closeSuggest(); return; }
     const data = await r.json();
+    if(stale()) return;               // re-check after the JSON body resolves too
     SUGGESTIONS = data.suggestions || [];
     SUGG_ACTIVE = -1;
     renderSuggest();
-  }catch(e){ closeSuggest(); }
+  }catch(e){ if(!stale()) closeSuggest(); }
 }
 
 sInput.addEventListener('input', ()=>{

@@ -113,6 +113,75 @@ def test_escape_closes_dropdown(seed_live_server, page):
     assert not page.is_visible("#suggestList")
 
 
+# --------------------------- stale-response race (codex review) ---------------------------
+
+def test_slow_old_query_does_not_open_after_clear(seed_live_server, page):
+    """An ACTUAL slow /api/suggest response for an OLD query, resolving AFTER the
+    user cleared the field, must not open the dropdown nor show the old results.
+
+    The slowness is entirely browser-side (a delayed Response inside the page),
+    so the Playwright sync dispatcher never blocks on a later event. We invoke the
+    app's real fetchSuggest('chi') against a stubbed slow fetch, clear the input
+    mid-flight, then await the response and assert nothing rendered.
+    """
+    page.goto(seed_live_server)
+    result = page.evaluate(
+        """async () => {
+            const realFetch = window.fetch;
+            // Stub fetch so the 'chi' suggest response is delayed ~150ms.
+            window.fetch = (u) => new Promise(res => setTimeout(() => res({
+                ok: true,
+                json: () => Promise.resolve(
+                    {suggestions:[{type:'country',name:'China'}]}),
+            }), 150));
+            sInput.focus();
+            sInput.value = 'chi';
+            const p = fetchSuggest('chi');     // request in flight (token captured)
+            // User clears the field before the slow response lands.
+            sInput.value = '';
+            closeSuggest();                    // clear handler bumps the token
+            await p;                           // let the stale response resolve
+            window.fetch = realFetch;
+            return getComputedStyle(sList).display;
+        }"""
+    )
+    assert result == "none", "slow old-query response reopened the dropdown"
+
+
+def test_seq_guard_drops_stale_response(seed_live_server, page):
+    """Unit-level check of the guard via page.evaluate: a response carrying an
+    OLD request token (or for a query no longer in the input) is dropped — it
+    must not touch SUGGESTIONS nor open the dropdown. Deterministic, no timing."""
+    page.goto(seed_live_server)
+    result = page.evaluate(
+        """() => {
+            // Simulate: a fetch for 'chi' was issued (seq captured), then the
+            // user cleared the field which called closeSuggest() (bumps SEQ).
+            const seq = ++SUGGEST_SEQ;          // the in-flight request's token
+            sInput.value = '';                  // user cleared the field
+            closeSuggest();                     // clear handler -> bumps token
+            // Now the late response arrives and re-evaluates the guard:
+            const q = 'chi';
+            const stale = seq !== SUGGEST_SEQ
+                || q !== sInput.value.trim()
+                || document.activeElement !== sInput;
+            return { stale, visible: getComputedStyle(sList).display !== 'none' };
+        }"""
+    )
+    assert result["stale"] is True, "guard failed to flag the stale response"
+    assert result["visible"] is False, "dropdown must stay closed for a stale response"
+
+
+def test_fresh_response_still_renders(seed_live_server, page):
+    """Sanity: the guard does NOT over-reject — a current, focused, matching
+    query still opens the dropdown (keyboard nav/selection unaffected)."""
+    page.goto(seed_live_server)
+    page.fill("#country", "")
+    page.type("#country", "chi")
+    page.wait_for_selector("#suggestList li")
+    assert page.is_visible("#suggestList")
+
+
 def test_suggestion_value_is_escaped(seed_live_server, page, monkeypatch):
     """An XSS-y suggestion value is rendered as text, never as live markup.
 
