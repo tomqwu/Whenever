@@ -25,6 +25,12 @@ CHINA_SEED = {
             {"city": "Haikou",   "iata": "HAK", "priority": 7, "optional": True},
             {"city": "Sanya",    "iata": "SYX", "priority": 7, "optional": True},
             {"city": "Shenyang", "iata": "SHE", "priority": 8, "optional": True},
+            {"city": "Hong Kong","iata": "HKG", "priority": 9, "optional": True,
+             "notes": "Nearby hub (Hong Kong SAR); separate entry/visa from mainland"},
+            {"city": "Taipei",   "iata": "TPE", "priority": 10, "optional": True,
+             "notes": "Taiwan; nearby alternative, separate entry"},
+            {"city": "Tokyo",    "iata": "HND", "alt_iata": ["NRT"], "priority": 11, "optional": True,
+             "notes": "Japan; nearby hub, separate country"},
         ],
     }
 }
@@ -55,7 +61,7 @@ def test_seed_hit_skips_llm(monkeypatch):
 
 
 def test_seed_hit_returns_6_required_plus_all_optional(monkeypatch):
-    """top_cities('China', 6) -> 6 required (priority 1–6) + 3 optional."""
+    """top_cities('China', 6) -> 6 required (priority 1–6) + 6 optional."""
     monkeypatch.setattr(appmod, "_SEED_CONFIG", CHINA_SEED)
     appmod.top_cities.cache_clear()
 
@@ -65,8 +71,8 @@ def test_seed_hit_returns_6_required_plus_all_optional(monkeypatch):
     optional = [c for c in result if c["optional"]]
 
     assert len(required) == 6, f"Expected 6 required cities, got {len(required)}"
-    assert len(optional) == 3, f"Expected 3 optional cities, got {len(optional)}"
-    assert len(result) == 9
+    assert len(optional) == 6, f"Expected 6 optional cities, got {len(optional)}"
+    assert len(result) == 12
 
 
 def test_seed_hit_required_cities_correct_order(monkeypatch):
@@ -93,7 +99,7 @@ def test_seed_hit_optional_cities_flagged_correctly(monkeypatch):
         assert isinstance(city["optional"], bool), f"'optional' must be bool in {city}"
 
     optional_iatas = {c["iata"] for c in result if c["optional"]}
-    assert optional_iatas == {"HAK", "SYX", "SHE"}
+    assert optional_iatas == {"HAK", "SYX", "SHE", "HKG", "TPE", "HND"}
 
 
 def test_seed_hit_required_cities_flagged_not_optional(monkeypatch):
@@ -113,7 +119,7 @@ def test_seed_hit_required_cities_flagged_not_optional(monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_n_caps_required_only_n3(monkeypatch):
-    """top_cities('China', 3) -> 3 required + all 3 optional (n caps required only)."""
+    """top_cities('China', 3) -> 3 required + all 6 optional (n caps required only)."""
     monkeypatch.setattr(appmod, "_SEED_CONFIG", CHINA_SEED)
     appmod.top_cities.cache_clear()
 
@@ -123,14 +129,14 @@ def test_n_caps_required_only_n3(monkeypatch):
     optional = [c for c in result if c["optional"]]
 
     assert len(required) == 3, f"Expected 3 required cities, got {len(required)}"
-    assert len(optional) == 3, f"Expected all 3 optional cities, got {len(optional)}"
+    assert len(optional) == 6, f"Expected all 6 optional cities, got {len(optional)}"
 
     iatas = [c["iata"] for c in required]
     assert iatas == ["PEK", "PVG", "CAN"]
 
 
 def test_n_caps_required_only_n1(monkeypatch):
-    """n=1 -> only 1 required city + all 3 optional."""
+    """n=1 -> only 1 required city + all 6 optional."""
     monkeypatch.setattr(appmod, "_SEED_CONFIG", CHINA_SEED)
     appmod.top_cities.cache_clear()
 
@@ -140,7 +146,7 @@ def test_n_caps_required_only_n1(monkeypatch):
     optional = [c for c in result if c["optional"]]
 
     assert len(required) == 1
-    assert len(optional) == 3
+    assert len(optional) == 6
     assert required[0]["iata"] == "PEK"
 
 
@@ -246,13 +252,13 @@ def test_api_top_cities_passthrough_optional_and_priority(monkeypatch):
     assert r.status_code == 200
     cities = r.get_json()["cities"]
 
-    # Route must return all 9 entries (6 required + 3 optional)
-    assert len(cities) == 9
+    # Route must return all 12 entries (6 required + 6 optional)
+    assert len(cities) == 12
 
     optional_cities = [c for c in cities if c.get("optional") is True]
     required_cities = [c for c in cities if c.get("optional") is False]
 
-    assert len(optional_cities) == 3, f"Expected 3 optional in response, got {len(optional_cities)}"
+    assert len(optional_cities) == 6, f"Expected 6 optional in response, got {len(optional_cities)}"
     assert len(required_cities) == 6, f"Expected 6 required in response, got {len(required_cities)}"
 
     # Every entry must have 'priority'
@@ -275,6 +281,9 @@ def test_api_top_cities_optional_iata_present(monkeypatch):
     assert "HAK" in iatas, "Haikou (HAK) must be returned as an optional city"
     assert "SYX" in iatas
     assert "SHE" in iatas
+    assert "HKG" in iatas, "Hong Kong (HKG) must be returned as an optional city"
+    assert "TPE" in iatas, "Taipei (TPE) must be returned as an optional city"
+    assert "HND" in iatas, "Tokyo (HND) must be returned as an optional city"
 
 
 # ---------------------------------------------------------------------------
@@ -306,3 +315,59 @@ def test_load_seed_config_non_dict_yaml(tmp_path):
         with patch("yaml.safe_load", return_value=["item1", "item2"]):
             result = appmod._load_seed_config()
     assert result == {}
+
+
+# ---------------------------------------------------------------------------
+# #46 — Hong Kong / Taipei / Tokyo as nearby optional candidates
+# ---------------------------------------------------------------------------
+
+def test_nearby_hubs_present_and_optional(monkeypatch):
+    """HKG, TPE, HND must appear in top_cities('China', 6), all optional=True."""
+    monkeypatch.setattr(appmod, "_SEED_CONFIG", CHINA_SEED)
+    appmod.top_cities.cache_clear()
+
+    result = appmod.top_cities("China", 6)
+    iata_map = {c["iata"]: c for c in result}
+
+    assert "HKG" in iata_map, "Hong Kong (HKG) must be present"
+    assert "TPE" in iata_map, "Taipei (TPE) must be present"
+    assert "HND" in iata_map, "Tokyo (HND) must be present"
+
+    assert iata_map["HKG"]["optional"] is True, "HKG must be optional=True"
+    assert iata_map["TPE"]["optional"] is True, "TPE must be optional=True"
+    assert iata_map["HND"]["optional"] is True, "HND must be optional=True"
+
+
+def test_nearby_hubs_not_counted_against_n(monkeypatch):
+    """HKG/TPE/HND must appear regardless of n; n=3 still returns them all."""
+    monkeypatch.setattr(appmod, "_SEED_CONFIG", CHINA_SEED)
+    appmod.top_cities.cache_clear()
+
+    result = appmod.top_cities("China", 3)
+    iatas = {c["iata"] for c in result}
+
+    assert "HKG" in iatas, "HKG must appear even when n=3"
+    assert "TPE" in iatas, "TPE must appear even when n=3"
+    assert "HND" in iatas, "HND must appear even when n=3"
+
+    # Required set still capped at 3
+    required = [c for c in result if not c["optional"]]
+    assert len(required) == 3
+
+
+def test_nearby_hubs_not_pre_selected_required_set_unchanged(monkeypatch):
+    """Required set (priority 1–6) unaffected; HKG/TPE/HND are NOT in required."""
+    monkeypatch.setattr(appmod, "_SEED_CONFIG", CHINA_SEED)
+    appmod.top_cities.cache_clear()
+
+    result = appmod.top_cities("China", 6)
+    required = [c for c in result if not c["optional"]]
+    required_iatas = [c["iata"] for c in required]
+
+    # Required must be exactly the original 6 mainland cities, in priority order
+    assert required_iatas == ["PEK", "PVG", "CAN", "SZX", "TFU", "XMN"]
+
+    # Nearby hubs must NOT appear in the required set
+    assert "HKG" not in required_iatas
+    assert "TPE" not in required_iatas
+    assert "HND" not in required_iatas

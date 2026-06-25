@@ -27,6 +27,12 @@ CHINA_SEED = {
             {"city": "Haikou",   "iata": "HAK", "priority": 7, "optional": True},
             {"city": "Sanya",    "iata": "SYX", "priority": 7, "optional": True},
             {"city": "Shenyang", "iata": "SHE", "priority": 8, "optional": True},
+            {"city": "Hong Kong","iata": "HKG", "priority": 9, "optional": True,
+             "notes": "Nearby hub (Hong Kong SAR); separate entry/visa from mainland"},
+            {"city": "Taipei",   "iata": "TPE", "priority": 10, "optional": True,
+             "notes": "Taiwan; nearby alternative, separate entry"},
+            {"city": "Tokyo",    "iata": "HND", "alt_iata": ["NRT"], "priority": 11, "optional": True,
+             "notes": "Japan; nearby hub, separate country"},
         ],
     }
 }
@@ -104,11 +110,11 @@ def test_top_cities_api_optional_and_priority_in_response(seed_live_server):
         assert "optional" in city, f"'optional' missing in {city}"
         assert "priority" in city, f"'priority' missing in {city}"
 
-    # Exactly 6 required + 3 optional
+    # Exactly 6 required + 6 optional
     required = [c for c in cities if not c["optional"]]
     optional = [c for c in cities if c["optional"]]
     assert len(required) == 6
-    assert len(optional) == 3
+    assert len(optional) == 6
 
 
 # ---------------------------------------------------------------------------
@@ -136,3 +142,45 @@ def test_optional_cities_chip_not_prechecked_required_is(seed_live_server, page)
     # Haikou chip must still exist (just unchecked)
     haikou_chip = page.query_selector(".chip:has-text('Haikou')")
     assert haikou_chip is not None, "Haikou chip must be rendered (even though unchecked)"
+
+    # Hong Kong (nearby hub) must also be rendered UNCHECKED (#46)
+    hkg_on = page.query_selector(".chip.on:has-text('Hong Kong')")
+    assert hkg_on is None, "Hong Kong (nearby optional) chip must NOT have class 'on'"
+
+    hkg_chip = page.query_selector(".chip:has-text('Hong Kong')")
+    assert hkg_chip is not None, "Hong Kong chip must be rendered (unchecked)"
+
+
+# ---------------------------------------------------------------------------
+# #46 — API-level: HKG, TPE, HND present as optional in China response
+# ---------------------------------------------------------------------------
+
+def test_nearby_hubs_in_api_response(seed_live_server):
+    """HKG, TPE, HND must appear as optional=true in /api/top-cities China response."""
+    resp = req.post(
+        f"{seed_live_server}/api/top-cities",
+        json={"country": "China", "n": 6},
+    )
+    assert resp.status_code == 200
+    cities = resp.json()["cities"]
+    iata_map = {c["iata"]: c for c in cities}
+
+    for iata, label in [("HKG", "Hong Kong"), ("TPE", "Taipei"), ("HND", "Tokyo")]:
+        assert iata in iata_map, f"{label} ({iata}) must be in /api/top-cities response"
+        assert iata_map[iata]["optional"] is True, f"{label} ({iata}) must be optional=true"
+
+
+def test_nearby_hubs_not_in_required_set(seed_live_server):
+    """HKG/TPE/HND must NOT be in the required (optional=false) set."""
+    resp = req.post(
+        f"{seed_live_server}/api/top-cities",
+        json={"country": "China", "n": 6},
+    )
+    assert resp.status_code == 200
+    cities = resp.json()["cities"]
+    required_iatas = {c["iata"] for c in cities if not c["optional"]}
+
+    assert "HKG" not in required_iatas, "HKG must not be a required city"
+    assert "TPE" not in required_iatas, "TPE must not be a required city"
+    assert "HND" not in required_iatas, "HND must not be a required city"
+    assert len(required_iatas) == 6, f"Required set must still be 6, got {len(required_iatas)}"
