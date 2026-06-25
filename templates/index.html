@@ -127,6 +127,23 @@ function fmtDate(iso){
 }
 function money(v){ return v==null?'—':'$'+Math.round(v).toLocaleString('en-CA'); }
 
+// mdInline: safely render basic markdown from model output into HTML.
+// 1. HTML-escape first (XSS safety) so no raw tags from model can execute.
+// 2. Convert **bold** to <strong>bold</strong>.
+// 3. Convert newlines to <br>.
+// 4. Strip any leftover stray **.
+function mdInline(s) {
+  if (!s) return '';
+  // Step 1: HTML-escape
+  const esc = s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  // Step 2: **bold** → <strong>bold</strong>
+  const bolded = esc.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+  // Step 3: newlines → <br>
+  const lined = bolded.replace(/\n/g, '<br>');
+  // Step 4: strip leftover stray **
+  return lined.replace(/\*\*/g, '');
+}
+
 // passengers: kid age inputs
 function renderKids(ages){
   const box = $('#kids'); box.innerHTML='';
@@ -330,7 +347,7 @@ $('#run').onclick = async () => {
       } else if (evt.type === 'recommendation') {
         const rec = $('#rec');
         rec.style.display = 'block';
-        rec.innerHTML = '<h3>Best-value pick</h3>' + (evt.text || '');
+        rec.innerHTML = '<h3>Best-value pick</h3>' + mdInline(evt.text || '');
         // Apply best-cell highlights to the deterministic best cell (matches
         // backend tie-break). Clear any prior .best for this city first so the
         // outline lands on the chosen cell, not an earlier-arriving tie.
@@ -413,7 +430,7 @@ function render(data){
   const fams = data.families||1;
   // recommendation
   const rec=$('#rec'); rec.style.display='block';
-  rec.innerHTML='<h3>Best-value pick</h3>'+ (data.recommendation||'');
+  rec.innerHTML='<h3>Best-value pick</h3>'+mdInline(data.recommendation||'');
   // summary cards
   const sum=$('#summary'); sum.innerHTML='';
   data.results.forEach(r=>{

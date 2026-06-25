@@ -61,6 +61,46 @@ def seed_live_server(monkeypatch):
 
 
 @pytest.fixture
+def markdown_live_server(monkeypatch):
+    """Server where build_recommendation returns markdown (bold + newlines).
+    Used to assert the UI renders <strong> elements and no literal ** remain."""
+    _patch_common(monkeypatch)
+    monkeypatch.setattr(
+        appmod, "build_recommendation",
+        lambda *a, **k: "**Best value:** Shanghai (PVG) – CAD 4,443\nGreat choice for families.",
+    )
+    monkeypatch.setattr(appmod, "top_cities",
+                        lambda country, n=6: [{"city": "Shanghai", "iata": "PVG"}])
+
+    srv, thread = _start_server()
+    try:
+        yield f"http://127.0.0.1:{srv.server_port}"
+    finally:
+        srv.shutdown()
+        thread.join()
+
+
+@pytest.fixture
+def xss_live_server(monkeypatch):
+    """Server where build_recommendation returns HTML/script injection attempt.
+    Used to assert the UI escapes model output and no injected elements appear."""
+    _patch_common(monkeypatch)
+    monkeypatch.setattr(
+        appmod, "build_recommendation",
+        lambda *a, **k: "<script>alert(1)</script> <b>injected</b> Best value: Shanghai",
+    )
+    monkeypatch.setattr(appmod, "top_cities",
+                        lambda country, n=6: [{"city": "Shanghai", "iata": "PVG"}])
+
+    srv, thread = _start_server()
+    try:
+        yield f"http://127.0.0.1:{srv.server_port}"
+    finally:
+        srv.shutdown()
+        thread.join()
+
+
+@pytest.fixture
 def nofare_live_server(monkeypatch):
     """Server where ONE city (Beijing/PEK) returns no fares for every cell;
     all other cities get a normal price. Used to assert the UI finalizes a
