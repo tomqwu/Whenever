@@ -23,8 +23,12 @@ def test_no_provider_banner_shows_configure_key(live_server, page):
     # The banner appears on load (health() reports no providers in the test env).
     page.wait_for_selector("#noProviderBanner", state="visible", timeout=10000)
     banner = page.inner_text("#noProviderBanner")
-    assert "TRAVELPAYOUTS_TOKEN" in banner, f"Banner should name an env key, got: {banner!r}"
-    assert "Amadeus" in banner, f"Banner should mention Amadeus keys, got: {banner!r}"
+    assert "TRAVELPAYOUTS_TOKEN" in banner or "RAPIDAPI_KEY" in banner, \
+        f"Banner should name a real env key, got: {banner!r}"
+    assert "AMADEUS_CLIENT_ID" in banner, \
+        f"Banner should use AMADEUS_CLIENT_ID (not AMADEUS_ID), got: {banner!r}"
+    assert "AMADEUS_CLIENT_SECRET" in banner, \
+        f"Banner should use AMADEUS_CLIENT_SECRET (not AMADEUS_SECRET), got: {banner!r}"
     # Friendly, not a raw error dump.
     assert "no flight" in banner.lower() or "no provider" in banner.lower(), \
         f"Banner should explain no provider is set, got: {banner!r}"

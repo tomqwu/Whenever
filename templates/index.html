@@ -303,8 +303,9 @@ async function health(){
           '<span class="bicon">✈️</span>' +
           '<span><b>No flight provider is configured yet.</b> ' +
           'The app can still show the date matrix, but it can\'t fetch real fares until you add a provider key. ' +
-          'Set <code>TRAVELPAYOUTS_TOKEN</code> (free) — or the <b>Amadeus</b> keys ' +
-          '(<code>AMADEUS_ID</code> / <code>AMADEUS_SECRET</code>) — then restart the app.</span>';
+          'Set <code>RAPIDAPI_KEY</code> or <code>TRAVELPAYOUTS_TOKEN</code> in <code>.env</code> ' +
+          '— or Amadeus: <code>AMADEUS_CLIENT_ID</code> + <code>AMADEUS_CLIENT_SECRET</code>. ' +
+          'See <code>.env.example</code> for all options.</span>';
       }
     }
   }catch(e){ $('#status').innerHTML='<span class="warn">Backend not reachable.</span>'; }
