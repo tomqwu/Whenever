@@ -34,8 +34,9 @@ def _make_result():
                             "dep": "2026-12-12", "ret": "2027-01-04",
                             "cheapest_cad": 8000, "stops": 1,
                             "duration_min": 875,
-                            "nonstop_cad": 8500, "chosen": "cheapest",
-                            "chosen_cad": 8000,
+                            "nonstop_cad": 8500, "nonstop_duration_min": 600,
+                            "chosen": "cheapest",
+                            "chosen_cad": 8000, "chosen_duration_min": 875,
                             "source": "travelpayouts",
                             "book": "https://www.aviasales.com/link1",
                         },
@@ -53,8 +54,10 @@ def _make_result():
                         {
                             "dep": "2026-12-19", "ret": "2027-01-04",
                             "cheapest_cad": 9000, "stops": 0,
-                            "nonstop_cad": 9000, "chosen": "nonstop",
-                            "chosen_cad": 9000,
+                            "duration_min": 700,
+                            "nonstop_cad": 9000, "nonstop_duration_min": 700,
+                            "chosen": "nonstop",
+                            "chosen_cad": 9000, "chosen_duration_min": 700,
                             "source": "travelpayouts",
                             "book": "https://www.aviasales.com/link2",
                         },
@@ -72,6 +75,7 @@ def _make_result():
                     "dep": "2026-12-19", "ret": "2027-01-11",
                     "cheapest_cad": 7500, "chosen_cad": 7500,
                     "chosen": "cheapest", "stops": 2,
+                    "duration_min": 950, "chosen_duration_min": 950,
                     "source": "travelpayouts",
                 },
             },
@@ -94,6 +98,7 @@ def _make_result():
                     "dep": "2026-12-12", "ret": "2027-01-04",
                     "cheapest_cad": 7800, "chosen_cad": 7800,
                     "chosen": "cheapest", "stops": 1,
+                    "duration_min": 820, "chosen_duration_min": 820,
                     "source": "travelpayouts",
                 },
             },
@@ -154,8 +159,9 @@ class TestRenderCsv:
         header = next(reader)
         assert header == [
             "city", "iata", "dep_date", "ret_date",
-            "cheapest_cad", "stops", "duration_min", "nonstop_cad",
-            "chosen", "chosen_cad", "source", "book",
+            "cheapest_cad", "stops", "duration_min",
+            "nonstop_cad", "nonstop_duration_min",
+            "chosen", "chosen_cad", "chosen_duration_min", "source", "book",
         ]
 
     def test_data_rows_count(self):
@@ -178,12 +184,14 @@ class TestRenderCsv:
         assert row[3] == "2027-01-04" # ret_date
         assert row[4] == "8000"       # cheapest_cad
         assert row[5] == "1"          # stops
-        assert row[6] == "875"        # duration_min
+        assert row[6] == "875"        # duration_min (cheapest itinerary)
         assert row[7] == "8500"       # nonstop_cad
-        assert row[8] == "cheapest"   # chosen
-        assert row[9] == "8000"       # chosen_cad
-        assert row[10] == "travelpayouts" # source
-        assert row[11] == "https://www.aviasales.com/link1"  # book
+        assert row[8] == "600"        # nonstop_duration_min (nonstop itinerary)
+        assert row[9] == "cheapest"   # chosen
+        assert row[10] == "8000"      # chosen_cad
+        assert row[11] == "875"       # chosen_duration_min (== duration_min here)
+        assert row[12] == "travelpayouts" # source
+        assert row[13] == "https://www.aviasales.com/link1"  # book
 
     def test_no_data_cell_renders_empty_strings_not_crash(self):
         """A cell with cheapest_cad=None must render empty strings, never crash."""
@@ -195,9 +203,11 @@ class TestRenderCsv:
         assert row[0] == "Shanghai"
         assert row[2] == "2026-12-12"
         assert row[3] == "2027-01-11"
-        assert row[4] == ""   # cheapest_cad is None → empty
-        assert row[6] == ""   # duration_min is None → empty
-        assert row[9] == ""   # chosen_cad is None → empty
+        assert row[4] == ""    # cheapest_cad is None → empty
+        assert row[6] == ""    # duration_min is None → empty
+        assert row[8] == ""    # nonstop_duration_min is None → empty
+        assert row[10] == ""   # chosen_cad is None → empty
+        assert row[11] == ""   # chosen_duration_min is None → empty
 
     def test_nonstop_chosen_cell(self):
         from export import render_csv
@@ -205,10 +215,12 @@ class TestRenderCsv:
         rows = list(csv.reader(io.StringIO(out)))
         # Third data row: Shanghai, dep 2026-12-19, ret 2027-01-04 (nonstop)
         row = rows[3]
-        assert row[8] == "nonstop"
-        assert row[9] == "9000"
-        assert row[5] == "0"     # stops
-        assert row[7] == "9000"  # nonstop_cad
+        assert row[9] == "nonstop"
+        assert row[10] == "9000"     # chosen_cad
+        assert row[5] == "0"         # stops
+        assert row[7] == "9000"      # nonstop_cad
+        assert row[8] == "700"       # nonstop_duration_min
+        assert row[11] == "700"      # chosen_duration_min (== nonstop here)
 
     def test_empty_results_still_produces_header(self):
         from export import render_csv

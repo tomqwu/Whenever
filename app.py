@@ -492,7 +492,8 @@ def _get_fare_uncached(origin, dest, dep, ret, adults, children):
         except Exception:
             continue
     return {"cheapest_cad": None, "stops": None, "nonstop_cad": None,
-            "source": "no-data", "duration_min": None}
+            "source": "no-data", "duration_min": None,
+            "nonstop_duration_min": None}
 
 
 def get_fare(origin, dest, dep, ret, adults, children):
@@ -574,10 +575,10 @@ def _build_cell(origin, code, dep, ret, adults, child_ages, fare, threshold):
     """Build the cell dict for a single dep×ret combo.
 
     fare: dict from get_fare() with keys cheapest_cad, stops, nonstop_cad, source, book,
-    duration_min.
+    duration_min, nonstop_duration_min.
     threshold: float fraction (e.g. 0.25 for 25 %).
     Returns dict with keys: dep, ret, cheapest_cad, stops, nonstop_cad, chosen,
-    chosen_cad, source, duration_min, book.
+    chosen_cad, source, duration_min, nonstop_duration_min, chosen_duration_min, book.
     """
     cheap = fare.get("cheapest_cad")
     ns = fare.get("nonstop_cad")
@@ -585,19 +586,22 @@ def _build_cell(origin, code, dep, ret, adults, child_ages, fare, threshold):
     chosen_cad = cheap
     if ns and cheap and ns <= cheap * (1 + threshold):
         chosen, chosen_cad = "nonstop", ns
-    # duration_min must correspond to the CHOSEN fare: the nonstop itinerary's
-    # duration when we picked nonstop, else the cheapest itinerary's. Carries None
-    # (no fabrication) when the chosen itinerary's duration is unavailable.
-    if chosen == "nonstop":
-        duration_min = fare.get("nonstop_duration_min")
-    else:
-        duration_min = fare.get("duration_min")
+    # Keep each price line paired with ITS OWN stops/duration (codex P2):
+    #   - duration_min ALWAYS = cheapest itinerary's duration (pairs with cheapest_cad + stops)
+    #   - nonstop_duration_min = nonstop itinerary's duration (pairs with nonstop_cad, 0 stops)
+    #   - chosen_duration_min = duration of the SELECTED fare (pairs with chosen_cad)
+    # Each carries None (no fabrication) when its itinerary's duration is unavailable.
+    duration_min = fare.get("duration_min")
+    nonstop_duration_min = fare.get("nonstop_duration_min")
+    chosen_duration_min = nonstop_duration_min if chosen == "nonstop" else duration_min
     return {
         "dep": dep, "ret": ret,
         "cheapest_cad": cheap, "stops": fare.get("stops"),
         "nonstop_cad": ns, "chosen": chosen, "chosen_cad": chosen_cad,
         "source": fare.get("source"),
         "duration_min": duration_min,
+        "nonstop_duration_min": nonstop_duration_min,
+        "chosen_duration_min": chosen_duration_min,
         "book": fare.get("book") or kayak_link(origin, code, dep, ret, adults, child_ages),
     }
 
@@ -830,7 +834,8 @@ def api_search_stream():
                 fare = get_fare(origin, code, dep, ret, adults, children)
             except Exception:
                 fare = {"cheapest_cad": None, "stops": None, "nonstop_cad": None,
-                        "source": "no-data", "duration_min": None}
+                        "source": "no-data", "duration_min": None,
+                        "nonstop_duration_min": None}
             cell = _build_cell(origin, code, dep, ret, adults, child_ages, fare, threshold)
             return di, cell
 
@@ -859,7 +864,8 @@ def api_search_stream():
                     "dep": dep, "ret": ret,
                     "cheapest_cad": None, "stops": None, "nonstop_cad": None,
                     "chosen": "cheapest", "chosen_cad": None, "source": "no-data",
-                    "duration_min": None,
+                    "duration_min": None, "nonstop_duration_min": None,
+                    "chosen_duration_min": None,
                     "book": kayak_link(origin, code, dep, ret, adults, child_ages),
                 }) for ret in ret_dates]
                 for dep in dep_dates
@@ -1121,8 +1127,8 @@ def build_recommendation(origin, results, adults, child_ages, families):
               "ret": r["best"]["ret"] if r["best"] else None,
               "chosen": r["best"]["chosen"] if r["best"] else None,
               "stops": r["best"]["stops"] if r["best"] else None,
-              "duration_min": r["best"].get("duration_min") if r["best"] else None,
-              "duration": _fmt_duration(r["best"].get("duration_min")) if r["best"] else None}
+              "duration_min": r["best"].get("chosen_duration_min") if r["best"] else None,
+              "duration": _fmt_duration(r["best"].get("chosen_duration_min")) if r["best"] else None}
              for r in results]
     summary = (f"From {origin}, {adults} adults + {len(child_ages)} kids, "
                f"{families} family/families. Per-family best options: "

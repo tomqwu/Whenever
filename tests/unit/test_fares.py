@@ -143,7 +143,8 @@ def test_get_fare_no_data(monkeypatch):
     monkeypatch.setattr(appmod, "kiwi_fare", lambda *a: None)
     res = appmod.get_fare("YYZ", "PVG", "d", "r", 1, 0)
     assert res == {"cheapest_cad": None, "stops": None, "nonstop_cad": None,
-                   "source": "no-data", "duration_min": None}
+                   "source": "no-data", "duration_min": None,
+                   "nonstop_duration_min": None}
 
 
 # ---------------------------------------------------------------------------

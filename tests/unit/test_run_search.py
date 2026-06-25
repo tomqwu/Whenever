@@ -186,14 +186,17 @@ def test_run_search_result_preserves_city_and_iata(monkeypatch):
 # duration_min carries from the fare → cell → best (#53)
 # ---------------------------------------------------------------------------
 def test_build_cell_includes_duration_min():
-    """_build_cell copies the CHEAPEST itinerary's duration_min when chosen=cheapest."""
+    """_build_cell pairs the CHEAPEST itinerary's duration_min with cheapest_cad/stops;
+    chosen_duration_min == duration_min when chosen=cheapest (codex P2 consistency)."""
     fare = _fake_fare(8000, stops=1, duration_min=875)
     cell = appmod._build_cell("YYZ", "PVG", "2026-12-12", "2027-01-04", 2, [], fare, 0.25)
     assert cell["chosen"] == "cheapest"
-    assert cell["duration_min"] == 875
+    assert cell["duration_min"] == 875            # cheapest itinerary
+    assert cell["chosen_duration_min"] == 875     # chosen == cheapest here
     # all prior keys remain present
     for k in ("dep", "ret", "cheapest_cad", "stops", "nonstop_cad",
-              "chosen", "chosen_cad", "source", "book"):
+              "nonstop_duration_min", "chosen", "chosen_cad",
+              "chosen_duration_min", "source", "book"):
         assert k in cell
 
 
@@ -202,27 +205,35 @@ def test_build_cell_duration_min_none_when_absent():
     fare = {"cheapest_cad": 8000, "stops": 1, "nonstop_cad": None, "source": "x"}
     cell = appmod._build_cell("YYZ", "PVG", "2026-12-12", "2027-01-04", 2, [], fare, 0.25)
     assert cell["duration_min"] is None
+    assert cell["nonstop_duration_min"] is None
+    assert cell["chosen_duration_min"] is None
 
 
-def test_build_cell_nonstop_uses_nonstop_duration_min():
-    """When chosen=nonstop, duration_min reflects the NONSTOP itinerary, not the
-    cheapest (connecting) one (codex P2: duration must match the chosen fare)."""
-    # nonstop 9000 within 25% premium over cheapest 8000 → chosen=nonstop.
-    fare = _fake_fare(8000, stops=1, nonstop=9000,
+def test_build_cell_nonstop_pairs_each_price_with_own_duration():
+    """When chosen=nonstop, each price line keeps ITS OWN stops/duration (codex P2):
+    duration_min stays the CHEAPEST itinerary's, nonstop_duration_min is the nonstop's,
+    and chosen_duration_min == nonstop_duration_min (the selected fare)."""
+    # cheapest 1-stop 8000 w/ duration 875; nonstop 8500 (within 25%) w/ duration 600.
+    fare = _fake_fare(8000, stops=1, nonstop=8500,
                       duration_min=875, nonstop_duration_min=600)
     cell = appmod._build_cell("YYZ", "PVG", "2026-12-12", "2027-01-04", 2, [], fare, 0.25)
     assert cell["chosen"] == "nonstop"
-    assert cell["duration_min"] == 600          # nonstop itinerary, NOT the connecting 875
+    assert cell["stops"] == 1                     # cheapest (connecting) itinerary
+    assert cell["duration_min"] == 875            # pairs with cheapest_cad + stops
+    assert cell["nonstop_duration_min"] == 600    # pairs with nonstop_cad (0 stops)
+    assert cell["chosen_duration_min"] == 600     # the SELECTED fare's duration
 
 
-def test_build_cell_nonstop_duration_none_falls_back_to_none():
-    """When chosen=nonstop but nonstop_duration_min is absent, duration_min is None —
-    it must NOT fall back to the connecting itinerary's duration."""
+def test_build_cell_nonstop_duration_none_does_not_borrow_connecting():
+    """When chosen=nonstop but nonstop_duration_min is absent, chosen_duration_min is
+    None — it must NOT fall back to the connecting itinerary's duration."""
     fare = _fake_fare(8000, stops=1, nonstop=9000,
                       duration_min=875, nonstop_duration_min=None)
     cell = appmod._build_cell("YYZ", "PVG", "2026-12-12", "2027-01-04", 2, [], fare, 0.25)
     assert cell["chosen"] == "nonstop"
-    assert cell["duration_min"] is None
+    assert cell["duration_min"] == 875            # cheapest itinerary still carried
+    assert cell["nonstop_duration_min"] is None
+    assert cell["chosen_duration_min"] is None    # no borrowing from connecting fare
 
 
 def test_run_search_best_carries_duration_min(monkeypatch):
@@ -240,10 +251,14 @@ def test_run_search_best_carries_duration_min(monkeypatch):
 # build_recommendation: summary + prompt factor in total duration (#53)
 # ---------------------------------------------------------------------------
 def _result_with_best(duration_min):
+    # The summary uses chosen_duration_min (duration of the CHOSEN fare). Set
+    # duration_min to a deliberately DIFFERENT sentinel so a regression that reads
+    # duration_min instead of chosen_duration_min would surface in the assertions.
     return [{
         "city": "Shanghai", "iata": "PVG",
         "best": {"chosen_cad": 8000, "dep": "2026-12-12", "ret": "2027-01-04",
-                 "chosen": "cheapest", "stops": 1, "duration_min": duration_min},
+                 "chosen": "cheapest", "stops": 1, "duration_min": 99999,
+                 "chosen_duration_min": duration_min},
     }]
 
 
@@ -262,6 +277,9 @@ def test_build_recommendation_summary_includes_duration(monkeypatch):
     assert "14h 35m" in p
     assert "875" in p
     assert "duration_min" in p
+    # the summary uses the CHOSEN fare's duration, not the raw duration_min field
+    # (codex P2): the 99999 sentinel must NOT leak into the prompt.
+    assert "99999" not in p
     # prompt instructs the model to balance/avoid much-longer flights
     assert "duration" in p.lower()
     assert "2x" in p or "2×" in p
