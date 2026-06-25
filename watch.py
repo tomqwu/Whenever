@@ -68,6 +68,17 @@ class WatchDB:
                 source     TEXT,
                 book       TEXT
             );
+
+            -- At most one ACTIVE watch per trip key. This is the atomic backstop
+            -- for the route's pre-check: two concurrent identical POSTs can both
+            -- pass a list_watches() check before either inserts, but only one
+            -- INSERT can satisfy this partial unique index — the second raises
+            -- sqlite3.IntegrityError, which the route treats as "already exists".
+            -- Partial (WHERE active = 1) so removing a watch (active -> 0) frees
+            -- the key and the same trip can be re-watched later.
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_watch_active_unique
+                ON watches(origin, dest_iata, dep_date, ret_date, adults, child_ages)
+                WHERE active = 1;
         """)
         self._conn.commit()
 

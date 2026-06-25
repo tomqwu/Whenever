@@ -177,6 +177,125 @@ def test_add_watch_drops_non_int_child_ages(client, watch_db):
     assert watch_db.list_watches()[0]["child_ages"] == [11, 9]
 
 
+def test_add_watch_string_child_ages_400(client, watch_db):
+    """A non-list child_ages (e.g. the string "11,9") is rejected with 400.
+
+    Iterating a string per-character would persist nonsense ages ([1,1,9]),
+    so the route must refuse anything that isn't a JSON array.
+    """
+    r = client.post("/api/watch", json={**_VALID_BODY, "child_ages": "11,9"})
+    assert r.status_code == 400
+    assert r.get_json()["error"] == "child_ages must be a list"
+    assert watch_db.list_watches() == []   # nothing persisted on a 400
+
+
+def test_add_watch_list_child_ages_stored(client, watch_db):
+    """A list child_ages is stored as exactly those children/ages."""
+    r = client.post("/api/watch", json={**_VALID_BODY, "child_ages": [11, 9]})
+    assert r.status_code == 200
+    row = watch_db.list_watches()[0]
+    assert row["child_ages"] == [11, 9]
+    assert row["children"] == 2
+
+
+def test_add_watch_omitted_child_ages_is_empty(client, watch_db):
+    """child_ages omitted -> stored as an empty list (no children)."""
+    body = dict(_VALID_BODY)
+    body.pop("child_ages")
+    r = client.post("/api/watch", json=body)
+    assert r.status_code == 200
+    row = watch_db.list_watches()[0]
+    assert row["child_ages"] == []
+    assert row["children"] == 0
+
+
+def test_add_watch_integrityerror_returns_existing(client, watch_db, monkeypatch):
+    """The DB unique-index backstop: if the pre-check misses but the INSERT hits
+    an IntegrityError (concurrent duplicate), the route resolves to the existing
+    active row's id with existing=True — a single active row, never a 500.
+    """
+    import sqlite3
+
+    # Seed the trip directly so an active row already exists in the DB.
+    first_id = watch_db.add_watch(
+        origin="YYZ", dest_iata="PVG", dest_city="Shanghai",
+        dep_date="2026-12-12", ret_date="2027-01-04", adults=2,
+        child_ages=[11, 9], threshold_pct=25.0,
+        last_price=8000, last_source="travelpayouts",
+    )
+
+    # Force the fast-path pre-check to miss so the INSERT runs and the partial
+    # UNIQUE INDEX raises IntegrityError (the atomic backstop branch).
+    real_list = watch_db.list_watches
+    calls = {"n": 0}
+
+    def flaky_list(active_only=True):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return []          # pre-check sees nothing -> proceeds to INSERT
+        return real_list(active_only=active_only)  # post-IntegrityError lookup
+
+    monkeypatch.setattr(watch_db, "list_watches", flaky_list)
+
+    r = client.post("/api/watch", json=_VALID_BODY)
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body["existing"] is True
+    assert body["id"] == first_id
+    # Still exactly one active row.
+    assert len(real_list(active_only=True)) == 1
+
+
+def test_add_watch_integrityerror_unrelated_reraises(client, watch_db, monkeypatch):
+    """If an IntegrityError fires but no matching active row is found (an
+    unrelated constraint), the error is re-raised rather than masked as existing.
+    """
+    import sqlite3
+
+    def boom_add(**kwargs):
+        raise sqlite3.IntegrityError("some other constraint")
+
+    monkeypatch.setattr(watch_db, "list_watches", lambda active_only=True: [])
+    monkeypatch.setattr(watch_db, "add_watch", boom_add)
+
+    with pytest.raises(sqlite3.IntegrityError):
+        client.post("/api/watch", json=_VALID_BODY)
+
+
+def test_add_watch_db_unique_index_one_active_row(client, watch_db):
+    """Two identical inserts straight through WatchDB.add_watch hit the partial
+    UNIQUE INDEX: the second raises IntegrityError, leaving ONE active row.
+    """
+    import sqlite3
+
+    kwargs = dict(
+        origin="YYZ", dest_iata="PVG", dest_city="Shanghai",
+        dep_date="2026-12-12", ret_date="2027-01-04", adults=2,
+        child_ages=[11, 9], threshold_pct=25.0,
+    )
+    watch_db.add_watch(**kwargs)
+    with pytest.raises(sqlite3.IntegrityError):
+        watch_db.add_watch(**kwargs)
+    assert len(watch_db.list_watches(active_only=True)) == 1
+
+
+def test_add_watch_rewatch_after_remove(client, watch_db):
+    """After remove_watch (active -> 0), the partial index frees the key, so the
+    same trip can be watched again as a fresh active row.
+    """
+    r1 = client.post("/api/watch", json=_VALID_BODY)
+    wid = r1.get_json()["id"]
+    client.delete(f"/api/watch/{wid}")
+    assert watch_db.list_watches(active_only=True) == []
+
+    r2 = client.post("/api/watch", json=_VALID_BODY)
+    assert r2.status_code == 200
+    body = r2.get_json()
+    assert "existing" not in body          # brand-new row, not a dedup hit
+    assert body["id"] != wid
+    assert len(watch_db.list_watches(active_only=True)) == 1
+
+
 @pytest.mark.parametrize("body", [None, []])
 def test_add_watch_non_dict_body_400(client, watch_db, body):
     """A null or non-object JSON body -> documented 400, never a 500, no row.

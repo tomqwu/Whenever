@@ -7,7 +7,7 @@ LLM via Ollama (default model: deepseek-v4pro). Fares come from Amadeus if
 credentials are set, otherwise from clearly-labeled AI estimates. Every price
 deep-links to a real Kayak search for booking.
 """
-import os, re, json, time, datetime as dt, logging, concurrent.futures
+import os, re, json, time, datetime as dt, logging, concurrent.futures, sqlite3
 from functools import lru_cache
 import requests
 import yaml
@@ -877,9 +877,14 @@ def api_watch_add():
         threshold_pct = float(b.get("threshold_pct", 25.0))
     except (TypeError, ValueError):
         return jsonify({"error": "threshold_pct must be numeric"}), 400
-    # child_ages: keep only the values that coerce cleanly to int; drop the rest.
+    # child_ages: must be a JSON array when present. A non-list (e.g. the string
+    # "11,9") would iterate per-character and persist nonsense ages, so reject it
+    # with a 400. Within a list, keep only values that coerce cleanly to int.
+    raw_child_ages = b.get("child_ages")
+    if raw_child_ages is not None and not isinstance(raw_child_ages, list):
+        return jsonify({"error": "child_ages must be a list"}), 400
     child_ages = []
-    for a in (b.get("child_ages") or []):
+    for a in (raw_child_ages or []):
         try:
             child_ages.append(int(a))
         except (TypeError, ValueError):
@@ -898,26 +903,45 @@ def api_watch_add():
     try:
         # Idempotent creation: reloading/repeating a search for an already-watched
         # trip must not insert another active row (the scheduler would then re-price
-        # it and emit duplicate drop alerts). If an active watch already matches the
-        # same normalized key fields, return its id instead of inserting a duplicate.
+        # it and emit duplicate drop alerts).
         sorted_ages = sorted(child_ages)
-        for existing in db.list_watches(active_only=True):
-            if (
-                (existing.get("origin") or "").strip().upper() == origin
-                and (existing.get("dest_iata") or "").strip().upper() == dest_iata
-                and existing.get("dep_date") == dep_date
-                and existing.get("ret_date") == ret_date
-                and int(existing.get("adults") or 0) == adults
-                and sorted(existing.get("child_ages") or []) == sorted_ages
-            ):
-                return jsonify({"id": existing["id"], "ok": True, "existing": True})
 
-        watch_id = db.add_watch(
-            origin=origin, dest_iata=dest_iata, dest_city=dest_city,
-            dep_date=dep_date, ret_date=ret_date, adults=adults,
-            child_ages=child_ages, threshold_pct=threshold_pct,
-            last_price=last_price, last_source=last_source,
-        )
+        def _matching_active():
+            """Return an existing active watch matching this trip key, or None."""
+            for existing in db.list_watches(active_only=True):
+                if (
+                    (existing.get("origin") or "").strip().upper() == origin
+                    and (existing.get("dest_iata") or "").strip().upper() == dest_iata
+                    and existing.get("dep_date") == dep_date
+                    and existing.get("ret_date") == ret_date
+                    and int(existing.get("adults") or 0) == adults
+                    and sorted(existing.get("child_ages") or []) == sorted_ages
+                ):
+                    return existing
+            return None
+
+        # Fast path: a list_watches() pre-check returns the existing id directly.
+        existing = _matching_active()
+        if existing is not None:
+            return jsonify({"id": existing["id"], "ok": True, "existing": True})
+
+        # Atomic backstop: a partial UNIQUE INDEX (active rows only) guards the
+        # trip key at the SQLite level. Two concurrent identical POSTs can both
+        # pass the pre-check above, but only one INSERT survives — the other
+        # raises IntegrityError, which we resolve to the surviving row's id so
+        # the response is identical to the pre-check path (one row, existing=True).
+        try:
+            watch_id = db.add_watch(
+                origin=origin, dest_iata=dest_iata, dest_city=dest_city,
+                dep_date=dep_date, ret_date=ret_date, adults=adults,
+                child_ages=child_ages, threshold_pct=threshold_pct,
+                last_price=last_price, last_source=last_source,
+            )
+        except sqlite3.IntegrityError:
+            existing = _matching_active()
+            if existing is None:
+                raise
+            return jsonify({"id": existing["id"], "ok": True, "existing": True})
     finally:
         db.close()
     return jsonify({"id": watch_id, "ok": True})

@@ -55,6 +55,44 @@ def test_watchdb_creates_tables(db):
     assert "price_history" in tables
 
 
+def test_watchdb_creates_active_unique_index(db):
+    """The partial UNIQUE INDEX guarding active trip keys exists."""
+    cur = db._conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='index'"
+    )
+    names = {r[0] for r in cur.fetchall()}
+    assert "idx_watch_active_unique" in names
+
+
+def test_watchdb_duplicate_active_raises_integrityerror(db):
+    """A second identical active watch violates the partial unique index."""
+    import sqlite3
+    kwargs = dict(
+        origin="YYZ", dest_iata="PEK", dest_city="Beijing",
+        dep_date="2026-12-14", ret_date="2027-01-04",
+        adults=2, child_ages=[11, 9], threshold_pct=25.0,
+    )
+    db.add_watch(**kwargs)
+    with pytest.raises(sqlite3.IntegrityError):
+        db.add_watch(**kwargs)
+    assert len(db.list_watches(active_only=True)) == 1
+
+
+def test_watchdb_rewatch_after_remove(db):
+    """The partial index only constrains active rows: after remove_watch the
+    same trip can be inserted again as a new active row."""
+    kwargs = dict(
+        origin="YYZ", dest_iata="PEK", dest_city="Beijing",
+        dep_date="2026-12-14", ret_date="2027-01-04",
+        adults=2, child_ages=[11, 9], threshold_pct=25.0,
+    )
+    wid = db.add_watch(**kwargs)
+    db.remove_watch(wid)
+    wid2 = db.add_watch(**kwargs)   # must NOT raise
+    assert wid2 != wid
+    assert len(db.list_watches(active_only=True)) == 1
+
+
 def test_watchdb_add_and_list(db):
     wid = _sample_watch(db)
     watches = db.list_watches()
