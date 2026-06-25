@@ -21,6 +21,23 @@ def test_date_range():
     ]
 
 
+def test_date_range_caps_huge_count():
+    """A huge count must not allocate millions of dates; clamp to MAX_DATE_SPAN."""
+    out = appmod.date_range("2026-12-12", 10_000_000)
+    assert len(out) <= appmod.MAX_DATE_SPAN
+    assert len(out) == appmod.MAX_DATE_SPAN  # capped exactly at the ceiling
+
+
+def test_date_range_floors_negative_count():
+    """A negative count floors at 0 rather than producing junk."""
+    assert appmod.date_range("2026-12-12", -5) == []
+
+
+def test_date_range_non_int_count_returns_empty():
+    """A non-int count returns [] (invalid), not a crash."""
+    assert appmod.date_range("2026-12-12", "abc") == []
+
+
 def test_kayak_link_without_children():
     url = appmod.kayak_link("YYZ", "PVG", "2026-12-12", "2027-01-04", 2, [])
     assert url == "https://www.kayak.com/flights/YYZ-PVG/2026-12-12/2027-01-04/2adults"

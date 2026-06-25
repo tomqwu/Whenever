@@ -51,6 +51,12 @@ SERPAPI_KEY = os.environ.get("SERPAPI_KEY")
 CURRENCY = os.environ.get("CURRENCY", "cad").lower()
 FARE_CACHE_TTL = int(os.environ.get("FARE_CACHE_TTL", "3600"))
 SEARCH_CONCURRENCY = int(os.environ.get("SEARCH_CONCURRENCY", "8"))
+# Hard cap on search grid size. Each cell = one provider API call. A value <= 0 disables the cap.
+MAX_SEARCH_CELLS = int(os.environ.get("MAX_SEARCH_CELLS", "200"))
+# Generous per-direction day cap. Bounds dep_span/ret_span (and date_range count)
+# BEFORE expansion so a malformed huge span can't allocate millions of dates. The
+# form max is small; this is a safety ceiling, not the typical value.
+MAX_DATE_SPAN = int(os.environ.get("MAX_DATE_SPAN", "60"))
 # Dev-server port. Default 5001 to avoid macOS AirPlay Receiver, which holds 5000.
 PORT = int(os.environ.get("PORT", "5001"))
 
@@ -470,6 +476,12 @@ def date_range(start_iso, count):
         d = dt.date.fromisoformat(start_iso)
     except (ValueError, TypeError):
         return []
+    # Defensively clamp count so any caller is protected from a huge/negative
+    # span building millions of dates (or a negative range). Floor at 0.
+    try:
+        count = max(0, min(int(count), MAX_DATE_SPAN))
+    except (ValueError, TypeError):
+        return []
     return [(d + dt.timedelta(days=i)).isoformat() for i in range(count)]
 
 def _build_cell(origin, code, dep, ret, adults, child_ages, fare, threshold):
@@ -556,6 +568,24 @@ def run_search(origin, dests, adults, child_ages, dep_dates, ret_dates,
     }
 
 
+def _span(v, default=4):
+    """Safely parse a date-span value to an int clamped to [1, MAX_DATE_SPAN].
+
+    Non-numeric or None values (e.g. a stale ``"abc"``) fall back to ``default``
+    instead of raising, so a garbage span on the fallback path degrades to the
+    default span rather than producing a 500. Falsy values (0, "") also fall
+    back to ``default``, preserving the prior ``or 4`` semantics. ``date_range``
+    re-clamps the count internally as a backstop.
+    """
+    if not v:
+        return max(1, min(default, MAX_DATE_SPAN))
+    try:
+        n = int(v)
+    except (ValueError, TypeError):
+        n = default
+    return max(1, min(n, MAX_DATE_SPAN))
+
+
 def _search_args_from_body(b: dict):
     """Parse a request body dict into run_search keyword arguments.
 
@@ -570,8 +600,16 @@ def _search_args_from_body(b: dict):
     dests = b.get("destinations") or []
     adults = int(b.get("adults", 2))
     child_ages = [int(a) for a in (b.get("child_ages") or [])]
-    dep_dates = b.get("dep_dates") or date_range(b.get("dep_start", ""), int(b.get("dep_span", 4)))
-    ret_dates = b.get("ret_dates") or date_range(b.get("ret_start", ""), int(b.get("ret_span", 4)))
+    # Span is only consulted on the FALLBACK path (when explicit dep_dates/
+    # ret_dates are not supplied). When explicit date arrays are present, the
+    # span fields are unused and must NOT be parsed at all, so a stale/garbage
+    # span (e.g. dep_span="abc") is ignored rather than raising a 500.
+    dep_dates = b.get("dep_dates")
+    if not dep_dates:
+        dep_dates = date_range(b.get("dep_start", ""), _span(b.get("dep_span", 4)))
+    ret_dates = b.get("ret_dates")
+    if not ret_dates:
+        ret_dates = date_range(b.get("ret_start", ""), _span(b.get("ret_span", 4)))
     threshold_pct = float(b.get("nonstop_threshold", 25))
     families = int(b.get("families", 1))
 
@@ -588,12 +626,37 @@ def _search_args_from_body(b: dict):
 _SEARCH_ARGS_400 = {"error": "origin, destinations and dates required"}
 
 
+def _check_cell_cap(dests, dep_dates, ret_dates):
+    """Return a 400 JSON response if the search exceeds MAX_SEARCH_CELLS, else None.
+
+    Each cell = one provider API call (dest × dep_date × ret_date).
+    A MAX_SEARCH_CELLS value <= 0 disables the cap entirely.
+    """
+    if MAX_SEARCH_CELLS <= 0:
+        return None
+    total_cells = len(dests) * len(dep_dates) * len(ret_dates)
+    if total_cells > MAX_SEARCH_CELLS:
+        return (
+            jsonify({
+                "error": (
+                    f"search too large: {total_cells} cells exceeds limit {MAX_SEARCH_CELLS};"
+                    " reduce cities or date ranges"
+                )
+            }),
+            400,
+        )
+    return None
+
+
 @app.route("/api/search", methods=["POST"])
 def api_search():
     b = request.get_json(force=True)
     args = _search_args_from_body(b)
     if args is None:
         return jsonify(_SEARCH_ARGS_400), 400
+    cap_err = _check_cell_cap(args["dests"], args["dep_dates"], args["ret_dates"])
+    if cap_err is not None:
+        return cap_err
     result = run_search(**args)
     return jsonify(result)
 
@@ -614,6 +677,9 @@ def api_search_stream():
     args = _search_args_from_body(b)
     if args is None:
         return jsonify(_SEARCH_ARGS_400), 400
+    cap_err = _check_cell_cap(args["dests"], args["dep_dates"], args["ret_dates"])
+    if cap_err is not None:
+        return cap_err
 
     # Capture all args now — generator must not touch `request` after this point.
     origin = args["origin"]
@@ -721,6 +787,9 @@ def api_export_csv():
     args = _search_args_from_body(b)
     if args is None:
         return jsonify(_SEARCH_ARGS_400), 400
+    cap_err = _check_cell_cap(args["dests"], args["dep_dates"], args["ret_dates"])
+    if cap_err is not None:
+        return cap_err
     result = run_search(**args)
     csv_text = export.render_csv(result)
     return Response(
@@ -737,6 +806,9 @@ def api_export_pdf():
     args = _search_args_from_body(b)
     if args is None:
         return jsonify(_SEARCH_ARGS_400), 400
+    cap_err = _check_cell_cap(args["dests"], args["dep_dates"], args["ret_dates"])
+    if cap_err is not None:
+        return cap_err
     result = run_search(**args)
     pdf_bytes = export.render_pdf(result)
     return Response(

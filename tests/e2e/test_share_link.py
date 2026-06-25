@@ -233,7 +233,12 @@ def test_share_hash_cities_capped_to_bound_auto_run(live_server, page):
     """A crafted share link with many valid city codes must not auto-run an
     unbounded search. restoreFromHash caps the restored set to MAX_SHARE_CITIES
     (12), so no more than 12 chips/city blocks are ever restored regardless of
-    how many codes the URL hash carries."""
+    how many codes the URL hash carries.
+
+    Note: 12 cities × dep_span=2 × ret_span=2 = 48 cells > CONFIRM_CELLS (40),
+    so the quota-guard confirm dialog appears on the auto-run. We accept it here
+    since the point of the test is to verify the city cap, not the quota dialog.
+    """
     import json, urllib.parse
     # 50 distinct valid 3-letter IATA codes (AAA, AAB, ... 50 entries).
     codes = []
@@ -250,6 +255,8 @@ def test_share_hash_cities_capped_to_bound_auto_run(live_server, page):
         "nonstop_threshold": 25,
     }
     hash_val = "#s=" + urllib.parse.quote(json.dumps(share))
+    # Accept any confirm dialog from the quota guard (12 cities × 2×2 = 48 > 40).
+    page.on("dialog", lambda d: d.accept())
     page.goto(live_server + "/" + hash_val)
     # Auto-run fires; wait for it to populate.
     page.wait_for_selector(".chip.on")
