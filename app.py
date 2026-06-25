@@ -12,7 +12,7 @@ from functools import lru_cache
 import requests
 import yaml
 from dotenv import load_dotenv
-from flask import Flask, request, jsonify, render_template, Response
+from flask import Flask, request, jsonify, render_template, Response, stream_with_context
 import export
 
 load_dotenv()  # load .env if present; real shell env vars take precedence (override=False default)
@@ -596,6 +596,116 @@ def api_search():
         return jsonify(_SEARCH_ARGS_400), 400
     result = run_search(**args)
     return jsonify(result)
+
+
+@app.route("/api/search/stream", methods=["POST"])
+def api_search_stream():
+    """POST /api/search/stream — same body as /api/search.
+
+    Returns application/x-ndjson:
+      {"type":"meta", ...}           (first)
+      {"type":"cell", ...}           (one per cell, as completed)
+      {"type":"recommendation", ...} (after all cells)
+      {"type":"done"}                (last)
+
+    If the body is invalid, returns 400 JSON (not streamed).
+    """
+    b = request.get_json(force=True)
+    args = _search_args_from_body(b)
+    if args is None:
+        return jsonify(_SEARCH_ARGS_400), 400
+
+    # Capture all args now — generator must not touch `request` after this point.
+    origin = args["origin"]
+    dests = args["dests"]
+    adults = args["adults"]
+    child_ages = args["child_ages"]
+    dep_dates = args["dep_dates"]
+    ret_dates = args["ret_dates"]
+    threshold_pct = args["threshold_pct"]
+    families = args["families"]
+
+    @stream_with_context
+    def generate():
+        children = len(child_ages)
+        threshold = threshold_pct / 100.0
+
+        # Build the flat task list: (dest_index, code, dep, ret)
+        tasks = []
+        for di, dest in enumerate(dests):
+            code = (dest.get("iata") or "").upper()[:3]
+            for dep in dep_dates:
+                for ret in ret_dates:
+                    tasks.append((di, code, dep, ret))
+
+        total_cells = len(tasks)
+
+        # --- meta line ---
+        meta = {
+            "type": "meta",
+            "origin": origin,
+            "adults": adults,
+            "child_ages": child_ages,
+            "families": families,
+            "dep_dates": dep_dates,
+            "ret_dates": ret_dates,
+            "providers": providers_configured(),
+            "results": [{"city": d.get("city"), "iata": (d.get("iata") or "").upper()[:3]}
+                        for d in dests],
+            "total_cells": total_cells,
+        }
+        yield json.dumps(meta) + "\n"
+
+        # --- cell lines (as completed) ---
+        # Accumulate cells in order for the final recommendation.
+        # cells_by_dest[di] collects (dep, ret, cell_dict) tuples.
+        cells_by_dest: dict = {di: [] for di in range(len(dests))}
+
+        def _fetch(task):
+            di, code, dep, ret = task
+            fare = get_fare(origin, code, dep, ret, adults, children)
+            cell = _build_cell(origin, code, dep, ret, adults, child_ages, fare, threshold)
+            return di, cell
+
+        workers = max(1, SEARCH_CONCURRENCY)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {pool.submit(_fetch, t): t for t in tasks}
+            for fut in concurrent.futures.as_completed(futures):
+                di, cell = fut.result()
+                cells_by_dest[di].append(cell)
+                line = {"type": "cell", "dest_index": di, **cell}
+                yield json.dumps(line) + "\n"
+
+        # --- recommendation line ---
+        # Reconstruct `results` in dest order (same shape as run_search output).
+        results = []
+        for di, dest in enumerate(dests):
+            code = (dest.get("iata") or "").upper()[:3]
+            flat = [c for c in cells_by_dest[di] if c["chosen_cad"]]
+            best = min(flat, key=lambda c: c["chosen_cad"]) if flat else None
+            # Rebuild grid in dep/ret order for consistency.
+            grid_cells = {(c["dep"], c["ret"]): c for c in cells_by_dest[di]}
+            grid = [
+                [grid_cells.get((dep, ret), {
+                    "dep": dep, "ret": ret,
+                    "cheapest_cad": None, "stops": None, "nonstop_cad": None,
+                    "chosen": "cheapest", "chosen_cad": None, "source": "no-data",
+                    "book": kayak_link(origin, code, dep, ret, adults, child_ages),
+                }) for ret in ret_dates]
+                for dep in dep_dates
+            ]
+            results.append({
+                "city": dest.get("city"), "iata": code,
+                "grid": grid, "best": best,
+            })
+
+        rec_text = build_recommendation(origin, results, adults, child_ages, families)
+        yield json.dumps({"type": "recommendation", "text": rec_text}) + "\n"
+
+        # --- done line ---
+        yield json.dumps({"type": "done"}) + "\n"
+
+    return Response(generate(), mimetype="application/x-ndjson")
 
 
 @app.route("/api/export/csv", methods=["POST"])
