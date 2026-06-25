@@ -42,24 +42,23 @@ def test_toronto_china_full_flow(seed_live_server, page):
     assert "Beijing (PEK)" in chip_text_joined, f"Beijing not found in chips: {chip_texts}"
     assert "Shanghai (PVG)" in chip_text_joined, f"Shanghai not found in chips: {chip_texts}"
 
-    # Beijing is required (optional=False) → must have class 'on' (pre-selected)
+    # A country expansion now starts with EVERY chip UNCHECKED (opt-in UX): no
+    # chip may carry class 'on' until the user explicitly clicks one.
+    assert page.query_selector(".chip.on") is None, \
+        "No chip should be pre-selected after a country expansion (all unchecked)"
+
+    # Explicitly select Beijing before running (expansion no longer auto-selects).
+    # drawChips() rebuilds the chip DOM on toggle, so re-query after clicking.
     beijing_chip = next(
         el for el in page.query_selector_all(".chip")
         if "Beijing" in el.inner_text()
     )
-    assert "on" in (beijing_chip.get_attribute("class") or ""), \
-        "Beijing chip should have class 'on' (required city, pre-selected)"
+    beijing_chip.click()
+    page.wait_for_selector(".chip.on:has-text('Beijing')")
+    assert page.query_selector(".chip.on:has-text('Beijing')") is not None, \
+        "Beijing chip should be .on after the user clicks it"
 
-    # Haikou is optional → must NOT have class 'on' (opt-in, unchecked by default)
-    haikou_chip = next(
-        (el for el in page.query_selector_all(".chip") if "Haikou" in el.inner_text()),
-        None,
-    )
-    assert haikou_chip is not None, "Haikou chip should be rendered (optional city)"
-    assert "on" not in (haikou_chip.get_attribute("class") or ""), \
-        "Haikou chip should NOT have class 'on' (optional city, unchecked by default)"
-
-    # Click Run — triggers /api/search with the selected required cities
+    # Click Run — triggers /api/search with the user-selected city
     page.click("#run")
     page.wait_for_selector("#summary .card")
 

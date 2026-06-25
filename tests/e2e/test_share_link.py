@@ -1,11 +1,13 @@
 """E2E tests for the shareable search link feature."""
 
+from tests.e2e.conftest import select_all_chips
+
 
 def test_share_hash_written_after_search(live_server, page):
     page.goto(live_server)
     # Load cities
     page.click("#loadCities")
-    page.wait_for_selector(".chip")
+    select_all_chips(page)
     # Run search
     page.click("#run")
     page.wait_for_selector("#summary .card")
@@ -143,7 +145,7 @@ def test_copy_link_disabled_until_new_search_done(live_server, page):
     disables it at the start and only re-enables it on the fresh `done`."""
     page.goto(live_server)
     page.click("#loadCities")
-    page.wait_for_selector(".chip")
+    select_all_chips(page)
     # First search: Copy-link becomes enabled on done.
     page.click("#run")
     page.wait_for_selector("#summary .card")
@@ -166,7 +168,7 @@ def test_share_hash_snapshots_search_start_not_edited_form(live_server, page):
     import json, urllib.parse
     page.goto(live_server)
     page.click("#loadCities")
-    page.wait_for_selector(".chip")
+    select_all_chips(page)
     # Submit the search with the default origin/country (YYZ / China).
     page.click("#run")
     # Mutate the form AFTER submitting, while/after the search streams. These

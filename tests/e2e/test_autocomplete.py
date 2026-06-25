@@ -61,7 +61,11 @@ def test_pick_country_expands_chips(seed_live_server, page):
 
 
 def test_pick_city_adds_single_chip(seed_live_server, page):
-    """Clicking a CITY suggestion appends just that city as a chip."""
+    """Clicking a CITY suggestion appends just that city as a chip, CHECKED (on).
+
+    A directly-picked city stays selected (addCity sets on:true) — unlike a
+    country expansion, whose chips all start unchecked.
+    """
     page.goto(seed_live_server)
     page.fill("#country", "")
     page.type("#country", "hnd")
@@ -71,6 +75,11 @@ def test_pick_city_adds_single_chip(seed_live_server, page):
     chips = page.inner_text("#cities")
     assert "Tokyo" in chips and "HND" in chips
     assert page.query_selector_all(".chip:not(.hint)")  # at least one chip
+    # A directly-picked city is CHECKED by default.
+    tokyo_chip = page.query_selector(".chip:has-text('Tokyo')")
+    assert tokyo_chip is not None
+    assert "on" in (tokyo_chip.get_attribute("class") or ""), \
+        "A directly-picked city chip must have class 'on' (stays selected)"
 
 
 def test_pick_multiple_cities(seed_live_server, page):
@@ -185,14 +194,18 @@ def test_fresh_response_still_renders(seed_live_server, page):
 # --------------------------- debounce cancelled on close (codex review) ---------------------------
 
 def test_escape_before_debounce_does_not_reopen(seed_live_server, page):
-    """Type to schedule the 200ms SUGG_TIMER, press Escape BEFORE it fires, and
-    assert the dropdown does NOT reopen. Without clearTimeout in closeSuggest the
-    queued fetchSuggest would still run, mint a fresh token, pass stale() (input
-    still matches + focused), and reopen the dropdown right after the close.
+    """Type to schedule the 200ms SUGG_TIMER, press Escape via the REAL keydown
+    handler BEFORE it fires (while the dropdown is still HIDDEN), and assert the
+    dropdown does NOT open afterward. Before the fix the keydown handler early-
+    returned when the list was hidden and skipped closeSuggest(), so the queued
+    fetchSuggest still ran, minted a fresh token, passed stale() (input still
+    matches + focused), and opened the dropdown right after the dismissal.
 
-    Fully browser-side and deterministic: we drive the real input handler so the
-    debounce timer is genuinely scheduled, then Escape, then wait past the debounce
-    window plus a real /api/suggest round trip and assert the list stayed hidden.
+    Fully browser-side and deterministic: we drive the real 'input' handler so the
+    debounce timer is genuinely scheduled, confirm the list is still hidden, then
+    dispatch a real Escape 'keydown' event (the handler under test), then wait past
+    the debounce window plus a real /api/suggest round trip and assert it stayed
+    hidden.
     """
     page.goto(seed_live_server)
     result = page.evaluate(
@@ -202,18 +215,23 @@ def test_escape_before_debounce_does_not_reopen(seed_live_server, page):
             sInput.value = 'chi';
             sInput.dispatchEvent(new Event('input'));
             const hadTimer = SUGG_TIMER !== null;   // a debounce timer is pending
-            // User dismisses with Escape before the 200ms timer fires.
-            closeSuggest();                          // Escape path -> closeSuggest()
+            const hiddenAtEscape = getComputedStyle(sList).display === 'none';
+            // User dismisses with Escape while the dropdown is still HIDDEN —
+            // dispatch a real keydown so the actual handler runs (must cancel the
+            // pending request even though sList is hidden).
+            sInput.dispatchEvent(new KeyboardEvent('keydown', {key: 'Escape', bubbles: true}));
             const clearedTimer = SUGG_TIMER === null;  // timer was cancelled
             // Wait well past the debounce window + a suggest round trip; if the old
-            // timer had survived it would have fired and reopened the dropdown.
+            // timer had survived it would have fired and opened the dropdown.
             await new Promise(r => setTimeout(r, 400));
-            return { hadTimer, clearedTimer, display: getComputedStyle(sList).display };
+            return { hadTimer, hiddenAtEscape, clearedTimer,
+                     display: getComputedStyle(sList).display };
         }"""
     )
     assert result["hadTimer"] is True, "debounce timer was not scheduled by input"
-    assert result["clearedTimer"] is True, "closeSuggest did not cancel SUGG_TIMER"
-    assert result["display"] == "none", "dropdown reopened after Escape (timer survived)"
+    assert result["hiddenAtEscape"] is True, "dropdown should still be hidden at Escape"
+    assert result["clearedTimer"] is True, "Escape keydown did not cancel SUGG_TIMER"
+    assert result["display"] == "none", "dropdown opened after Escape (timer survived)"
 
 
 # --------------------------- single-flight country expansion (codex review) ---------------------------

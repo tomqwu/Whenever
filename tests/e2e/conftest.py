@@ -16,6 +16,44 @@ def _watch_db_tmp(monkeypatch, tmp_path):
     monkeypatch.setenv("WATCH_DB", str(tmp_path / "watches.db"))
 
 
+def select_chips(page, limit=None):
+    """Turn ON destination chips after a country expansion.
+
+    A country expansion now starts with EVERY chip UNCHECKED (opt-in UX), so any
+    e2e test that wants to run a search must explicitly select at least one chip
+    first. drawChips() rebuilds the whole chip DOM on each toggle, detaching the
+    other element handles, so select chips by re-querying for the next unchecked
+    chip after every click.
+
+    ``limit`` caps how many chips are turned on (None = all). The seed China
+    expansion yields ~12 cities; selecting all of them ×2×2 dates exceeds
+    CONFIRM_CELLS(40) and would trip the quota confirm() dialog. Tests that just
+    need a normal search to run pass a small limit (default 4) via
+    ``select_some_chips`` to stay under that threshold; tests that need every
+    chip on (quota guard) use ``select_all_chips``.
+    """
+    page.wait_for_selector(".chip")
+    count = 0
+    while limit is None or count < limit:
+        chip = page.query_selector(".chip:not(.hint):not(.on)")
+        if chip is None:
+            break
+        chip.click()
+        count += 1
+    page.wait_for_selector(".chip.on")
+
+
+def select_all_chips(page):
+    """Turn ON every destination chip (see select_chips)."""
+    select_chips(page, limit=None)
+
+
+def select_some_chips(page, limit=4):
+    """Turn ON up to ``limit`` chips — enough to run a search without tripping the
+    quota confirm() dialog on a large seed expansion (see select_chips)."""
+    select_chips(page, limit=limit)
+
+
 def _patch_common(monkeypatch):
     """Patch credentials and deterministic stubs shared by both server fixtures."""
     monkeypatch.setattr(appmod, "KIWI_API_KEY", None)

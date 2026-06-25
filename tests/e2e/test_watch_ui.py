@@ -7,10 +7,13 @@ The watch DB is a throwaway temp file (WATCH_DB set in the e2e fixture).
 """
 
 
+from tests.e2e.conftest import select_some_chips
+
+
 def _run_search(page, base_url):
     page.goto(base_url)
     page.click("#loadCities")
-    page.wait_for_selector(".chip")
+    select_some_chips(page)
     page.click("#run")
     page.wait_for_selector("#rec", state="visible", timeout=15000)
     # Watch buttons are revealed on the `done` event, like the export buttons.

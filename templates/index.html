@@ -234,7 +234,10 @@ let EXPAND_SEQ = 0;     // monotonic token for /api/top-cities expansions — si
                         // flight guard so only the LATEST expansion applies its chips
 
 // expandCountry: run the seed-first /api/top-cities expansion and REPLACE CITIES
-// with that country's set (required chips on, optional off) — same as before.
+// with that country's set, every chip UNCHECKED (on:false) regardless of the
+// `optional` flag. A country expansion no longer pre-selects anything, so it
+// can't auto-run a huge search — the user explicitly opts in to the cities they
+// want by clicking chips. (A directly-picked CITY via addCity() stays on:true.)
 // Single-flight guarded: a slow expansion (e.g. a non-seed country via the LLM)
 // that resolves AFTER the user picked another country is dropped, so the slower
 // response can't apply last and show chips for the wrong country. (codex review)
@@ -245,7 +248,7 @@ async function expandCountry(country){
     const r = await (await fetch('/api/top-cities',{method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({country, n:6})})).json();
     if(seq !== EXPAND_SEQ) return;   // a newer expansion superseded us — drop this
-    CITIES = (r.cities||[]).map(c=>({...c,on:!c.optional}));
+    CITIES = (r.cities||[]).map(c=>({...c,on:false}));
     drawChips();
   }catch(e){ if(seq === EXPAND_SEQ) alert('Could not load cities: '+e); }
 }
@@ -362,6 +365,12 @@ sInput.addEventListener('input', ()=>{
 });
 
 sInput.addEventListener('keydown', ev=>{
+  // Escape must ALWAYS cancel a pending debounce/request, even when the dropdown
+  // is still hidden (user pressed Escape inside the 200ms debounce, before the
+  // suggestion list opened). Without this, the early return below skips
+  // closeSuggest(), the queued SUGG_TIMER survives, and the delayed /api/suggest
+  // reopens suggestions AFTER the user already dismissed. (codex review)
+  if(ev.key==='Escape'){ closeSuggest(); return; }
   if(sList.style.display==='none') return;
   if(ev.key==='ArrowDown'){
     ev.preventDefault();
@@ -373,8 +382,6 @@ sInput.addEventListener('keydown', ev=>{
     renderSuggest();
   } else if(ev.key==='Enter'){
     if(SUGG_ACTIVE>=0){ ev.preventDefault(); pickSuggestion(SUGG_ACTIVE); }
-  } else if(ev.key==='Escape'){
-    closeSuggest();
   }
 });
 
