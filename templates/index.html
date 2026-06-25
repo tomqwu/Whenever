@@ -107,6 +107,7 @@ td.err{color:#b94a48;font-size:11px}
       <button id="run">Find best value</button>
       <button id="exportPdf" class="sec" disabled>&#8203;&#11015; PDF</button>
       <button id="exportCsv" class="sec" disabled>&#8203;&#11015; CSV</button>
+      <button id="copyLink" class="sec" disabled>&#128279; Copy link</button>
       <span class="hint" id="runHint"></span>
     </div>
   </div>
@@ -378,6 +379,23 @@ $('#run').onclick = async () => {
         LAST_PAYLOAD = payload;
         $('#exportPdf').disabled = false;
         $('#exportCsv').disabled = false;
+        // Write share state to URL hash.
+        const shareObj = {
+          depCity: $('#depCity').value.trim(),
+          depCode: $('#depCode').value.trim().toUpperCase(),
+          country: $('#country').value.trim(),
+          cities: CITIES.filter(c => c.on).map(c => ({ city: c.city, iata: c.iata })),
+          adults: parseInt($('#adults').value) || 1,
+          child_ages: kidAges(),
+          families: parseInt($('#families').value) || 1,
+          dep_start: $('#depStart').value,
+          dep_span: parseInt($('#depSpan').value) || 2,
+          ret_start: $('#retStart').value,
+          ret_span: parseInt($('#retSpan').value) || 2,
+          nonstop_threshold: parseFloat($('#thresh').value) || 25,
+        };
+        history.replaceState(null, '', '#s=' + encodeURIComponent(JSON.stringify(shareObj)));
+        $('#copyLink').disabled = false;
       }
     }
 
@@ -524,8 +542,43 @@ async function triggerExport(endpoint, defaultFilename, btnEl, loadingLabel) {
 $('#exportPdf').onclick = () => triggerExport('/api/export/pdf', 'whenever-matrix.pdf', $('#exportPdf'), 'Preparing PDF…');
 $('#exportCsv').onclick = () => triggerExport('/api/export/csv', 'whenever-matrix.csv', $('#exportCsv'), 'Preparing CSV…');
 
+$('#copyLink').onclick = () => {
+  navigator.clipboard.writeText(location.href).then(() => {
+    const btn = $('#copyLink');
+    const orig = btn.textContent;
+    btn.textContent = 'Copied!';
+    setTimeout(() => { btn.textContent = orig; }, 1500);
+  });
+};
+
+function restoreFromHash() {
+  const hash = location.hash;
+  if (!hash.startsWith('#s=')) return;
+  let obj;
+  try {
+    obj = JSON.parse(decodeURIComponent(hash.slice(3)));
+  } catch (_) { return; }
+  if ($('#depCity') && obj.depCity != null) $('#depCity').value = obj.depCity;
+  if ($('#depCode') && obj.depCode != null) $('#depCode').value = obj.depCode;
+  if ($('#country') && obj.country != null) $('#country').value = obj.country;
+  if ($('#adults') && obj.adults != null) $('#adults').value = obj.adults;
+  if ($('#families') && obj.families != null) $('#families').value = obj.families;
+  if ($('#depStart') && obj.dep_start != null) $('#depStart').value = obj.dep_start;
+  if ($('#depSpan') && obj.dep_span != null) $('#depSpan').value = obj.dep_span;
+  if ($('#retStart') && obj.ret_start != null) $('#retStart').value = obj.ret_start;
+  if ($('#retSpan') && obj.ret_span != null) $('#retSpan').value = obj.ret_span;
+  if ($('#thresh') && obj.nonstop_threshold != null) $('#thresh').value = obj.nonstop_threshold;
+  renderKids(obj.child_ages || []);
+  if (Array.isArray(obj.cities) && obj.cities.length > 0) {
+    CITIES = obj.cities.map(c => ({ city: c.city, iata: c.iata, on: true }));
+    drawChips();
+    $('#run').click();
+  }
+}
+
 renderKids([11,9]);
 health();
+restoreFromHash();
 </script>
 </body>
 </html>
