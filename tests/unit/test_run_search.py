@@ -236,6 +236,28 @@ def test_build_cell_nonstop_duration_none_does_not_borrow_connecting():
     assert cell["chosen_duration_min"] is None    # no borrowing from connecting fare
 
 
+def test_build_cell_chosen_stops_zero_for_nonstop():
+    """A nonstop-chosen cell (cheapest 1-stop, nonstop within threshold) has
+    chosen_stops == 0, while stops stays the cheapest itinerary's 1 (codex P2):
+    chosen_stops pairs with chosen_cad + chosen_duration_min."""
+    fare = _fake_fare(8000, stops=1, nonstop=8500,
+                      duration_min=875, nonstop_duration_min=600)
+    cell = appmod._build_cell("YYZ", "PVG", "2026-12-12", "2027-01-04", 2, [], fare, 0.25)
+    assert cell["chosen"] == "nonstop"
+    assert cell["stops"] == 1          # cheapest line keeps its stop count
+    assert cell["chosen_stops"] == 0   # a nonstop has 0 stops by definition
+    assert cell["chosen_duration_min"] == 600  # pairs with chosen_stops
+
+
+def test_build_cell_chosen_stops_equals_stops_for_cheapest():
+    """A cheapest-chosen cell has chosen_stops == stops (same itinerary)."""
+    fare = _fake_fare(8000, stops=2, duration_min=875)
+    cell = appmod._build_cell("YYZ", "PVG", "2026-12-12", "2027-01-04", 2, [], fare, 0.25)
+    assert cell["chosen"] == "cheapest"
+    assert cell["stops"] == 2
+    assert cell["chosen_stops"] == 2
+
+
 def test_run_search_best_carries_duration_min(monkeypatch):
     monkeypatch.setattr(appmod, "get_fare",
                         lambda *a, **k: _fake_fare(1000, duration_min=600))
@@ -257,7 +279,8 @@ def _result_with_best(duration_min):
     return [{
         "city": "Shanghai", "iata": "PVG",
         "best": {"chosen_cad": 8000, "dep": "2026-12-12", "ret": "2027-01-04",
-                 "chosen": "cheapest", "stops": 1, "duration_min": 99999,
+                 "chosen": "cheapest", "stops": 1, "chosen_stops": 1,
+                 "duration_min": 99999,
                  "chosen_duration_min": duration_min},
     }]
 
@@ -283,6 +306,25 @@ def test_build_recommendation_summary_includes_duration(monkeypatch):
     # prompt instructs the model to balance/avoid much-longer flights
     assert "duration" in p.lower()
     assert "2x" in p or "2×" in p
+
+
+def test_build_recommendation_summary_uses_chosen_stops(monkeypatch):
+    """The per-city bests summary pairs chosen_stops (not the cheapest itinerary's
+    stops) with chosen_duration_min/chosen_cad (codex P2)."""
+    captured = {}
+    monkeypatch.setattr(appmod, "ollama_chat",
+                        lambda prompt, *a, **k: captured.setdefault("prompt", prompt) or "ok")
+    # nonstop chosen: cheapest line has 3 stops, but chosen_stops is 0.
+    results = [{
+        "city": "Shanghai", "iata": "PVG",
+        "best": {"chosen_cad": 8000, "dep": "2026-12-12", "ret": "2027-01-04",
+                 "chosen": "nonstop", "stops": 3, "chosen_stops": 0,
+                 "duration_min": 99999, "chosen_duration_min": 600},
+    }]
+    appmod.build_recommendation("YYZ", results, 2, [], 1)
+    p = captured["prompt"]
+    assert '"stops": 0' in p          # chosen_stops surfaces, not the cheapest 3
+    assert '"stops": 3' not in p      # the connecting fare's count must NOT leak
 
 
 def test_build_recommendation_duration_none_in_summary(monkeypatch):

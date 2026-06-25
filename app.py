@@ -594,10 +594,16 @@ def _build_cell(origin, code, dep, ret, adults, child_ages, fare, threshold):
     duration_min = fare.get("duration_min")
     nonstop_duration_min = fare.get("nonstop_duration_min")
     chosen_duration_min = nonstop_duration_min if chosen == "nonstop" else duration_min
+    stops = fare.get("stops")
+    # chosen_stops pairs with chosen_cad + chosen_duration_min: a nonstop has 0 stops
+    # by definition, otherwise it's the cheapest itinerary's stop count (codex P2:
+    # never pair the nonstop's duration with the connecting fare's stop count).
+    chosen_stops = 0 if chosen == "nonstop" else stops
     return {
         "dep": dep, "ret": ret,
-        "cheapest_cad": cheap, "stops": fare.get("stops"),
+        "cheapest_cad": cheap, "stops": stops,
         "nonstop_cad": ns, "chosen": chosen, "chosen_cad": chosen_cad,
+        "chosen_stops": chosen_stops,
         "source": fare.get("source"),
         "duration_min": duration_min,
         "nonstop_duration_min": nonstop_duration_min,
@@ -864,6 +870,7 @@ def api_search_stream():
                     "dep": dep, "ret": ret,
                     "cheapest_cad": None, "stops": None, "nonstop_cad": None,
                     "chosen": "cheapest", "chosen_cad": None, "source": "no-data",
+                    "chosen_stops": None,
                     "duration_min": None, "nonstop_duration_min": None,
                     "chosen_duration_min": None,
                     "book": kayak_link(origin, code, dep, ret, adults, child_ages),
@@ -1126,7 +1133,7 @@ def build_recommendation(origin, results, adults, child_ages, families):
               "dep": r["best"]["dep"] if r["best"] else None,
               "ret": r["best"]["ret"] if r["best"] else None,
               "chosen": r["best"]["chosen"] if r["best"] else None,
-              "stops": r["best"]["stops"] if r["best"] else None,
+              "stops": r["best"].get("chosen_stops") if r["best"] else None,
               "duration_min": r["best"].get("chosen_duration_min") if r["best"] else None,
               "duration": _fmt_duration(r["best"].get("chosen_duration_min")) if r["best"] else None}
              for r in results]

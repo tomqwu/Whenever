@@ -422,7 +422,7 @@ $('#run').onclick = async () => {
             const metaEl = document.getElementById('card-meta-' + di);
             const groupEl = document.getElementById('card-group-' + di);
             if (priceEl) priceEl.textContent = money(evt.chosen_cad);
-            if (metaEl) metaEl.textContent = fmtDate(evt.dep) + ' → ' + fmtDate(evt.ret) + ' · ' + (evt.chosen === 'nonstop' ? 'nonstop' : evt.stops + ' stop(s)') + (evt.chosen_duration_min != null ? ' · ' + fmtDuration(evt.chosen_duration_min) : '');
+            if (metaEl) metaEl.textContent = fmtDate(evt.dep) + ' → ' + fmtDate(evt.ret) + ' · ' + (evt.chosen_stops === 0 ? 'nonstop' : evt.chosen_stops + ' stop(s)') + (evt.chosen_duration_min != null ? ' · ' + fmtDuration(evt.chosen_duration_min) : '');
             if (groupEl) groupEl.textContent = money(evt.chosen_cad * fams);
           }
         }
@@ -534,7 +534,7 @@ function render(data){
     const card=document.createElement('div'); card.className='card';
     card.innerHTML = `<div class="city">${escapeHtml(r.city)} <small>(${escapeHtml(r.iata)})</small></div>`+
       `<div class="price">${b?money(b.chosen_cad):'—'}</div>`+
-      `<div class="meta">${b?escapeHtml(fmtDate(b.dep))+' → '+escapeHtml(fmtDate(b.ret))+' · '+(b.chosen==='nonstop'?'nonstop':b.stops+' stop(s)')+(b.chosen_duration_min!=null?' · '+fmtDuration(b.chosen_duration_min):''):'no fares'}</div>`+
+      `<div class="meta">${b?escapeHtml(fmtDate(b.dep))+' → '+escapeHtml(fmtDate(b.ret))+' · '+(b.chosen_stops===0?'nonstop':b.chosen_stops+' stop(s)')+(b.chosen_duration_min!=null?' · '+fmtDuration(b.chosen_duration_min):''):'no fares'}</div>`+
       `<div class="meta">group ×${fams}: ${b?money(b.chosen_cad*fams):'—'}</div>`;
     sum.appendChild(card);
   });

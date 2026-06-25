@@ -13,7 +13,7 @@ _CSV_COLUMNS = [
     "city", "iata", "dep_date", "ret_date",
     "cheapest_cad", "stops", "duration_min",
     "nonstop_cad", "nonstop_duration_min",
-    "chosen", "chosen_cad", "chosen_duration_min", "source", "book",
+    "chosen", "chosen_cad", "chosen_stops", "chosen_duration_min", "source", "book",
 ]
 
 
@@ -34,6 +34,7 @@ def _cell_to_row(city, iata, cell):
         _s(cell.get("nonstop_duration_min")),
         _s(cell.get("chosen")),
         _s(cell.get("chosen_cad")),
+        _s(cell.get("chosen_stops")),
         _s(cell.get("chosen_duration_min")),
         _s(cell.get("source")),
         _s(cell.get("book")),
@@ -45,7 +46,7 @@ def render_csv(result: dict) -> str:
 
     Columns: city, iata, dep_date, ret_date, cheapest_cad, stops,
              duration_min, nonstop_cad, nonstop_duration_min, chosen,
-             chosen_cad, chosen_duration_min, source, book.
+             chosen_cad, chosen_stops, chosen_duration_min, source, book.
     One row per (city, dep_date, ret_date) grid cell.
     None/no-data cells render as empty strings and never crash.
     """
@@ -150,7 +151,7 @@ def render_pdf(result: dict) -> bytes:
             best_dep = best.get("dep", "") or ""
             best_ret = best.get("ret", "") or ""
             best_chosen = best.get("chosen", "") or ""
-            best_stops = best.get("stops")
+            best_stops = best.get("chosen_stops")
             stops_label = (
                 "nonstop" if best_stops == 0
                 else f"{best_stops} stop{'s' if best_stops != 1 else ''}"
@@ -208,7 +209,6 @@ def render_pdf(result: dict) -> bytes:
             pdf.cell(col_w, row_h, _pdf_safe(dep_label), border=1)
             for cell in r_row:
                 cheap = cell.get("cheapest_cad")
-                stops = cell.get("stops")
                 chosen = cell.get("chosen", "")
                 chosen_cad = cell.get("chosen_cad")
                 if cheap is None:
@@ -218,7 +218,7 @@ def render_pdf(result: dict) -> bytes:
                     # chosen fare's stops (0 when nonstop) and chosen_duration_min — never
                     # the connecting itinerary's duration (codex P2: no mixed itineraries).
                     ns_mark = "*" if chosen == "nonstop" else ""
-                    chosen_stops = 0 if chosen == "nonstop" else stops
+                    chosen_stops = cell.get("chosen_stops")
                     stops_s = str(chosen_stops) if chosen_stops is not None else "?"
                     dur = _fmt_dur(cell.get("chosen_duration_min"))
                     dur_s = f" {dur}" if dur else ""
