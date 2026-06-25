@@ -616,14 +616,22 @@ function restoreFromHash() {
   if (!obj || typeof obj !== 'object') return;
 
   const set = (id, val) => { if ($(id) && val !== undefined) $(id).value = val; };
+  // Validate the required auto-run fields once and reuse the results both to
+  // prefill the form and to decide whether the auto-run is safe. A crafted or
+  // truncated share link may carry a valid city but a missing origin/dates;
+  // in that case we still prefill whatever is valid but must NOT auto-run
+  // against the real flight APIs with page defaults left in place.
+  const depCode = _vIata(obj.depCode);
+  const depStart = _vDate(obj.dep_start);
+  const retStart = _vDate(obj.ret_start);
   set('#depCity', _vStr(obj.depCity, 80));
-  set('#depCode', _vIata(obj.depCode));
+  set('#depCode', depCode);
   set('#country', _vStr(obj.country, 80));
   set('#adults', _vNum(obj.adults, 1, 20));
   set('#families', _vNum(obj.families, 1, 50));
-  set('#depStart', _vDate(obj.dep_start));
+  set('#depStart', depStart);
   set('#depSpan', _vNum(obj.dep_span, 1, 14));
-  set('#retStart', _vDate(obj.ret_start));
+  set('#retStart', retStart);
   set('#retSpan', _vNum(obj.ret_span, 1, 14));
   set('#thresh', _vNum(obj.nonstop_threshold, 0, 500));
 
@@ -652,7 +660,13 @@ function restoreFromHash() {
     if (cities.length > 0) {
       CITIES = cities;
       drawChips();
-      $('#run').click();
+      // Only auto-run when every required search field validated: a valid
+      // origin (depCode), at least one valid city, and both start dates. If any
+      // is missing/invalid we leave the partially-prefilled form for the user
+      // to complete and run manually, rather than searching page defaults.
+      if (depCode !== undefined && depStart !== undefined && retStart !== undefined) {
+        $('#run').click();
+      }
     }
   }
 }

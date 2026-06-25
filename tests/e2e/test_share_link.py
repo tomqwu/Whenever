@@ -260,6 +260,75 @@ def test_share_hash_cities_capped_to_bound_auto_run(live_server, page):
     assert len(page.query_selector_all("#grids .cityblock")) <= 12
 
 
+def test_share_hash_missing_origin_prefills_but_does_not_autorun(live_server, page):
+    """A crafted/truncated share link with a VALID city but a MISSING/INVALID
+    origin (depCode) must NOT auto-run: the auto-run is gated on all required
+    fields (origin + >=1 city + both start dates). The valid fields are still
+    prefilled, but no search request is fired against the real flight APIs."""
+    import json, urllib.parse
+    # Record any hit to the search stream endpoint so we can prove none happened.
+    search_hits = []
+    page.on("request", lambda req: search_hits.append(req.url)
+            if "/api/search/stream" in req.url else None)
+    share = {
+        "depCity": "Toronto", "depCode": "bad-code", "country": "China",
+        "cities": [{"city": "Beijing", "iata": "PEK"}],
+        "adults": 2, "child_ages": [11, 9], "families": 3,
+        "dep_start": "2026-12-12", "dep_span": 2,
+        "ret_start": "2027-01-04", "ret_span": 2,
+        "nonstop_threshold": 25,
+    }
+    hash_val = "#s=" + urllib.parse.quote(json.dumps(share))
+    page.goto(live_server + "/" + hash_val)
+    # The valid city is still restored + prefilled.
+    page.wait_for_selector(".chip.on")
+    chip_texts = " ".join(el.inner_text() for el in page.query_selector_all(".chip.on"))
+    assert "Beijing" in chip_texts
+    # Valid fields prefilled: country + dates restored.
+    assert page.input_value("#country") == "China"
+    assert page.input_value("#depStart") == "2026-12-12"
+    assert page.input_value("#retStart") == "2027-01-04"
+    # Invalid origin dropped → default YYZ retained (NOT the crafted value).
+    assert page.input_value("#depCode") == "YYZ"
+    # Give any (wrongly) fired auto-run time to reach the network / render.
+    page.wait_for_timeout(700)
+    # No auto-run: results stay empty and no search request was made.
+    assert page.query_selector("#summary .card") is None
+    assert page.query_selector("#grids .cityblock") is None
+    assert search_hits == []
+
+
+def test_share_hash_invalid_dates_prefill_but_do_not_autorun(live_server, page):
+    """A share link with a valid origin + city but an INVALID/missing start date
+    must NOT auto-run (both start dates are required). Valid fields still
+    prefill; no search request is fired."""
+    import json, urllib.parse
+    search_hits = []
+    page.on("request", lambda req: search_hits.append(req.url)
+            if "/api/search/stream" in req.url else None)
+    share = {
+        "depCity": "Toronto", "depCode": "YYZ", "country": "China",
+        "cities": [{"city": "Beijing", "iata": "PEK"}],
+        "adults": 2, "child_ages": [], "families": 1,
+        "dep_start": "2026-13-99",  # impossible date → rejected by validator
+        "dep_span": 2,
+        # ret_start omitted entirely → also missing
+        "ret_span": 2,
+        "nonstop_threshold": 25,
+    }
+    hash_val = "#s=" + urllib.parse.quote(json.dumps(share))
+    page.goto(live_server + "/" + hash_val)
+    # Valid city + origin still prefilled.
+    page.wait_for_selector(".chip.on")
+    assert page.input_value("#depCode") == "YYZ"
+    chip_texts = " ".join(el.inner_text() for el in page.query_selector_all(".chip.on"))
+    assert "Beijing" in chip_texts
+    page.wait_for_timeout(700)
+    # No auto-run because the start dates did not validate.
+    assert page.query_selector("#summary .card") is None
+    assert search_hits == []
+
+
 def test_share_hash_city_xss_is_neutralized(live_server, page):
     """A crafted share link with an <img onerror> city must NOT execute."""
     import json, urllib.parse
