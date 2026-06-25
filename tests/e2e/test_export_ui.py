@@ -99,30 +99,24 @@ def test_export_button_stays_disabled_when_newer_search_invalidates_payload(
 ):
     """Race: export in flight, then a NEW search clears LAST_PAYLOAD.
 
-    The user clicks Export CSV, then — before the export request resolves —
+    The user starts an export, then — before the export request resolves —
     starts a new search. The search handler clears LAST_PAYLOAD and disables
     both export buttons. When the (old) export request finally completes, its
     `finally` must NOT unconditionally re-enable the button: because
     LAST_PAYLOAD is now null, the button must stay disabled (clicking it would
     silently no-op).
 
-    The overlap is made deterministic by delaying the export response (via a
-    route) until after the new search has started.
+    Determinism note: this models the race entirely inside the page (no route
+    handler held open across page actions, which deadlocks Playwright's sync
+    dispatcher). We launch the real export, then drive a real new search via
+    the production click handler before the export resolves. A forced-400 on
+    the stream means that new search clears LAST_PAYLOAD and never re-arms the
+    buttons, so the only thing that could re-enable the button is the export's
+    `finally` — which is exactly the guard under test.
     """
     _run_search(page, seed_live_server)
     assert page.get_attribute("#exportCsv", "disabled") is None
 
-    # Hold the export response open until we release it, so we can start a new
-    # search while the export is still in flight.
-    import threading
-
-    release = threading.Event()
-
-    def _delayed_export(route):
-        release.wait(10)
-        route.continue_()
-
-    page.route("**/api/export/csv", _delayed_export)
     # Force the new search's stream to fail so it never re-arms (emits `done`)
     # the buttons: LAST_PAYLOAD stays null for the duration of the assertion,
     # isolating the export `finally` behaviour under test.
@@ -136,24 +130,22 @@ def test_export_button_stays_disabled_when_newer_search_invalidates_payload(
     )
     page.on("dialog", lambda d: d.dismiss())  # dismiss any alert defensively
 
-    # Kick off the export (request now blocked on `release`).
-    page.click("#exportCsv")
-    # Button disabled immediately by triggerExport's own `btnEl.disabled = true`.
-    page.wait_for_selector("#exportCsv[disabled]", timeout=5000)
-
-    # Start a NEW search: this clears LAST_PAYLOAD and disables both buttons.
-    # (The forced-400 search never re-arms them.)
-    page.click("#run")
-    page.wait_for_function("LAST_PAYLOAD === null", timeout=15000)
-
-    # Now let the in-flight export complete.
-    release.set()
-
-    # Give the export's `finally` a chance to run, then assert the button is
-    # STILL disabled (because LAST_PAYLOAD was invalidated).
-    page.wait_for_function(
-        "document.querySelector('#exportCsv').textContent.indexOf('Preparing') === -1",
-        timeout=15000,
+    # Inside the page: start a real export (its try/finally executes against a
+    # real network round-trip), then immediately fire the production new-search
+    # click handler. The search synchronously clears LAST_PAYLOAD and disables
+    # the buttons before the export's awaited fetch resolves. We then await the
+    # export so its `finally` has definitely run by the time evaluate returns.
+    payload_when_done = page.evaluate(
+        """async () => {
+            const p = triggerExport('/api/export/csv', 'whenever-matrix.csv',
+                document.querySelector('#exportCsv'), 'Preparing CSV…');
+            document.querySelector('#run').click();  // real new search clears LAST_PAYLOAD
+            await p;
+            return LAST_PAYLOAD;
+        }"""
+    )
+    assert payload_when_done is None, (
+        "A new search should have cleared LAST_PAYLOAD before the export resolved"
     )
     assert page.get_attribute("#exportCsv", "disabled") is not None, (
         "Export CSV must stay disabled when a newer search cleared LAST_PAYLOAD"
