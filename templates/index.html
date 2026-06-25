@@ -269,9 +269,21 @@ async function expandCountry(country){
   if(!country) return;
   const seq = ++EXPAND_SEQ;   // this expansion's token (latest wins)
   try{
-    const r = await (await fetch('/api/top-cities',{method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({country, n:6})})).json();
+    const resp = await fetch('/api/top-cities',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({country, n:6})});
+    const r = await resp.json();
     if(seq !== EXPAND_SEQ) return;   // a newer expansion superseded us — drop this
+    // A non-OK response (e.g. 429 rate-limited, or an error JSON) must NOT REPLACE
+    // CITIES with (r.cities||[]) — that would silently wipe the user's destination
+    // chips on a transient rate limit. Surface the error and KEEP the current chips.
+    // (codex review)
+    if(!resp.ok || r.error){
+      const msg = resp.status === 429
+        ? (r.error || 'Rate limit exceeded — please slow down')
+        : (r.error || 'Could not load cities (HTTP '+resp.status+')');
+      alert(msg);
+      return;   // keep CITIES untouched
+    }
     CITIES = (r.cities||[]).map(c=>({...c,on:false}));
     drawChips();
   }catch(e){ if(seq === EXPAND_SEQ) alert('Could not load cities: '+e); }
