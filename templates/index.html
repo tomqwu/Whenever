@@ -369,8 +369,15 @@ async function fetchSuggest(q){
 
 sInput.addEventListener('input', ()=>{
   const q = sInput.value.trim();
-  if(SUGG_TIMER) clearTimeout(SUGG_TIMER);
-  if(!q){ closeSuggest(); return; }
+  // The query just CHANGED, so the currently-shown SUGGESTIONS are stale: clear and
+  // hide them NOW (and bump SUGGEST_SEQ to invalidate any in-flight response) so that
+  // during the 200ms debounce + fetch window an ArrowDown/Enter or click can't pick an
+  // OLD result for the new text (type 'chi', replace with 'hnd', quick-select → must
+  // not yield China). closeSuggest() cancels the timer, empties SUGGESTIONS, hides the
+  // list, and ++SUGGEST_SEQ — exactly what we need before scheduling the fresh fetch.
+  // (codex review)
+  closeSuggest();
+  if(!q){ return; }
   SUGG_TIMER = setTimeout(()=>fetchSuggest(q), 200);  // ~200ms debounce
 });
 

@@ -191,6 +191,67 @@ def test_fresh_response_still_renders(seed_live_server, page):
     assert page.is_visible("#suggestList")
 
 
+# --------------------------- stale suggestions cleared on query change (codex review) ---------------------------
+
+def test_changing_query_clears_old_suggestions_before_new_arrive(seed_live_server, page):
+    """When the dropdown is OPEN for one query and the user changes the input to
+    ANOTHER non-empty query, the PREVIOUS suggestions must vanish immediately — they
+    must not stay selectable during the 200ms debounce + fetch window. Otherwise
+    typing 'chi', replacing with 'hnd', and quick-selecting yields China not HND.
+
+    Browser-side + deterministic: we manually seed SUGGESTIONS + render an open
+    dropdown (as a completed 'chi' fetch would), then drive the REAL 'input' handler
+    for the new 'hnd' text and assert — BEFORE any new response — the list is hidden,
+    SUGGESTIONS is empty, the SEQ was bumped (invalidating any in-flight response),
+    and pressing Enter does NOT pick the old top result.
+    """
+    page.goto(seed_live_server)
+    result = page.evaluate(
+        """() => {
+            sInput.focus();
+            // Simulate a completed 'chi' fetch: China is the open dropdown's top item.
+            sInput.value = 'chi';
+            SUGGESTIONS = [{type:'country', name:'China'}];
+            SUGG_ACTIVE = 0;            // China highlighted, Enter would pick it
+            renderSuggest();
+            const openBefore = getComputedStyle(sList).display !== 'none';
+            const seqBefore = SUGGEST_SEQ;
+            const chipsBefore = CITIES.length;
+            // User replaces the text with a DIFFERENT non-empty query.
+            sInput.value = 'hnd';
+            sInput.dispatchEvent(new Event('input'));   // the real input handler
+            // In the debounce window BEFORE new results, the old list must be gone.
+            const hiddenAfter = getComputedStyle(sList).display === 'none';
+            const cleared = SUGGESTIONS.length === 0;
+            const seqBumped = SUGGEST_SEQ > seqBefore;
+            // Enter now must be a no-op (no stale China pick).
+            sInput.dispatchEvent(new KeyboardEvent('keydown', {key:'Enter', bubbles:true}));
+            const noStalePick = CITIES.length === chipsBefore;
+            return { openBefore, hiddenAfter, cleared, seqBumped, noStalePick };
+        }"""
+    )
+    assert result["openBefore"] is True, "precondition: dropdown should be open for 'chi'"
+    assert result["hiddenAfter"] is True, "old suggestions must hide on query change"
+    assert result["cleared"] is True, "SUGGESTIONS must be emptied on query change"
+    assert result["seqBumped"] is True, "SUGGEST_SEQ must be bumped to drop in-flight responses"
+    assert result["noStalePick"] is True, "Enter must not pick a stale suggestion after query change"
+
+
+def test_new_query_results_still_render_after_change(seed_live_server, page):
+    """Regression: after the stale list is cleared on a query change, the FRESH
+    query's results still render normally once the debounce + fetch complete."""
+    page.goto(seed_live_server)
+    page.fill("#country", "")
+    page.type("#country", "chi")
+    page.wait_for_selector("#suggestList li")
+    # Replace with a different query; the real input handler clears the old list.
+    page.fill("#country", "")
+    page.type("#country", "hnd")
+    page.wait_for_selector("#suggestList li:has-text('HND')")
+    assert page.is_visible("#suggestList")
+    assert "HND" in page.inner_text("#suggestList")
+
+
 # --------------------------- debounce cancelled on close (codex review) ---------------------------
 
 def test_escape_before_debounce_does_not_reopen(seed_live_server, page):
