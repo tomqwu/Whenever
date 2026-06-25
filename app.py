@@ -14,6 +14,7 @@ import yaml
 from dotenv import load_dotenv
 from flask import Flask, request, jsonify, render_template, Response, stream_with_context
 import export
+import watch
 
 load_dotenv()  # load .env if present; real shell env vars take precedence (override=False default)
 
@@ -713,6 +714,7 @@ def api_search_stream():
             "adults": adults,
             "child_ages": child_ages,
             "families": families,
+            "nonstop_threshold": threshold_pct,
             "dep_dates": dep_dates,
             "ret_dates": ret_dates,
             "providers": providers_configured(),
@@ -817,6 +819,85 @@ def api_export_pdf():
         mimetype="application/pdf",
         headers={"Content-Disposition": 'attachment; filename="whenever-matrix.pdf"'},
     )
+
+# --------------------------- price watches ------------------------
+def _watch_db():
+    """Open a fresh WatchDB for the current request.
+
+    A new sqlite connection is opened (and closed) per request to avoid reusing
+    a single connection across Flask's worker threads. The path is resolved the
+    same way scheduler.py does: WATCH_DB env, else whenever_watches.db.
+    """
+    return watch.WatchDB(os.environ.get("WATCH_DB") or "whenever_watches.db")
+
+
+def _watch_to_json(row):
+    """Project a watch row dict to a JSON-friendly subset for the UI."""
+    return {
+        "id": row.get("id"),
+        "origin": row.get("origin"),
+        "dest_iata": row.get("dest_iata"),
+        "dest_city": row.get("dest_city"),
+        "dep_date": row.get("dep_date"),
+        "ret_date": row.get("ret_date"),
+        "adults": row.get("adults"),
+        "child_ages": row.get("child_ages") or [],
+        "threshold_pct": row.get("threshold_pct"),
+        "last_price": row.get("last_price"),
+        "last_source": row.get("last_source"),
+    }
+
+
+@app.route("/api/watch", methods=["POST"])
+def api_watch_add():
+    b = request.get_json(force=True)
+    origin = (b.get("origin") or "").strip().upper()
+    dest_iata = (b.get("dest_iata") or "").strip().upper()
+    dep_date = (b.get("dep_date") or "").strip()
+    ret_date = (b.get("ret_date") or "").strip()
+    if not origin or not dest_iata or not dep_date or not ret_date:
+        return jsonify({"error": "origin, dest_iata, dep_date and ret_date required"}), 400
+
+    dest_city = b.get("dest_city")
+    adults = int(b.get("adults", 2))
+    child_ages = [int(a) for a in (b.get("child_ages") or [])]
+    threshold_pct = float(b.get("threshold_pct", 25.0))
+    # last_price seeds the baseline so the scheduler's first run can detect a drop.
+    last_price = b.get("last_price")
+    last_source = b.get("last_source")
+
+    db = _watch_db()
+    try:
+        watch_id = db.add_watch(
+            origin=origin, dest_iata=dest_iata, dest_city=dest_city,
+            dep_date=dep_date, ret_date=ret_date, adults=adults,
+            child_ages=child_ages, threshold_pct=threshold_pct,
+            last_price=last_price, last_source=last_source,
+        )
+    finally:
+        db.close()
+    return jsonify({"id": watch_id, "ok": True})
+
+
+@app.route("/api/watch", methods=["GET"])
+def api_watch_list():
+    db = _watch_db()
+    try:
+        rows = db.list_watches()
+    finally:
+        db.close()
+    return jsonify({"watches": [_watch_to_json(r) for r in rows]})
+
+
+@app.route("/api/watch/<int:watch_id>", methods=["DELETE"])
+def api_watch_remove(watch_id):
+    db = _watch_db()
+    try:
+        db.remove_watch(watch_id)
+    finally:
+        db.close()
+    return jsonify({"ok": True})
+
 
 def build_recommendation(origin, results, adults, child_ages, families):
     bests = [{"city": r["city"], "iata": r["iata"],

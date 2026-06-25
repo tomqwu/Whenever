@@ -1,7 +1,19 @@
 import threading
+import os
 import pytest
 from werkzeug.serving import make_server
 import app as appmod
+
+
+@pytest.fixture(autouse=True)
+def _watch_db_tmp(monkeypatch, tmp_path):
+    """Point the watch DB at a throwaway temp file for EVERY e2e test.
+
+    Any page load fires GET /api/watch (the "Watched trips" list), which opens
+    the WATCH_DB SQLite file; without this the default whenever_watches.db would
+    be created in the repo. tmp_path is auto-cleaned by pytest, so nothing leaks.
+    """
+    monkeypatch.setenv("WATCH_DB", str(tmp_path / "watches.db"))
 
 
 def _patch_common(monkeypatch):

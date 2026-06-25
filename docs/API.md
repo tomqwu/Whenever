@@ -127,3 +127,67 @@ The `dest_index` field maps each cell back to the correct city in `meta.results`
 | Status | Condition |
 |--------|-----------|
 | 400 | Same validation as `/api/search`: missing/empty `origin`, `destinations`, or dates |
+
+---
+
+## Price watches
+
+Save a trip so the standalone scheduler (`python scheduler.py`, run via cron) can
+re-price it and alert on drops. Watches are stored in the SQLite DB at `WATCH_DB`
+(default `whenever_watches.db`).
+
+### `POST /api/watch`
+
+Save a trip to watch. `last_price`/`last_source` seed the baseline so the
+scheduler's first run can already detect a drop.
+
+**Body**
+```json
+{
+  "origin": "YYZ",
+  "dest_iata": "PVG",
+  "dest_city": "Shanghai",
+  "dep_date": "2026-12-12",
+  "ret_date": "2027-01-04",
+  "adults": 2,
+  "child_ages": [11, 9],
+  "threshold_pct": 25.0,
+  "last_price": 8000,
+  "last_source": "travelpayouts"
+}
+```
+
+`origin`, `dest_iata`, `dep_date`, `ret_date` are **required**; the rest are
+optional (`adults` defaults to 2, `threshold_pct` to 25.0).
+
+**Response** `{ "id": 1, "ok": true }`
+
+**Errors**
+
+| Status | Condition |
+|--------|-----------|
+| 400 | Missing/empty `origin`, `dest_iata`, `dep_date`, or `ret_date` |
+
+---
+
+### `GET /api/watch`
+
+List saved (active) watches.
+
+**Response**
+```json
+{ "watches": [ {
+  "id": 1, "origin": "YYZ", "dest_iata": "PVG", "dest_city": "Shanghai",
+  "dep_date": "2026-12-12", "ret_date": "2027-01-04", "adults": 2,
+  "child_ages": [11, 9], "threshold_pct": 25.0,
+  "last_price": 8000, "last_source": "travelpayouts"
+} ] }
+```
+
+---
+
+### `DELETE /api/watch/<id>`
+
+Remove (deactivate) a watch by id.
+
+**Response** `{ "ok": true }`

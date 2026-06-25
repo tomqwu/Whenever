@@ -57,6 +57,15 @@ td.best{outline:2px solid var(--accent);outline-offset:-2px}
 td.err{color:#b94a48;font-size:11px}
 .foot{font-size:12px;color:var(--mut);margin-top:6px}
 .estimate-flag{display:inline-block;font-size:11px;background:#fff3cd;border:1px solid #f0e0a0;color:#7a5b00;border-radius:5px;padding:1px 7px;margin-left:8px}
+button.watch{margin-top:8px;padding:4px 10px;font-size:12px;font-weight:600;background:#fff;color:#8a4b16;border-color:var(--accent)}
+button.watch.watched{background:#e9f3e9;color:#2f7d32;border-color:#bcdcbc;cursor:default}
+.watched-panel h3{margin:0 0 8px;font-size:14px;color:#8a4b16;text-transform:uppercase;letter-spacing:.04em}
+.watched-list{display:flex;flex-direction:column;gap:6px}
+.watched-item{display:flex;align-items:center;gap:10px;border:1px solid var(--line);border-radius:9px;padding:7px 11px;background:#fff;font-size:13px}
+.watched-item .trip{flex:1}
+.watched-item .wprice{font-weight:700;color:#1456b0}
+.watched-item button.rm{padding:2px 9px;font-size:13px;background:#fff;color:#b94a48;border-color:#e0c4c4}
+.watched-empty{font-size:12px;color:var(--mut)}
 </style>
 </head>
 <body>
@@ -117,6 +126,11 @@ td.err{color:#b94a48;font-size:11px}
   <div class="summary" id="summary"></div>
   <div id="grids"></div>
   <div class="foot" id="foot"></div>
+
+  <div class="panel watched-panel" id="watchedPanel" style="margin-top:24px">
+    <h3>Watched trips</h3>
+    <div class="watched-list" id="watchedList"></div>
+  </div>
 </div>
 
 <script>
@@ -341,7 +355,8 @@ $('#run').onclick = async () => {
           card.innerHTML = '<div class="city">' + escapeHtml(r.city) + ' <small>(' + escapeHtml(r.iata) + ')</small></div>' +
             '<div class="price" id="card-price-' + di + '">…</div>' +
             '<div class="meta" id="card-meta-' + di + '">searching…</div>' +
-            '<div class="meta">group ×' + fams + ': <span id="card-group-' + di + '">…</span></div>';
+            '<div class="meta">group ×' + fams + ': <span id="card-group-' + di + '">…</span></div>' +
+            '<button class="watch" id="card-watch-' + di + '" style="display:none">☆ Watch</button>';
           sum.appendChild(card);
 
           // Grid table skeleton
@@ -419,6 +434,7 @@ $('#run').onclick = async () => {
 
       } else if (evt.type === 'done') {
         finalizeStream();
+        wireWatchButtons(metaInfo, bestByCityIdx);
         succeeded = true;
         $('#prog').style.width = '100%';
         setTimeout(() => { $('#prog').style.width = '0%'; }, 600);
@@ -586,6 +602,105 @@ $('#copyLink').onclick = () => {
   });
 };
 
+// --------------------------- price watches ------------------------
+// markWatched: flip a Watch button into its disabled "Watching ✓" state.
+function markWatched(btn) {
+  btn.classList.add('watched');
+  btn.disabled = true;
+  btn.textContent = 'Watching ✓';
+}
+
+// wireWatchButtons: after a search completes, reveal + wire a Watch button on
+// every city card that has a priced best cell. Clicking POSTs that city's best
+// trip to /api/watch (last_price seeds the scheduler baseline) and flips the
+// button to a watched state. Cities without a best stay without a button.
+function wireWatchButtons(metaInfo, bestByCityIdx) {
+  if (!metaInfo) return;
+  metaInfo.results.forEach((r, di) => {
+    const btn = document.getElementById('card-watch-' + di);
+    if (!btn) return;
+    const best = bestByCityIdx[di];
+    if (!best) return;  // only cities with a priced best can be watched
+    btn.style.display = '';
+    btn.onclick = async () => {
+      const body = {
+        origin: (metaInfo.origin || '').toUpperCase(),
+        dest_iata: r.iata,
+        dest_city: r.city,
+        dep_date: best.dep,
+        ret_date: best.ret,
+        adults: metaInfo.adults,
+        child_ages: metaInfo.child_ages || [],
+        threshold_pct: metaInfo.nonstop_threshold,
+        last_price: best.chosen_cad,
+        last_source: best.source,
+      };
+      btn.disabled = true;
+      try {
+        const resp = await fetch('/api/watch', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        if (!resp.ok) {
+          let msg = 'Could not save watch (' + resp.status + ')';
+          try { const e = await resp.json(); if (e.error) msg = e.error; } catch (_) {}
+          alert(msg);
+          btn.disabled = false;
+          return;
+        }
+        markWatched(btn);
+        loadWatches();  // refresh the Watched trips list
+      } catch (e) {
+        alert('Could not save watch: ' + e);
+        btn.disabled = false;
+      }
+    };
+  });
+}
+
+// loadWatches: fetch saved watches and render the "Watched trips" list, each
+// with a ✕ remove button that DELETEs the watch. All values are escapeHtml'd.
+async function loadWatches() {
+  const box = $('#watchedList');
+  if (!box) return;
+  let watches = [];
+  try {
+    const r = await fetch('/api/watch');
+    if (!r.ok) return;
+    watches = (await r.json()).watches || [];
+  } catch (e) { return; }
+  box.innerHTML = '';
+  if (!watches.length) {
+    const empty = document.createElement('div');
+    empty.className = 'watched-empty';
+    empty.textContent = 'No watched trips yet. Run a search and tap ☆ Watch on a city.';
+    box.appendChild(empty);
+    return;
+  }
+  watches.forEach(w => {
+    const item = document.createElement('div');
+    item.className = 'watched-item';
+    const price = (w.last_price != null) ? money(w.last_price) : '—';
+    item.innerHTML =
+      '<span class="trip">' + escapeHtml(w.origin) + ' → ' +
+        escapeHtml(w.dest_city || w.dest_iata) + ' <small>(' + escapeHtml(w.dest_iata) + ')</small> · ' +
+        escapeHtml(w.dep_date) + ' → ' + escapeHtml(w.ret_date) + '</span>' +
+      '<span class="wprice">' + price + '</span>' +
+      '<button class="rm sec" data-id="' + escapeHtml(w.id) + '">✕</button>';
+    const rm = item.querySelector('button.rm');
+    rm.onclick = async () => {
+      rm.disabled = true;
+      try {
+        const resp = await fetch('/api/watch/' + encodeURIComponent(w.id), { method: 'DELETE' });
+        if (!resp.ok) { rm.disabled = false; return; }
+        loadWatches();
+      } catch (e) { rm.disabled = false; }
+    };
+    box.appendChild(item);
+  });
+}
+
 // Schema helpers for restoreFromHash: defense-in-depth coercion of a
 // URL-controlled share payload. Each returns a sanitized value or undefined
 // when the input is malformed; callers skip undefined fields.
@@ -693,6 +808,7 @@ function restoreFromHash() {
 
 renderKids([11,9]);
 health();
+loadWatches();
 restoreFromHash();
 // In-page shared links: when an already-open app navigates to a URL that differs
 // only in the #s= fragment, the browser does a same-document hash navigation with
