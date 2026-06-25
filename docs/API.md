@@ -10,7 +10,7 @@ Reports backend readiness.
 
 **Response**
 ```json
-{ "ollama": true, "model": "deepseek-v4pro", "providers": ["travelpayouts"] }
+{ "ollama": true, "model": "qwen3:8b", "providers": ["travelpayouts"] }
 ```
 
 ---

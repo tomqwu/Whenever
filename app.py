@@ -3,7 +3,7 @@
 Whenever - flexible-trip best-value flight finder.
 
 Smart features (top-cities expansion, best-value recommendation) run on a local
-LLM via Ollama (default model: deepseek-v4pro). Fares come from Amadeus if
+LLM via Ollama (default model: qwen3:8b). Fares come from Amadeus if
 credentials are set, otherwise from clearly-labeled AI estimates. Every price
 deep-links to a real Kayak search for booking.
 """
@@ -179,7 +179,7 @@ def suggest_destinations(q, limit=10):
 
 # ----------------------------- config -----------------------------
 OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
-OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "deepseek-v4pro")
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "qwen3:8b")
 OLLAMA_API_KEY = os.environ.get("OLLAMA_API_KEY")
 AMADEUS_ID = os.environ.get("AMADEUS_CLIENT_ID")
 AMADEUS_SECRET = os.environ.get("AMADEUS_CLIENT_SECRET")

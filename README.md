@@ -43,7 +43,7 @@ cd Whenever
    ollama serve            # if not already running
    ollama list             # confirm your model name
    ```
-   This app defaults to model `deepseek-v4pro`. Override with `OLLAMA_MODEL` if your tag differs.
+   This app defaults to model `qwen3:8b`. Override with `OLLAMA_MODEL` if your tag differs.
 
 ## Setup & run
 
@@ -53,7 +53,7 @@ python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
 export OLLAMA_HOST=http://localhost:11434
-export OLLAMA_MODEL=deepseek-v4pro       # match `ollama list`
+export OLLAMA_MODEL=qwen3:8b             # match `ollama list`
 
 # --- a flight API is REQUIRED for pricing (pick one or both) ---
 export TRAVELPAYOUTS_TOKEN=...           # easiest: free token, real cached fares + booking links
