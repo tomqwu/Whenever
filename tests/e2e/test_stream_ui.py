@@ -1,7 +1,6 @@
 """E2E tests for /api/search/stream: drive the browser through a live-server
 streaming search and assert progressive rendering produces the correct final state."""
 
-import json
 import pytest
 
 
@@ -30,7 +29,7 @@ def test_streaming_search_full_flow(seed_live_server, page):
         f"Expected a China city in #summary, got: {summary_text!r}"
 
     # Grid table(s) must be present
-    assert page.query_selector("table") is not None, "Expected at least one grid table"
+    page.wait_for_selector("table")
 
     # At least one cell should show a price (not the placeholder "…")
     # The mock fare is cheapest_cad=8000 → renders as "$8,000"
@@ -65,6 +64,13 @@ def test_streaming_search_progress_bar(seed_live_server, page):
     page.click("#loadCities")
     page.wait_for_selector(".chip")
     page.click("#run")
+
+    # Assert bar goes non-zero DURING the search
+    page.wait_for_function(
+        "() => { const el = document.querySelector('#prog'); "
+        "return el && el.style.width && el.style.width !== '0%'; }",
+        timeout=15000,
+    )
 
     # Wait for stream to complete
     page.wait_for_selector("#rec", state="visible", timeout=15000)
