@@ -124,6 +124,7 @@ const $ = s => document.querySelector(s);
 let CITIES = [];   // [{city,iata,on}]
 let LAST = null;
 let LAST_PAYLOAD = null;  // last submitted search payload, used by export buttons
+let SHARE_SNAPSHOT = null;  // immutable share state captured at search start, written to the URL hash on `done`
 
 function fmtDate(iso){
   const d = new Date(iso+'T00:00:00');
@@ -247,6 +248,24 @@ $('#run').onclick = async () => {
     families: fams,
     dep_start: $('#depStart').value, dep_span: parseInt($('#depSpan').value) || 2,
     ret_start: $('#retStart').value, ret_span: parseInt($('#retSpan').value) || 2,
+    nonstop_threshold: parseFloat($('#thresh').value) || 25,
+  };
+  // Snapshot the share state NOW, at search start, from the current DOM/CITIES.
+  // The results being streamed correspond to this submitted request, so the
+  // Copy-link hash must encode this exact state even if the user edits the form
+  // or toggles chips mid-stream. Written to the URL hash on `done` (never re-read).
+  SHARE_SNAPSHOT = {
+    depCity: $('#depCity').value.trim(),
+    depCode: $('#depCode').value.trim().toUpperCase(),
+    country: $('#country').value.trim(),
+    cities: dests.map(c => ({ city: c.city, iata: c.iata })),
+    adults: parseInt($('#adults').value) || 1,
+    child_ages: kidAges(),
+    families: fams,
+    dep_start: $('#depStart').value,
+    dep_span: parseInt($('#depSpan').value) || 2,
+    ret_start: $('#retStart').value,
+    ret_span: parseInt($('#retSpan').value) || 2,
     nonstop_threshold: parseFloat($('#thresh').value) || 25,
   };
   // Clear any stale export state: a new search invalidates the previous result.
@@ -395,22 +414,10 @@ $('#run').onclick = async () => {
         LAST_PAYLOAD = payload;
         $('#exportPdf').disabled = false;
         $('#exportCsv').disabled = false;
-        // Write share state to URL hash.
-        const shareObj = {
-          depCity: $('#depCity').value.trim(),
-          depCode: $('#depCode').value.trim().toUpperCase(),
-          country: $('#country').value.trim(),
-          cities: CITIES.filter(c => c.on).map(c => ({ city: c.city, iata: c.iata })),
-          adults: parseInt($('#adults').value) || 1,
-          child_ages: kidAges(),
-          families: parseInt($('#families').value) || 1,
-          dep_start: $('#depStart').value,
-          dep_span: parseInt($('#depSpan').value) || 2,
-          ret_start: $('#retStart').value,
-          ret_span: parseInt($('#retSpan').value) || 2,
-          nonstop_threshold: parseFloat($('#thresh').value) || 25,
-        };
-        history.replaceState(null, '', '#s=' + encodeURIComponent(JSON.stringify(shareObj)));
+        // Write share state to the URL hash from the immutable snapshot captured
+        // at search start — never re-read the live DOM/CITIES here, or an edit
+        // made mid-stream would encode a search different from the results shown.
+        history.replaceState(null, '', '#s=' + encodeURIComponent(JSON.stringify(SHARE_SNAPSHOT)));
         $('#copyLink').disabled = false;
       }
     }

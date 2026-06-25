@@ -102,6 +102,39 @@ def test_copy_link_disabled_until_new_search_done(live_server, page):
     assert not page.is_disabled("#copyLink")
 
 
+def test_share_hash_snapshots_search_start_not_edited_form(live_server, page):
+    """The share hash must encode the search that was SUBMITTED (and whose
+    results are displayed), not the live form. Editing a field while the search
+    streams must NOT change the hash written on `done`. Regression: the hash was
+    built at `done` from the mutable DOM/CITIES, so a mid-stream edit encoded a
+    different search than the results shown."""
+    import json, urllib.parse
+    page.goto(live_server)
+    page.click("#loadCities")
+    page.wait_for_selector(".chip")
+    # Submit the search with the default origin/country (YYZ / China).
+    page.click("#run")
+    # Mutate the form AFTER submitting, while/after the search streams. These
+    # edits must NOT leak into the share hash.
+    page.fill("#depCode", "LHR")
+    page.fill("#country", "Japan")
+    page.fill("#depCity", "London")
+    # Wait for the done-driven state (Copy-link enabled) before reading the hash.
+    page.wait_for_selector("#summary .card")
+    page.wait_for_selector("#copyLink:not([disabled])")
+    assert "#s=" in page.url
+    # Decode the hash and confirm it reflects the ORIGINAL submitted values, not
+    # the post-submit edits.
+    encoded = page.url.split("#s=", 1)[1]
+    share = json.loads(urllib.parse.unquote(encoded))
+    assert share["depCode"] == "YYZ"
+    assert share["country"] == "China"
+    assert share["depCity"] == "Toronto"
+    # The submitted cities (from CITIES at search start) are encoded, not anything
+    # the edited form might imply.
+    assert share["cities"] == [{"city": "Shanghai", "iata": "PVG"}]
+
+
 def test_malformed_hash_loads_default_form(live_server, page):
     page.goto(live_server + "/#s=not-json")
     page.wait_for_timeout(500)
