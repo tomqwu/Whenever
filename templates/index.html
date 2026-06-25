@@ -233,7 +233,12 @@ $('#run').onclick = async () => {
     ret_start: $('#retStart').value, ret_span: parseInt($('#retSpan').value) || 2,
     nonstop_threshold: parseFloat($('#thresh').value) || 25,
   };
-  LAST_PAYLOAD = payload;  // capture for export buttons
+  // Clear any stale export state: a new search invalidates the previous result.
+  // LAST_PAYLOAD/export buttons are only re-armed on the `done` event below, so
+  // if this search 400s/aborts/throws the buttons stay disabled.
+  LAST_PAYLOAD = null;
+  $('#exportPdf').disabled = true;
+  $('#exportCsv').disabled = true;
   $('#run').disabled = true;
   $('#runHint').textContent = 'Searching ' + dests.length + ' cities…';
   $('#prog').style.width = '5%';
@@ -369,6 +374,8 @@ $('#run').onclick = async () => {
         succeeded = true;
         $('#prog').style.width = '100%';
         setTimeout(() => { $('#prog').style.width = '0%'; }, 600);
+        // Search completed cleanly: arm the export buttons with this payload.
+        LAST_PAYLOAD = payload;
         $('#exportPdf').disabled = false;
         $('#exportCsv').disabled = false;
       }
