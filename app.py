@@ -275,6 +275,7 @@ def amadeus_fare(origin, dest, dep, ret, adults, children):
         "nonstop_cad": round(float(ns["price"]["grandTotal"])) if ns else None,
         "source": "amadeus",
         "duration_min": duration(cheapest),
+        "nonstop_duration_min": duration(ns) if ns else None,
     }
 
 def travelpayouts_fare(origin, dest, dep, ret, adults, children):
@@ -325,6 +326,7 @@ def travelpayouts_fare(origin, dest, dep, ret, adults, children):
         "source": "travelpayouts",
         "book": book,
         "duration_min": duration(cheapest),
+        "nonstop_duration_min": duration(ns) if ns else None,
     }
 
 def kiwi_fare(origin, dest, dep, ret, adults, children):
@@ -412,6 +414,7 @@ def kiwi_fare(origin, dest, dep, ret, adults, children):
         "source": "kiwi",
         "book": cheapest[3],
         "duration_min": cheapest[4],
+        "nonstop_duration_min": ns[4] if ns else None,
     }
 
 
@@ -457,15 +460,17 @@ def serpapi_fare(origin, dest, dep, ret, adults, children):
         # describes only the outbound choice (Google's first-screen view). This is a
         # reasonable display approximation.
         stops = len(cheapest.get("layovers") or [])
-        # total_duration (minutes) of the chosen cheapest entry; None if absent/unparseable.
-        td = cheapest.get("total_duration")
-        duration_min = int(round(float(td))) if isinstance(td, (int, float)) else None
     except Exception:
         return None
     # SerpApi's round-trip response only describes the outbound leg, so we cannot
     # confirm a true round-trip nonstop without an extra departure_token request;
     # to avoid mislabeling we don't claim nonstop for this provider.
     nonstop_cad = None
+    # SerpApi's single-call round-trip response is outbound-only, so total round-trip
+    # duration is not available (matching its nonstop_cad=None contract); a future
+    # return-leg fetch (departure_token) could populate it.
+    duration_min = None
+    nonstop_duration_min = None
     return {
         "cheapest_cad": cheapest_cad,
         "stops": stops,
@@ -473,6 +478,7 @@ def serpapi_fare(origin, dest, dep, ret, adults, children):
         "source": "serpapi",
         "book": None,
         "duration_min": duration_min,
+        "nonstop_duration_min": nonstop_duration_min,
     }
 
 
@@ -579,12 +585,19 @@ def _build_cell(origin, code, dep, ret, adults, child_ages, fare, threshold):
     chosen_cad = cheap
     if ns and cheap and ns <= cheap * (1 + threshold):
         chosen, chosen_cad = "nonstop", ns
+    # duration_min must correspond to the CHOSEN fare: the nonstop itinerary's
+    # duration when we picked nonstop, else the cheapest itinerary's. Carries None
+    # (no fabrication) when the chosen itinerary's duration is unavailable.
+    if chosen == "nonstop":
+        duration_min = fare.get("nonstop_duration_min")
+    else:
+        duration_min = fare.get("duration_min")
     return {
         "dep": dep, "ret": ret,
         "cheapest_cad": cheap, "stops": fare.get("stops"),
         "nonstop_cad": ns, "chosen": chosen, "chosen_cad": chosen_cad,
         "source": fare.get("source"),
-        "duration_min": fare.get("duration_min"),
+        "duration_min": duration_min,
         "book": fare.get("book") or kayak_link(origin, code, dep, ret, adults, child_ages),
     }
 

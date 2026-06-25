@@ -79,8 +79,13 @@ You may instead pass explicit `dep_dates` / `ret_dates` arrays.
 }
 ```
 
-`duration_min` is the total round-trip flight time in minutes for the chosen fare,
-or `null` when the provider does not supply a duration (never fabricated).
+`duration_min` is the total round-trip flight time in minutes for the **chosen**
+fare: when the nonstop is chosen (within the premium threshold) it reflects the
+nonstop itinerary, otherwise the cheapest (connecting) one. It is `null` when the
+chosen itinerary's duration is unavailable (never fabricated, never the connecting
+duration when the nonstop is chosen). For SerpApi `duration_min` is always `null`:
+its single-call round-trip response is outbound-only (matching `nonstop_cad=null`),
+so the round-trip duration cannot be derived.
 
 Cells with no API result have `"cheapest_cad": null, "source": "no-data"`.
 

@@ -6,7 +6,8 @@ DEST_PVG = {"city": "Shanghai", "iata": "PVG"}
 DEST_XXX = {"city": "NoWhere", "iata": "XXX"}
 
 
-def _fake_fare(cheapest, stops=1, nonstop=None, source="test", book=None, duration_min=None):
+def _fake_fare(cheapest, stops=1, nonstop=None, source="test", book=None,
+               duration_min=None, nonstop_duration_min=None):
     return {
         "cheapest_cad": cheapest,
         "stops": stops,
@@ -14,6 +15,7 @@ def _fake_fare(cheapest, stops=1, nonstop=None, source="test", book=None, durati
         "source": source,
         "book": book,
         "duration_min": duration_min,
+        "nonstop_duration_min": nonstop_duration_min,
     }
 
 
@@ -184,9 +186,10 @@ def test_run_search_result_preserves_city_and_iata(monkeypatch):
 # duration_min carries from the fare → cell → best (#53)
 # ---------------------------------------------------------------------------
 def test_build_cell_includes_duration_min():
-    """_build_cell copies duration_min from the fare into the cell dict."""
+    """_build_cell copies the CHEAPEST itinerary's duration_min when chosen=cheapest."""
     fare = _fake_fare(8000, stops=1, duration_min=875)
     cell = appmod._build_cell("YYZ", "PVG", "2026-12-12", "2027-01-04", 2, [], fare, 0.25)
+    assert cell["chosen"] == "cheapest"
     assert cell["duration_min"] == 875
     # all prior keys remain present
     for k in ("dep", "ret", "cheapest_cad", "stops", "nonstop_cad",
@@ -198,6 +201,27 @@ def test_build_cell_duration_min_none_when_absent():
     """A fare without duration_min yields cell duration_min None (no fabrication)."""
     fare = {"cheapest_cad": 8000, "stops": 1, "nonstop_cad": None, "source": "x"}
     cell = appmod._build_cell("YYZ", "PVG", "2026-12-12", "2027-01-04", 2, [], fare, 0.25)
+    assert cell["duration_min"] is None
+
+
+def test_build_cell_nonstop_uses_nonstop_duration_min():
+    """When chosen=nonstop, duration_min reflects the NONSTOP itinerary, not the
+    cheapest (connecting) one (codex P2: duration must match the chosen fare)."""
+    # nonstop 9000 within 25% premium over cheapest 8000 → chosen=nonstop.
+    fare = _fake_fare(8000, stops=1, nonstop=9000,
+                      duration_min=875, nonstop_duration_min=600)
+    cell = appmod._build_cell("YYZ", "PVG", "2026-12-12", "2027-01-04", 2, [], fare, 0.25)
+    assert cell["chosen"] == "nonstop"
+    assert cell["duration_min"] == 600          # nonstop itinerary, NOT the connecting 875
+
+
+def test_build_cell_nonstop_duration_none_falls_back_to_none():
+    """When chosen=nonstop but nonstop_duration_min is absent, duration_min is None —
+    it must NOT fall back to the connecting itinerary's duration."""
+    fare = _fake_fare(8000, stops=1, nonstop=9000,
+                      duration_min=875, nonstop_duration_min=None)
+    cell = appmod._build_cell("YYZ", "PVG", "2026-12-12", "2027-01-04", 2, [], fare, 0.25)
+    assert cell["chosen"] == "nonstop"
     assert cell["duration_min"] is None
 
 

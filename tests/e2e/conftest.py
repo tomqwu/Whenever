@@ -27,6 +27,9 @@ def _patch_common(monkeypatch):
     monkeypatch.setattr(appmod, "get_fare", lambda *a, **k: {
         "cheapest_cad": 8000, "stops": 1, "nonstop_cad": 8500,
         "source": "test", "book": "https://example.com/book", "duration_min": 875,
+        # nonstop chosen (8500 within 25% of 8000): duration must come from the
+        # nonstop itinerary, so the stub carries nonstop_duration_min too.
+        "nonstop_duration_min": 875,
     })
     monkeypatch.setattr(appmod, "build_recommendation",
                         lambda *a, **k: "Best value: test recommendation")
