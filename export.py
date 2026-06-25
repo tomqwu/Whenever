@@ -13,8 +13,43 @@ _CSV_COLUMNS = [
     "city", "iata", "dep_date", "ret_date",
     "cheapest_cad", "stops", "duration_min",
     "nonstop_cad", "nonstop_duration_min",
-    "chosen", "chosen_cad", "chosen_stops", "chosen_duration_min", "source", "book",
+    "chosen", "chosen_cad", "chosen_stops", "chosen_duration_min",
+    "airlines", "layovers", "source", "book",
 ]
+
+
+def _fmt_airlines(airlines):
+    """Render a cell's airlines list as a compact "A, B" string ("" when None/empty)."""
+    if not airlines:
+        return ""
+    return ", ".join(str(a) for a in airlines)
+
+
+def _fmt_layovers(layovers):
+    """Render a cell's layovers as a compact "PEK 1h20m, NRT" string.
+
+    Each layover is its IATA plus an optional duration suffix ("1h20m") when known.
+    None/[] (nonstop or no per-stop detail) → "". Missing IATA → "?".
+    """
+    if not layovers:
+        return ""
+    parts = []
+    for lo in layovers:
+        iata = lo.get("iata") or "?"
+        dur = _fmt_layover_dur(lo.get("duration_min"))
+        parts.append(f"{iata} {dur}" if dur else iata)
+    return ", ".join(parts)
+
+
+def _fmt_layover_dur(minutes):
+    """Render minutes as a compact "1h20m" (no space), or "" when None/unparseable."""
+    if minutes is None:
+        return ""
+    try:
+        h, m = divmod(int(minutes), 60)
+    except (TypeError, ValueError):
+        return ""
+    return f"{h}h{m:02d}m"
 
 
 def _cell_to_row(city, iata, cell):
@@ -36,6 +71,8 @@ def _cell_to_row(city, iata, cell):
         _s(cell.get("chosen_cad")),
         _s(cell.get("chosen_stops")),
         _s(cell.get("chosen_duration_min")),
+        _fmt_airlines(cell.get("airlines")),
+        _fmt_layovers(cell.get("layovers")),
         _s(cell.get("source")),
         _s(cell.get("book")),
     ]
@@ -46,7 +83,8 @@ def render_csv(result: dict) -> str:
 
     Columns: city, iata, dep_date, ret_date, cheapest_cad, stops,
              duration_min, nonstop_cad, nonstop_duration_min, chosen,
-             chosen_cad, chosen_stops, chosen_duration_min, source, book.
+             chosen_cad, chosen_stops, chosen_duration_min, airlines,
+             layovers, source, book.
     One row per (city, dep_date, ret_date) grid cell.
     None/no-data cells render as empty strings and never crash.
     """
@@ -158,8 +196,17 @@ def render_pdf(result: dict) -> bytes:
             )
             best_dur = _fmt_dur(best.get("chosen_duration_min"))
             dur_label = f", {best_dur}" if best_dur else ""
+            # The best line shows the CHOSEN pick, so its carriers are
+            # chosen_airlines (the nonstop's when the nonstop line was selected),
+            # paired with chosen_stops/chosen_duration above — never the cheapest's.
+            air_label = _fmt_airlines(best.get("chosen_airlines"))
+            air_label = f", {air_label}" if air_label else ""
+            # The best line shows the CHOSEN pick, so its layovers are chosen_layovers
+            # ([] when the nonstop line was selected).
+            lay_label = _fmt_layovers(best.get("chosen_layovers"))
+            lay_label = f", via {lay_label}" if lay_label else ""
             summary = (
-                f"  Best: CA${best_price:,} {best_chosen} ({stops_label}{dur_label}), "
+                f"  Best: CA${best_price:,} {best_chosen} ({stops_label}{dur_label}){air_label}{lay_label}, "
                 f"dep {best_dep} ret {best_ret}"
             ) if best_price else "  Best: no priceable options"
         else:

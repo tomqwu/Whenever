@@ -105,11 +105,14 @@ You may instead pass explicit `dep_dates` / `ret_dates` arrays.
   "results": [
     {
       "city": "Shanghai", "iata": "PVG",
-      "best": { "dep": "2026-12-15", "ret": "2027-01-07", "chosen_cad": 8123, "chosen": "cheapest", "stops": 1, "chosen_duration_min": 875 },
+      "best": { "dep": "2026-12-15", "ret": "2027-01-07", "chosen_cad": 8123, "chosen": "cheapest", "stops": 1, "chosen_duration_min": 875, "airlines": ["Air Canada"], "chosen_layovers": [{ "iata": "NRT", "duration_min": 80 }] },
       "grid": [
         [ { "dep": "...", "ret": "...", "cheapest_cad": 8298, "stops": 1,
             "duration_min": 875, "nonstop_cad": 14756, "nonstop_duration_min": 720,
             "chosen": "cheapest", "chosen_cad": 8298, "chosen_duration_min": 875,
+            "airlines": ["Air Canada", "ANA"],
+            "layovers": [{ "iata": "NRT", "duration_min": 80 }],
+            "chosen_layovers": [{ "iata": "NRT", "duration_min": 80 }],
             "source": "travelpayouts", "book": "https://..." } ]
       ]
     }
@@ -132,7 +135,22 @@ never borrowed from another itinerary). For SerpApi these are always `null`: its
 single-call round-trip response is outbound-only (matching `nonstop_cad=null`), so
 round-trip durations cannot be derived.
 
-Cells with no API result have `"cheapest_cad": null, "source": "no-data"`.
+**Airlines & layovers** (real-data-only — `null`/`[]` when a provider doesn't supply
+them, never fabricated):
+
+- `airlines` — list of the cheapest itinerary's carrier **names** (serpapi,
+  skyscanner) or IATA **codes** (amadeus, kiwi, travelpayouts), de-duplicated. `[]`
+  when present-but-empty, `null` when the provider gives nothing.
+- `layovers` — per-connection list `[{ "iata", "name"?, "duration_min" }]` for the
+  **cheapest** itinerary (pairs with `cheapest_cad`/`stops`/`duration_min`). `[]` for
+  a nonstop cheapest; `null` when the provider gives no per-stop detail (e.g.
+  travelpayouts). `duration_min` is `null` when the connection gap isn't derivable.
+- `chosen_layovers` — the layovers of the **selected** fare (pairs with `chosen_cad`):
+  `[]` when the nonstop line is chosen, else the cheapest itinerary's `layovers`. The
+  `best` summary and recommendation use `chosen_layovers`.
+
+Cells with no API result have `"cheapest_cad": null, "source": "no-data"` (and
+`airlines`/`layovers`/`chosen_layovers` `null`).
 
 **Errors**
 
@@ -157,7 +175,7 @@ Use this endpoint to populate the flight grid live as each cell's fare arrives.
 | type | When | Key fields |
 |------|------|------------|
 | `meta` | First line | `origin`, `adults`, `child_ages`, `families`, `dep_dates`, `ret_dates`, `providers`, `results` (array of `{city,iata}`), `total_cells` |
-| `cell` | One per cell, as completed | `dest_index` (index into `meta.results`), plus all fields from a `/api/search` grid cell: `dep`, `ret`, `cheapest_cad`, `stops`, `duration_min`, `nonstop_cad`, `nonstop_duration_min`, `chosen`, `chosen_cad`, `chosen_duration_min`, `source`, `book` |
+| `cell` | One per cell, as completed | `dest_index` (index into `meta.results`), plus all fields from a `/api/search` grid cell: `dep`, `ret`, `cheapest_cad`, `stops`, `duration_min`, `nonstop_cad`, `nonstop_duration_min`, `chosen`, `chosen_cad`, `chosen_duration_min`, `airlines`, `layovers`, `chosen_layovers`, `source`, `book` |
 | `recommendation` | After all cells | `text` (same string as `/api/search`'s `recommendation` field) |
 | `done` | Last line | _(no extra fields)_ |
 
