@@ -235,9 +235,21 @@ function _cellHtml(c, thr) {
   return '<td class="' + cls + '" data-k="' + key + '">' + inner + '</td>';
 }
 
+const CONFIRM_CELLS = 40;  // soft threshold: show a confirm() dialog above this cell count
+
 $('#run').onclick = async () => {
   const dests = CITIES.filter(c => c.on).map(c => ({ city: c.city, iata: c.iata }));
   if (!dests.length) { alert('Pick at least one destination city (use "Get top cities").'); return; }
+  const depSpan = parseInt($('#depSpan').value) || 2;
+  const retSpan = parseInt($('#retSpan').value) || 2;
+  const cells = dests.length * depSpan * retSpan;
+  if (cells > CONFIRM_CELLS) {
+    const ok = confirm(
+      `This runs ~${cells} searches (${dests.length} cities \xd7 ${depSpan}\xd7${retSpan} dates),` +
+      ` one provider call each — this can use a lot of your flight-API quota. Continue?`
+    );
+    if (!ok) return;
+  }
   const thr = 1 + (parseFloat($('#thresh').value) || 25) / 100;
   const fams = parseInt($('#families').value) || 1;
   const payload = {

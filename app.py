@@ -51,6 +51,8 @@ SERPAPI_KEY = os.environ.get("SERPAPI_KEY")
 CURRENCY = os.environ.get("CURRENCY", "cad").lower()
 FARE_CACHE_TTL = int(os.environ.get("FARE_CACHE_TTL", "3600"))
 SEARCH_CONCURRENCY = int(os.environ.get("SEARCH_CONCURRENCY", "8"))
+# Hard cap on search grid size. Each cell = one provider API call. A value <= 0 disables the cap.
+MAX_SEARCH_CELLS = int(os.environ.get("MAX_SEARCH_CELLS", "200"))
 # Dev-server port. Default 5001 to avoid macOS AirPlay Receiver, which holds 5000.
 PORT = int(os.environ.get("PORT", "5001"))
 
@@ -588,12 +590,37 @@ def _search_args_from_body(b: dict):
 _SEARCH_ARGS_400 = {"error": "origin, destinations and dates required"}
 
 
+def _check_cell_cap(dests, dep_dates, ret_dates):
+    """Return a 400 JSON response if the search exceeds MAX_SEARCH_CELLS, else None.
+
+    Each cell = one provider API call (dest × dep_date × ret_date).
+    A MAX_SEARCH_CELLS value <= 0 disables the cap entirely.
+    """
+    if MAX_SEARCH_CELLS <= 0:
+        return None
+    total_cells = len(dests) * len(dep_dates) * len(ret_dates)
+    if total_cells > MAX_SEARCH_CELLS:
+        return (
+            jsonify({
+                "error": (
+                    f"search too large: {total_cells} cells exceeds limit {MAX_SEARCH_CELLS};"
+                    " reduce cities or date ranges"
+                )
+            }),
+            400,
+        )
+    return None
+
+
 @app.route("/api/search", methods=["POST"])
 def api_search():
     b = request.get_json(force=True)
     args = _search_args_from_body(b)
     if args is None:
         return jsonify(_SEARCH_ARGS_400), 400
+    cap_err = _check_cell_cap(args["dests"], args["dep_dates"], args["ret_dates"])
+    if cap_err is not None:
+        return cap_err
     result = run_search(**args)
     return jsonify(result)
 
@@ -614,6 +641,9 @@ def api_search_stream():
     args = _search_args_from_body(b)
     if args is None:
         return jsonify(_SEARCH_ARGS_400), 400
+    cap_err = _check_cell_cap(args["dests"], args["dep_dates"], args["ret_dates"])
+    if cap_err is not None:
+        return cap_err
 
     # Capture all args now — generator must not touch `request` after this point.
     origin = args["origin"]
