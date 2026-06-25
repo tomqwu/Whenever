@@ -762,6 +762,12 @@ def skyscanner_fare(origin, dest, dep, ret, adults, children):
                 poll_url,
                 params={"sessionId": session_id},
                 timeout=SKYSCANNER_POLL_TIMEOUT,
+                # No inner 502 retry on polls: each configured poll attempt makes
+                # exactly ONE HTTP call. The OUTER poll loop already provides the
+                # retry/attempt budget, so a 502 just falls through to the next
+                # attempt. This bounds total poll work at SKYSCANNER_POLL_ATTEMPTS x
+                # (interval + per-poll timeout) instead of attempts x 3 HTTP calls.
+                retries_502=0,
             )
             if pr is None:
                 # A request-level timeout/network error returns None. Don't keep

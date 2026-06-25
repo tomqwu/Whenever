@@ -1177,6 +1177,33 @@ def test_skyscanner_fare_poll_attempts_is_configurable(monkeypatch, fake_resp):
     assert sleeps == [0.0, 0.0, 0.0]
 
 
+def test_skyscanner_fare_poll_no_inner_502_retry(monkeypatch, fake_resp):
+    """Each poll attempt makes exactly ONE HTTP call even on 502: the poll request
+    passes retries_502=0, so the inner 502 retry is disabled and the outer poll loop
+    alone bounds the work. With attempts=3 and every poll returning 502, exactly 3
+    poll HTTP calls are made (NOT 3 x 3 = 9 as the default retries_502=2 would give)."""
+    monkeypatch.setattr(appmod, "RAPIDAPI_KEY", "k")
+    monkeypatch.setattr(appmod, "SKYSCANNER_POLL_ATTEMPTS", 3)
+    monkeypatch.setattr(appmod, "SKYSCANNER_POLL_INTERVAL", 0.0)
+    monkeypatch.setattr(appmod.time, "sleep", lambda *_a, **_k: None)
+    poll_count = {"n": 0}
+
+    def fake_get(url, headers=None, params=None, timeout=None):
+        if url.endswith("/web/flights/search-roundtrip"):
+            return fake_resp(
+                {"data": {"context": {"status": "incomplete", "sessionId": "sid"}}},
+                status=200)
+        poll_count["n"] += 1
+        return fake_resp({}, status=502)
+
+    monkeypatch.setattr(appmod.requests, "get", fake_get)
+    res = appmod.skyscanner_fare("YYZ", "LAX", "2026-08-07", "2026-08-09", 1, 0)
+
+    assert res is None
+    # No inner 502 retry on polls: <= SKYSCANNER_POLL_ATTEMPTS calls, not attempts x 3.
+    assert poll_count["n"] == 3
+
+
 def test_skyscanner_fare_poll_interval_is_used(monkeypatch, fake_resp):
     """The poll loop sleeps SKYSCANNER_POLL_INTERVAL between attempts."""
     monkeypatch.setattr(appmod, "RAPIDAPI_KEY", "k")
