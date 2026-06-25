@@ -100,6 +100,7 @@ the nonstop is "chosen"; otherwise the cheapest connection is chosen. Threshold 
 | `FARE_CACHE_TTL` | In-memory cache TTL (seconds) for fare results. Set `<= 0` to disable. | `3600` |
 | `SEARCH_CONCURRENCY` | Max parallel threads for the departure×return grid fetch in `run_search`. Each cell is one provider call, so large grids × many cities = many provider calls (quota/cost) — recommend modest date spans (default UI: 2×2). | `8` |
 | `MAX_SEARCH_CELLS` | Hard cap on total search grid cells (cities × dep_dates × ret_dates). Each cell = one provider API call. A request exceeding the cap returns HTTP 400 before any fare calls are made. Set `<= 0` to disable the cap. The frontend also shows a soft confirm dialog above 40 cells (see `CONFIRM_CELLS` in `templates/index.html`). | `200` |
+| `MAX_DATE_SPAN` | Generous per-direction day cap. `dep_span`/`ret_span` (and `date_range`'s `count`) are clamped to this ceiling **before** the date arrays are expanded, so a malformed huge span (e.g. `dep_span=10000000`) can't allocate millions of dates and tie up the worker before the cell cap's 400 fires. The form max is small; this is a safety ceiling, not the typical value. | `60` |
 | `PORT` | Dev-server port (`python app.py`). Default avoids macOS AirPlay Receiver, which holds 5000. | `5001` |
 
 ## Price Watch

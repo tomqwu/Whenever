@@ -135,6 +135,50 @@ class TestSearchArgsFromBody:
         assert result["dep_dates"] == ["2026-12-12", "2026-12-13", "2026-12-14"]
         assert result["ret_dates"] == ["2027-01-04", "2027-01-05"]
 
+    def test_huge_span_clamped_before_expansion(self):
+        """A malformed huge dep_span must NOT allocate millions of dates.
+
+        Codex P2: the date arrays were materialized before the cell cap ran, so a
+        span like 10_000_000 could exhaust the worker. The span is now clamped to
+        MAX_DATE_SPAN before date_range expands it.
+        """
+        body = {
+            "origin": "YYZ",
+            "destinations": [{"city": "X", "iata": "XXX"}],
+            "dep_start": "2026-12-12", "dep_span": 10_000_000,
+            "ret_start": "2027-01-04", "ret_span": 2,
+        }
+        result = appmod._search_args_from_body(body)
+        assert result is not None
+        assert len(result["dep_dates"]) <= appmod.MAX_DATE_SPAN
+        assert len(result["ret_dates"]) == 2
+
+    def test_negative_span_floors_to_one(self):
+        """A negative span floors to 1 (still a valid single-date search), never
+        a negative count that would yield an empty/None list."""
+        body = {
+            "origin": "YYZ",
+            "destinations": [{"city": "X", "iata": "XXX"}],
+            "dep_start": "2026-12-12", "dep_span": -7,
+            "ret_start": "2027-01-04", "ret_span": -1,
+        }
+        result = appmod._search_args_from_body(body)
+        assert result is not None
+        assert result["dep_dates"] == ["2026-12-12"]
+        assert result["ret_dates"] == ["2027-01-04"]
+
+    def test_zero_span_falls_back_to_default(self):
+        """dep_span=0 is falsy, so the `or 4` guard restores the default span."""
+        body = {
+            "origin": "YYZ",
+            "destinations": [{"city": "X", "iata": "XXX"}],
+            "dep_start": "2026-12-12", "dep_span": 0,
+            "ret_dates": ["2027-01-04"],
+        }
+        result = appmod._search_args_from_body(body)
+        assert result is not None
+        assert len(result["dep_dates"]) == 4
+
 
 # ---------------------------------------------------------------------------
 # api_search still behaves identically after refactor
@@ -173,6 +217,68 @@ class TestApiSearchUnchangedAfterRefactor:
             "dep_start": "not-a-date", "ret_start": "also-bad",
         })
         assert r.status_code == 400
+
+    def test_huge_span_post_does_not_allocate_millions(self, client, monkeypatch):
+        """Codex P2: POST with dep_span=10_000_000 must not build millions of dates.
+
+        The span is clamped to MAX_DATE_SPAN before expansion. With 1 city ×
+        MAX_DATE_SPAN(60) × ret_span(2) = 120 cells (< MAX_SEARCH_CELLS 200) the
+        search runs, but the dep_dates list is bounded — never millions.
+        """
+        captured = {}
+
+        def _spy_run_search(**kwargs):
+            captured["dep_dates"] = kwargs["dep_dates"]
+            captured["ret_dates"] = kwargs["ret_dates"]
+            return {"origin": kwargs["origin"], "results": [], "recommendation": "",
+                    "providers": {}, "dep_dates": kwargs["dep_dates"],
+                    "ret_dates": kwargs["ret_dates"], "adults": kwargs["adults"],
+                    "child_ages": kwargs["child_ages"], "families": kwargs["families"]}
+
+        monkeypatch.setattr(appmod, "run_search", _spy_run_search)
+        r = client.post("/api/search", json={
+            "origin": "YYZ",
+            "destinations": [{"city": "X", "iata": "XXX"}],
+            "dep_start": "2026-12-12", "dep_span": 10_000_000,
+            "ret_start": "2027-01-04", "ret_span": 2,
+        })
+        assert r.status_code == 200
+        assert len(captured["dep_dates"]) <= appmod.MAX_DATE_SPAN
+        assert len(captured["ret_dates"]) == 2
+
+    def test_huge_span_post_hits_cell_cap_400_when_over_limit(self, client, monkeypatch):
+        """A clamped span that still exceeds MAX_SEARCH_CELLS returns the cap 400,
+        and run_search is never invoked (no millions of cells materialized)."""
+        monkeypatch.setattr(appmod, "MAX_SEARCH_CELLS", 50)
+        called = {"run": False}
+        monkeypatch.setattr(appmod, "run_search",
+                            lambda **k: called.__setitem__("run", True))
+        r = client.post("/api/search", json={
+            "origin": "YYZ",
+            "destinations": [{"city": "X", "iata": "XXX"}],
+            "dep_start": "2026-12-12", "dep_span": 10_000_000,
+            "ret_start": "2027-01-04", "ret_span": 10_000_000,
+        })
+        assert r.status_code == 400
+        assert "too large" in r.get_json()["error"]
+        assert called["run"] is False
+
+    def test_giant_explicit_array_still_hits_cell_cap(self, client, monkeypatch):
+        """A giant explicit dep_dates array is still bounded by the cell cap 400
+        (len checked before run_search) — unchanged by this fix."""
+        monkeypatch.setattr(appmod, "MAX_SEARCH_CELLS", 50)
+        called = {"run": False}
+        monkeypatch.setattr(appmod, "run_search",
+                            lambda **k: called.__setitem__("run", True))
+        r = client.post("/api/search", json={
+            "origin": "YYZ",
+            "destinations": [{"city": "X", "iata": "XXX"}],
+            "dep_dates": [f"2026-12-{d:02d}" for d in range(1, 29)],
+            "ret_dates": ["2027-01-04", "2027-01-05", "2027-01-06"],
+        })
+        assert r.status_code == 400
+        assert "too large" in r.get_json()["error"]
+        assert called["run"] is False
 
     def test_search_success_still_works(self, client, monkeypatch):
         monkeypatch.setattr(appmod, "get_fare", lambda *a, **k: {

@@ -53,6 +53,10 @@ FARE_CACHE_TTL = int(os.environ.get("FARE_CACHE_TTL", "3600"))
 SEARCH_CONCURRENCY = int(os.environ.get("SEARCH_CONCURRENCY", "8"))
 # Hard cap on search grid size. Each cell = one provider API call. A value <= 0 disables the cap.
 MAX_SEARCH_CELLS = int(os.environ.get("MAX_SEARCH_CELLS", "200"))
+# Generous per-direction day cap. Bounds dep_span/ret_span (and date_range count)
+# BEFORE expansion so a malformed huge span can't allocate millions of dates. The
+# form max is small; this is a safety ceiling, not the typical value.
+MAX_DATE_SPAN = int(os.environ.get("MAX_DATE_SPAN", "60"))
 # Dev-server port. Default 5001 to avoid macOS AirPlay Receiver, which holds 5000.
 PORT = int(os.environ.get("PORT", "5001"))
 
@@ -472,6 +476,12 @@ def date_range(start_iso, count):
         d = dt.date.fromisoformat(start_iso)
     except (ValueError, TypeError):
         return []
+    # Defensively clamp count so any caller is protected from a huge/negative
+    # span building millions of dates (or a negative range). Floor at 0.
+    try:
+        count = max(0, min(int(count), MAX_DATE_SPAN))
+    except (ValueError, TypeError):
+        return []
     return [(d + dt.timedelta(days=i)).isoformat() for i in range(count)]
 
 def _build_cell(origin, code, dep, ret, adults, child_ages, fare, threshold):
@@ -572,8 +582,13 @@ def _search_args_from_body(b: dict):
     dests = b.get("destinations") or []
     adults = int(b.get("adults", 2))
     child_ages = [int(a) for a in (b.get("child_ages") or [])]
-    dep_dates = b.get("dep_dates") or date_range(b.get("dep_start", ""), int(b.get("dep_span", 4)))
-    ret_dates = b.get("ret_dates") or date_range(b.get("ret_start", ""), int(b.get("ret_span", 4)))
+    # Clamp the span to [1, MAX_DATE_SPAN] BEFORE expansion so a malformed huge
+    # value (e.g. dep_span=10000000) can't build millions of dates and tie up the
+    # worker before the cell cap's 400 fires. A bad/negative value floors to 1.
+    dep_span = max(1, min(int(b.get("dep_span", 4) or 4), MAX_DATE_SPAN))
+    ret_span = max(1, min(int(b.get("ret_span", 4) or 4), MAX_DATE_SPAN))
+    dep_dates = b.get("dep_dates") or date_range(b.get("dep_start", ""), dep_span)
+    ret_dates = b.get("ret_dates") or date_range(b.get("ret_start", ""), ret_span)
     threshold_pct = float(b.get("nonstop_threshold", 25))
     families = int(b.get("families", 1))
 
