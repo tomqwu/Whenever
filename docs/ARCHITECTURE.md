@@ -6,7 +6,7 @@ Whenever is a small Flask web app with three responsibilities, kept deliberately
                 ┌──────────────────────────────────────────────┐
    Browser ───▶ │  Flask (app.py)                              │
    (UI)         │                                              │
-                │  1. GenAI layer  ──▶  Ollama (local DeepSeek) │
+                │  1. GenAI layer  ──▶  Ollama (local model)     │
                 │       • country → top cities                 │
                 │       • city → IATA                          │
                 │       • analyze collected fares → pick best  │
@@ -119,7 +119,7 @@ the nonstop is "chosen"; otherwise the cheapest connection is chosen. Threshold 
 | Variable | Purpose | Default |
 |----------|---------|---------|
 | `OLLAMA_HOST` | Ollama base URL (local or `https://ollama.com` for cloud) | `http://localhost:11434` |
-| `OLLAMA_MODEL` | model tag (e.g. `deepseek-v4pro` local, `gpt-oss:120b` cloud) | `deepseek-v4pro` |
+| `OLLAMA_MODEL` | model tag (local default `qwen3:8b`; cloud e.g. `gpt-oss:120b`). Tiers: small/fast `qwen3.5:4b`; balanced `qwen3:8b` (default); prosumer `qwen3:30b`; cloud `gpt-oss:120b`. | `qwen3:8b` |
 | `OLLAMA_API_KEY` | Bearer API key for Ollama cloud (`https://ollama.com/settings/keys`); leave unset for local Ollama | — |
 | `CURRENCY` | output currency | `cad` |
 | `TRAVELPAYOUTS_TOKEN` | Travelpayouts API token | — |

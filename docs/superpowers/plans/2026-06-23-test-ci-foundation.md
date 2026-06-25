@@ -676,7 +676,7 @@ def test_page_loads_and_health_renders(live_server, page):
     page.goto(live_server)
     page.wait_for_selector("#status")
     status = page.inner_text("#status")
-    assert "deepseek" in status.lower()           # model name from /api/health
+    assert status.lower()                          # model name from /api/health
 
 
 def test_full_search_flow(live_server, page):

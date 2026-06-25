@@ -5,7 +5,7 @@
 A flexible-trip, best-value flight finder for travelers without fixed dates.
 Tell it roughly where and when — it searches **multiple cities × multiple dates**, prefers
 nonstop when the premium is small, and surfaces the most cost-effective combination.
-**All pricing comes from live flight APIs.** Your local **DeepSeek model via Ollama** is used
+**All pricing comes from live flight APIs.** Your local **model via Ollama** (default `qwen3:8b`) is used
 only to work *on* that collected data — expanding a country into its top cities and analyzing
 the fare grid to recommend the best-value trip. The model never invents prices.
 
@@ -30,7 +30,7 @@ cd Whenever
 - **Best-value matrix** → each cell shows the cheapest fare, stop count, and the nonstop fare
   where one exists; nonstop is auto-picked when its premium is within your threshold.
 - **Clickable prices** → every fare deep-links to Kayak/Google Flights to book.
-- **AI recommendation** → DeepSeek reads the grid and names the single best trip.
+- **AI recommendation** → the model reads the grid and names the single best trip.
 - **Export results** → after a search, download the fare matrix as a PDF or CSV from the UI.
 - **Shareable searches** → Searches are shareable — after running, copy the link from the **Copy link** button to share a prefilled, auto-run search.
 - **Watch a trip** → after a search, tap **☆ Watch** on any priced city to save its best trip for price-drop monitoring; run `python scheduler.py` (e.g. via cron) to re-price all watches and alert when a fare drops.
@@ -43,7 +43,7 @@ cd Whenever
    ollama serve            # if not already running
    ollama list             # confirm your model name
    ```
-   This app defaults to model `deepseek-v4pro`. Override with `OLLAMA_MODEL` if your tag differs.
+   This app defaults to model `qwen3:8b`. Override with `OLLAMA_MODEL` if your tag differs.
 
 ## Setup & run
 
@@ -53,7 +53,7 @@ python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
 export OLLAMA_HOST=http://localhost:11434
-export OLLAMA_MODEL=deepseek-v4pro       # match `ollama list`
+export OLLAMA_MODEL=qwen3:8b             # match `ollama list`
 
 # --- a flight API is REQUIRED for pricing (pick one or both) ---
 export TRAVELPAYOUTS_TOKEN=...           # easiest: free token, real cached fares + booking links
@@ -75,7 +75,7 @@ The app fetches **real prices from flight APIs** — it will not fabricate fares
 - **Amadeus Self-Service**: set `AMADEUS_CLIENT_ID` / `AMADEUS_CLIENT_SECRET`. Tried first when present.
 
 If no provider is set, the grid shows "no fares" and tells you to add a key. Each price still links
-out to a live booking search. DeepSeek then analyzes whatever real fares were collected to pick the
+out to a live booking search. The model then analyzes whatever real fares were collected to pick the
 best-value trip — it is never the source of a price.
 
 The fare layer is a simple adapter (`get_fare` in `app.py`); Amadeus, Travelpayouts, and Kiwi/Tequila
