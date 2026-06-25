@@ -514,7 +514,10 @@ async function triggerExport(endpoint, defaultFilename, btnEl, loadingLabel) {
     alert('Export failed: ' + e);
   } finally {
     btnEl.textContent = origText;
-    btnEl.disabled = false;
+    // Only re-enable if a newer search hasn't invalidated the payload while this
+    // export was in flight. If LAST_PAYLOAD was cleared by a new search, the
+    // button must stay disabled (clicking it would silently no-op).
+    btnEl.disabled = !LAST_PAYLOAD;
   }
 }
 

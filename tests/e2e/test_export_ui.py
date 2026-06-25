@@ -94,6 +94,101 @@ def test_export_buttons_disabled_when_second_search_fails(seed_live_server, page
     assert page.get_attribute("#exportCsv", "disabled") is not None
 
 
+def test_export_button_stays_disabled_when_newer_search_invalidates_payload(
+    seed_live_server, page
+):
+    """Race: export in flight, then a NEW search clears LAST_PAYLOAD.
+
+    The user clicks Export CSV, then — before the export request resolves —
+    starts a new search. The search handler clears LAST_PAYLOAD and disables
+    both export buttons. When the (old) export request finally completes, its
+    `finally` must NOT unconditionally re-enable the button: because
+    LAST_PAYLOAD is now null, the button must stay disabled (clicking it would
+    silently no-op).
+
+    The overlap is made deterministic by delaying the export response (via a
+    route) until after the new search has started.
+    """
+    _run_search(page, seed_live_server)
+    assert page.get_attribute("#exportCsv", "disabled") is None
+
+    # Hold the export response open until we release it, so we can start a new
+    # search while the export is still in flight.
+    import threading
+
+    release = threading.Event()
+
+    def _delayed_export(route):
+        release.wait(10)
+        route.continue_()
+
+    page.route("**/api/export/csv", _delayed_export)
+    # Force the new search's stream to fail so it never re-arms (emits `done`)
+    # the buttons: LAST_PAYLOAD stays null for the duration of the assertion,
+    # isolating the export `finally` behaviour under test.
+    page.route(
+        "**/api/search/stream",
+        lambda route: route.fulfill(
+            status=400,
+            content_type="application/json",
+            body='{"error": "forced failure"}',
+        ),
+    )
+    page.on("dialog", lambda d: d.dismiss())  # dismiss any alert defensively
+
+    # Kick off the export (request now blocked on `release`).
+    page.click("#exportCsv")
+    # Button disabled immediately by triggerExport's own `btnEl.disabled = true`.
+    page.wait_for_selector("#exportCsv[disabled]", timeout=5000)
+
+    # Start a NEW search: this clears LAST_PAYLOAD and disables both buttons.
+    # (The forced-400 search never re-arms them.)
+    page.click("#run")
+    page.wait_for_function("LAST_PAYLOAD === null", timeout=15000)
+
+    # Now let the in-flight export complete.
+    release.set()
+
+    # Give the export's `finally` a chance to run, then assert the button is
+    # STILL disabled (because LAST_PAYLOAD was invalidated).
+    page.wait_for_function(
+        "document.querySelector('#exportCsv').textContent.indexOf('Preparing') === -1",
+        timeout=15000,
+    )
+    assert page.get_attribute("#exportCsv", "disabled") is not None, (
+        "Export CSV must stay disabled when a newer search cleared LAST_PAYLOAD"
+    )
+
+
+def test_export_finally_keeps_button_disabled_when_payload_nulled_mid_flight(
+    seed_live_server, page
+):
+    """Focused: the `finally` must key re-enable off LAST_PAYLOAD, not run blind.
+
+    Awaits a real triggerExport call (so the try/finally executes) while nulling
+    LAST_PAYLOAD before the request resolves — exactly what a concurrent new
+    search does. The `finally` must leave the button disabled because
+    LAST_PAYLOAD is null.
+    """
+    _run_search(page, seed_live_server)
+    assert page.get_attribute("#exportCsv", "disabled") is None
+
+    # Start the export and null LAST_PAYLOAD while it is in flight (microtask
+    # after kickoff), then await completion — all inside the page so the
+    # finally has definitely run by the time evaluate resolves.
+    page.evaluate(
+        """async () => {
+            const p = triggerExport('/api/export/csv', 'whenever-matrix.csv',
+                document.querySelector('#exportCsv'), 'Preparing CSV…');
+            LAST_PAYLOAD = null;  // a newer search invalidated the payload
+            await p;
+        }"""
+    )
+    assert page.get_attribute("#exportCsv", "disabled") is not None, (
+        "Export CSV must stay disabled when LAST_PAYLOAD was nulled mid-flight"
+    )
+
+
 def test_export_csv_filename_is_whenever_matrix(seed_live_server, page):
     """The CSV download filename should be whenever-matrix.csv."""
     _run_search(page, seed_live_server)
