@@ -37,3 +37,19 @@ china:
       priority: 8
       optional: true
       notes: "Family/region-specific"
+    - city: "Hong Kong"
+      iata: "HKG"
+      priority: 9
+      optional: true
+      notes: "Nearby hub (Hong Kong SAR); separate entry/visa from mainland"
+    - city: "Taipei"
+      iata: "TPE"
+      priority: 10
+      optional: true
+      notes: "Taiwan; nearby alternative, separate entry"
+    - city: "Tokyo"
+      iata: "HND"
+      alt_iata: ["NRT"]
+      priority: 11
+      optional: true
+      notes: "Japan; nearby hub, separate country"

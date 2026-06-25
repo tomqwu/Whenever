@@ -170,7 +170,7 @@ The path is resolved relative to `app.py`: `os.path.join(os.path.dirname(__file_
 - **Required cities** (`optional: false` or omitted): up to `n` returned, sorted by `priority`.
 - **Optional cities** (`optional: true`): ALL appended after the required set regardless of `n`.
   The frontend renders optional cities unchecked; users opt in by clicking the chip.
-- Example: `top_cities("China", 6)` → 6 required (priority 1–6) + 3 optional (priority 7–8) = 9 total.
+- Example: `top_cities("China", 6)` → 6 required (priority 1–6) + 6 optional (priority 7–11, incl. nearby Hong Kong/Taiwan/Japan) = 12 total.
 - `n` caps the required set only; it never filters optional cities.
 
 **LLM fallback:** If no seed entry exists for the requested country, the existing `ollama_chat`
