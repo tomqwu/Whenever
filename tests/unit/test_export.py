@@ -33,6 +33,7 @@ def _make_result():
                         {
                             "dep": "2026-12-12", "ret": "2027-01-04",
                             "cheapest_cad": 8000, "stops": 1,
+                            "duration_min": 875,
                             "nonstop_cad": 8500, "chosen": "cheapest",
                             "chosen_cad": 8000,
                             "source": "travelpayouts",
@@ -153,7 +154,7 @@ class TestRenderCsv:
         header = next(reader)
         assert header == [
             "city", "iata", "dep_date", "ret_date",
-            "cheapest_cad", "stops", "nonstop_cad",
+            "cheapest_cad", "stops", "duration_min", "nonstop_cad",
             "chosen", "chosen_cad", "source", "book",
         ]
 
@@ -177,11 +178,12 @@ class TestRenderCsv:
         assert row[3] == "2027-01-04" # ret_date
         assert row[4] == "8000"       # cheapest_cad
         assert row[5] == "1"          # stops
-        assert row[6] == "8500"       # nonstop_cad
-        assert row[7] == "cheapest"   # chosen
-        assert row[8] == "8000"       # chosen_cad
-        assert row[9] == "travelpayouts" # source
-        assert row[10] == "https://www.aviasales.com/link1"  # book
+        assert row[6] == "875"        # duration_min
+        assert row[7] == "8500"       # nonstop_cad
+        assert row[8] == "cheapest"   # chosen
+        assert row[9] == "8000"       # chosen_cad
+        assert row[10] == "travelpayouts" # source
+        assert row[11] == "https://www.aviasales.com/link1"  # book
 
     def test_no_data_cell_renders_empty_strings_not_crash(self):
         """A cell with cheapest_cad=None must render empty strings, never crash."""
@@ -194,7 +196,8 @@ class TestRenderCsv:
         assert row[2] == "2026-12-12"
         assert row[3] == "2027-01-11"
         assert row[4] == ""   # cheapest_cad is None → empty
-        assert row[8] == ""   # chosen_cad is None → empty
+        assert row[6] == ""   # duration_min is None → empty
+        assert row[9] == ""   # chosen_cad is None → empty
 
     def test_nonstop_chosen_cell(self):
         from export import render_csv
@@ -202,10 +205,10 @@ class TestRenderCsv:
         rows = list(csv.reader(io.StringIO(out)))
         # Third data row: Shanghai, dep 2026-12-19, ret 2027-01-04 (nonstop)
         row = rows[3]
-        assert row[7] == "nonstop"
-        assert row[8] == "9000"
+        assert row[8] == "nonstop"
+        assert row[9] == "9000"
         assert row[5] == "0"     # stops
-        assert row[6] == "9000"  # nonstop_cad
+        assert row[7] == "9000"  # nonstop_cad
 
     def test_empty_results_still_produces_header(self):
         from export import render_csv
@@ -237,6 +240,15 @@ class TestRenderPdf:
         from export import render_pdf
         out = render_pdf(_make_result())
         assert isinstance(out, bytes)
+
+    def test_fmt_dur_helper(self):
+        from export import _fmt_dur
+        assert _fmt_dur(875) == "14h 35m"
+        assert _fmt_dur(0) == "0h 0m"
+        assert _fmt_dur(None) == ""
+        # non-numeric / unparseable → "" (never crashes)
+        assert _fmt_dur("nope") == ""
+        assert _fmt_dur(object()) == ""
 
     def test_starts_with_pdf_magic(self):
         from export import render_pdf
@@ -285,6 +297,24 @@ class TestRenderPdf:
         out = render_pdf(result)
         assert isinstance(out, bytes)
         assert out[:4] == b"%PDF"
+
+    def test_pdf_includes_duration_text(self):
+        """The PDF must render total flight duration (e.g. '14h 35m') somewhere.
+
+        fpdf2 deflates content streams, so decompress them and assert the
+        human-readable duration appears (the Shanghai cell has duration_min=875).
+        """
+        import re
+        import zlib
+        from export import render_pdf
+        out = render_pdf(_make_result())
+        blob = b""
+        for m in re.finditer(rb"stream\r?\n(.*?)\r?\nendstream", out, re.S):
+            try:
+                blob += zlib.decompress(m.group(1))
+            except Exception:
+                pass
+        assert b"14h 35m" in blob
 
     def test_non_latin1_city_does_not_crash(self):
         """Non-Latin-1 city names (e.g. 'Łódź', '東京') must not raise.

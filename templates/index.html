@@ -145,6 +145,13 @@ function fmtDate(iso){
   return d.toLocaleDateString('en-CA',{month:'short',day:'numeric'});
 }
 function money(v){ return v==null?'—':'$'+Math.round(v).toLocaleString('en-CA'); }
+// fmtDuration: total minutes -> "14h 35m" (or "—" when null/unknown). Numeric input,
+// formatted client-side; no string interpolation of untrusted data.
+function fmtDuration(min){
+  if (min == null) return '—';
+  const h = Math.floor(min / 60), m = min % 60;
+  return h + 'h ' + m + 'm';
+}
 
 // escapeHtml: HTML-escape a value so no untrusted string (from the server,
 // the model, or a URL-derived share hash) can reach the DOM as live markup.
@@ -243,8 +250,11 @@ function _cellHtml(c, thr) {
   if (c.cheapest_cad == null) return '<td class="err" data-k="' + key + '">n/a</td>';
   const pickNS = c.nonstop_cad && c.cheapest_cad && c.nonstop_cad <= c.cheapest_cad * thr;
   const cls = pickNS ? 'pick-ns' : '';
+  const stopsTxt = (c.stops != null ? c.stops + ' stop' + (c.stops === 1 ? '' : 's') : '');
+  const durTxt = (c.duration_min != null ? fmtDuration(c.duration_min) : '');
+  const stopsDur = [stopsTxt, durTxt].filter(Boolean).join(' · ');
   let inner = '<a class="price" href="' + escapeHtml(c.book) + '" target="_blank" rel="noopener">' + money(c.cheapest_cad) + '</a>' +
-    '<div class="stops">' + (c.stops != null ? c.stops + ' stop' + (c.stops === 1 ? '' : 's') : '') + '</div>';
+    '<div class="stops">' + stopsDur + '</div>';
   if (c.nonstop_cad) inner += '<div class="ns">ns ' + money(c.nonstop_cad) + '</div>';
   return '<td class="' + cls + '" data-k="' + key + '">' + inner + '</td>';
 }
@@ -408,7 +418,7 @@ $('#run').onclick = async () => {
             const metaEl = document.getElementById('card-meta-' + di);
             const groupEl = document.getElementById('card-group-' + di);
             if (priceEl) priceEl.textContent = money(evt.chosen_cad);
-            if (metaEl) metaEl.textContent = fmtDate(evt.dep) + ' → ' + fmtDate(evt.ret) + ' · ' + (evt.chosen === 'nonstop' ? 'nonstop' : evt.stops + ' stop(s)');
+            if (metaEl) metaEl.textContent = fmtDate(evt.dep) + ' → ' + fmtDate(evt.ret) + ' · ' + (evt.chosen === 'nonstop' ? 'nonstop' : evt.stops + ' stop(s)') + (evt.duration_min != null ? ' · ' + fmtDuration(evt.duration_min) : '');
             if (groupEl) groupEl.textContent = money(evt.chosen_cad * fams);
           }
         }
@@ -520,7 +530,7 @@ function render(data){
     const card=document.createElement('div'); card.className='card';
     card.innerHTML = `<div class="city">${escapeHtml(r.city)} <small>(${escapeHtml(r.iata)})</small></div>`+
       `<div class="price">${b?money(b.chosen_cad):'—'}</div>`+
-      `<div class="meta">${b?escapeHtml(fmtDate(b.dep))+' → '+escapeHtml(fmtDate(b.ret))+' · '+(b.chosen==='nonstop'?'nonstop':b.stops+' stop(s)'):'no fares'}</div>`+
+      `<div class="meta">${b?escapeHtml(fmtDate(b.dep))+' → '+escapeHtml(fmtDate(b.ret))+' · '+(b.chosen==='nonstop'?'nonstop':b.stops+' stop(s)')+(b.duration_min!=null?' · '+fmtDuration(b.duration_min):''):'no fares'}</div>`+
       `<div class="meta">group ×${fams}: ${b?money(b.chosen_cad*fams):'—'}</div>`;
     sum.appendChild(card);
   });

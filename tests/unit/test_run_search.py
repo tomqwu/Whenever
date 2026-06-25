@@ -6,13 +6,14 @@ DEST_PVG = {"city": "Shanghai", "iata": "PVG"}
 DEST_XXX = {"city": "NoWhere", "iata": "XXX"}
 
 
-def _fake_fare(cheapest, stops=1, nonstop=None, source="test", book=None):
+def _fake_fare(cheapest, stops=1, nonstop=None, source="test", book=None, duration_min=None):
     return {
         "cheapest_cad": cheapest,
         "stops": stops,
         "nonstop_cad": nonstop,
         "source": source,
         "book": book,
+        "duration_min": duration_min,
     }
 
 
@@ -177,3 +178,93 @@ def test_run_search_result_preserves_city_and_iata(monkeypatch):
     r = out["results"][0]
     assert r["city"] == "Shanghai"
     assert r["iata"] == "PVG"
+
+
+# ---------------------------------------------------------------------------
+# duration_min carries from the fare → cell → best (#53)
+# ---------------------------------------------------------------------------
+def test_build_cell_includes_duration_min():
+    """_build_cell copies duration_min from the fare into the cell dict."""
+    fare = _fake_fare(8000, stops=1, duration_min=875)
+    cell = appmod._build_cell("YYZ", "PVG", "2026-12-12", "2027-01-04", 2, [], fare, 0.25)
+    assert cell["duration_min"] == 875
+    # all prior keys remain present
+    for k in ("dep", "ret", "cheapest_cad", "stops", "nonstop_cad",
+              "chosen", "chosen_cad", "source", "book"):
+        assert k in cell
+
+
+def test_build_cell_duration_min_none_when_absent():
+    """A fare without duration_min yields cell duration_min None (no fabrication)."""
+    fare = {"cheapest_cad": 8000, "stops": 1, "nonstop_cad": None, "source": "x"}
+    cell = appmod._build_cell("YYZ", "PVG", "2026-12-12", "2027-01-04", 2, [], fare, 0.25)
+    assert cell["duration_min"] is None
+
+
+def test_run_search_best_carries_duration_min(monkeypatch):
+    monkeypatch.setattr(appmod, "get_fare",
+                        lambda *a, **k: _fake_fare(1000, duration_min=600))
+    monkeypatch.setattr(appmod, "build_recommendation", lambda *a, **k: "rec")
+    out = appmod.run_search(
+        origin="YYZ", dests=[DEST_PVG], adults=2, child_ages=[],
+        dep_dates=["2026-12-12"], ret_dates=["2027-01-04"],
+    )
+    assert out["results"][0]["best"]["duration_min"] == 600
+
+
+# ---------------------------------------------------------------------------
+# build_recommendation: summary + prompt factor in total duration (#53)
+# ---------------------------------------------------------------------------
+def _result_with_best(duration_min):
+    return [{
+        "city": "Shanghai", "iata": "PVG",
+        "best": {"chosen_cad": 8000, "dep": "2026-12-12", "ret": "2027-01-04",
+                 "chosen": "cheapest", "stops": 1, "duration_min": duration_min},
+    }]
+
+
+def test_build_recommendation_summary_includes_duration(monkeypatch):
+    captured = {}
+
+    def fake_chat(prompt, *a, **k):
+        captured["prompt"] = prompt
+        return "AI says go to Shanghai."
+
+    monkeypatch.setattr(appmod, "ollama_chat", fake_chat)
+    out = appmod.build_recommendation("YYZ", _result_with_best(875), 2, [], 1)
+    assert out == "AI says go to Shanghai."
+    p = captured["prompt"]
+    # human + machine duration both present in the JSON summary
+    assert "14h 35m" in p
+    assert "875" in p
+    assert "duration_min" in p
+    # prompt instructs the model to balance/avoid much-longer flights
+    assert "duration" in p.lower()
+    assert "2x" in p or "2×" in p
+
+
+def test_build_recommendation_duration_none_in_summary(monkeypatch):
+    captured = {}
+    monkeypatch.setattr(appmod, "ollama_chat",
+                        lambda prompt, *a, **k: captured.setdefault("prompt", prompt) or "ok")
+    appmod.build_recommendation("YYZ", _result_with_best(None), 2, [], 1)
+    # null duration is serialized, not fabricated
+    assert '"duration": null' in captured["prompt"]
+    assert '"duration_min": null' in captured["prompt"]
+
+
+def test_build_recommendation_fallback_still_works(monkeypatch):
+    """When ollama fails, the deterministic price fallback still returns a pick."""
+    def boom(*a, **k):
+        raise RuntimeError("ollama down")
+
+    monkeypatch.setattr(appmod, "ollama_chat", boom)
+    out = appmod.build_recommendation("YYZ", _result_with_best(875), 2, [], 1)
+    assert "Shanghai" in out
+    assert "8,000" in out
+
+
+def test_fmt_duration_helper():
+    assert appmod._fmt_duration(875) == "14h 35m"
+    assert appmod._fmt_duration(0) == "0h 0m"
+    assert appmod._fmt_duration(None) is None

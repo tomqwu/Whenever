@@ -26,7 +26,7 @@ def _patch_common(monkeypatch):
     monkeypatch.setattr(appmod, "ollama_ok", lambda: True)
     monkeypatch.setattr(appmod, "get_fare", lambda *a, **k: {
         "cheapest_cad": 8000, "stops": 1, "nonstop_cad": 8500,
-        "source": "test", "book": "https://example.com/book",
+        "source": "test", "book": "https://example.com/book", "duration_min": 875,
     })
     monkeypatch.setattr(appmod, "build_recommendation",
                         lambda *a, **k: "Best value: test recommendation")
