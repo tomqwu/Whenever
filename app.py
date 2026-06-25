@@ -568,16 +568,18 @@ def _skyscanner_headers():
     return {"x-rapidapi-host": RAPIDAPI_HOST, "x-rapidapi-key": RAPIDAPI_KEY}
 
 
-def _skyscanner_get(url, params=None, retries_502=2):
+def _skyscanner_get(url, params=None, retries_502=2, timeout=30):
     """GET a flights-sky endpoint, retrying a transient HTTP 502 a couple times.
 
     Returns the requests.Response (caller checks status_code), or None if every
-    attempt raised an exception. A non-502 status is returned immediately for the
-    caller to handle defensively.
+    attempt raised an exception (e.g. a request-level timeout). A non-502 status is
+    returned immediately for the caller to handle defensively. ``timeout`` bounds
+    each request; callers pass a short value for poll requests so a hung session
+    degrades to no-data in seconds rather than minutes (see skyscanner_fare).
     """
     for attempt in range(retries_502 + 1):
         try:
-            r = requests.get(url, headers=_skyscanner_headers(), params=params, timeout=30)
+            r = requests.get(url, headers=_skyscanner_headers(), params=params, timeout=timeout)
         except Exception:
             return None
         # Retry only a transient 502, and only while attempts remain; on the final
@@ -719,7 +721,7 @@ def skyscanner_fare(origin, dest, dep, ret, adults, children):
         "currency": "CAD", "market": "CA",
         "locale": "en-US", "cabinClass": "economy",
     }
-    r = _skyscanner_get(f"{base}/web/flights/search-roundtrip", params=params)
+    r = _skyscanner_get(f"{base}/web/flights/search-roundtrip", params=params, timeout=15)
     if r is None or r.status_code != 200:
         return None
     try:
@@ -739,11 +741,19 @@ def skyscanner_fare(origin, dest, dep, ret, adults, children):
         completed = False
         for _ in range(8):
             time.sleep(0.6)
+            # Short poll timeout so a hung/slow session can't tie up a search
+            # worker for ~8x30s; without it one fare cell could stall for minutes.
             pr = _skyscanner_get(
                 poll_url,
                 params={"sessionId": session_id},
+                timeout=8,
             )
-            if pr is None or pr.status_code != 200:
+            if pr is None:
+                # A request-level timeout/network error returns None. Don't keep
+                # retrying after a timeout — bail out and let _get_fare_uncached
+                # fall through to the next provider quickly.
+                break
+            if pr.status_code != 200:
                 continue
             try:
                 data = pr.json().get("data", {})

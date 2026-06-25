@@ -1099,6 +1099,57 @@ def test_skyscanner_fare_poll_uses_raw_session_id(monkeypatch, fake_resp):
     assert poll_params["sessionId"] == raw_sid
 
 
+def test_skyscanner_fare_poll_breaks_on_timeout(monkeypatch, fake_resp):
+    """A poll that times out (requests.Timeout) bails immediately instead of
+    looping the full 8 attempts — so a hung session degrades to no-data fast.
+
+    Also asserts the poll request uses the SHORT 8s timeout (not the default 30s),
+    bounding how long one fare cell can spend before falling through.
+    """
+    monkeypatch.setattr(appmod, "RAPIDAPI_KEY", "k")
+    monkeypatch.setattr(appmod.time, "sleep", lambda *_a, **_k: None)
+    poll_count = {"n": 0}
+    poll_timeouts = []
+
+    def fake_get(url, headers=None, params=None, timeout=None):
+        if url.endswith("/web/flights/search-roundtrip"):
+            return fake_resp(
+                {"data": {"context": {"status": "incomplete", "sessionId": "sid"}}},
+                status=200)
+        poll_count["n"] += 1
+        poll_timeouts.append(timeout)
+        # First poll hangs and times out.
+        raise appmod.requests.exceptions.Timeout("poll hung")
+
+    monkeypatch.setattr(appmod.requests, "get", fake_get)
+    res = appmod.skyscanner_fare("YYZ", "LAX", "2026-08-07", "2026-08-09", 1, 0)
+
+    assert res is None
+    # Broke out on the first timeout — did NOT loop all 8 attempts.
+    assert poll_count["n"] == 1
+    # Poll used the short timeout, not the default 30s.
+    assert poll_timeouts == [8]
+
+
+def test_skyscanner_fare_search_uses_capped_timeout(monkeypatch, fake_resp):
+    """The initial search-roundtrip request is capped (<=15s) so it can't hang long."""
+    monkeypatch.setattr(appmod, "RAPIDAPI_KEY", "k")
+    monkeypatch.setattr(appmod.time, "sleep", lambda *_a, **_k: None)
+    complete = _sky_complete_payload()
+    search_timeout = {}
+
+    def fake_get(url, headers=None, params=None, timeout=None):
+        if url.endswith("/web/flights/search-roundtrip"):
+            search_timeout["t"] = timeout
+        return fake_resp(complete, status=200)
+
+    monkeypatch.setattr(appmod.requests, "get", fake_get)
+    res = appmod.skyscanner_fare("YYZ", "LAX", "2026-08-07", "2026-08-09", 1, 0)
+
+    assert res is not None
+    assert search_timeout["t"] == 15
+
+
 def test_skyscanner_tried_first_in_provider_chain(monkeypatch):
     """skyscanner_fare is called FIRST — before serpapi, amadeus, travelpayouts, kiwi."""
     call_order = []
