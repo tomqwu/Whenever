@@ -618,15 +618,34 @@ function resetWatchButton(btn) {
   btn.textContent = '☆ Watch';
 }
 
+// tripKey: build the FULL trip key the backend dedup uses, so card buttons and
+// saved watches can be compared on the exact same identity — origin, dest_iata,
+// dep_date, ret_date, adults, children COUNT, and sorted child_ages. Matching on
+// only dest+dates would wrongly re-enable a card when an UNRELATED watch (same
+// dest+dates but different origin or passenger party) is removed. (codex review)
+function tripKey(t) {
+  const origin = String(t.origin || '').trim().toUpperCase();
+  const iata = String(t.dest_iata || '').trim().toUpperCase();
+  const adults = Number(t.adults) || 0;
+  const ages = (Array.isArray(t.child_ages) ? t.child_ages : [])
+    .map(a => Number(a) || 0).sort((a, b) => a - b);
+  // The card POSTs only child_ages (no separate count), so its children COUNT
+  // equals ages.length — matching how the backend reconciles a card watch.
+  const children = (t.children == null) ? ages.length : (Number(t.children) || 0);
+  return JSON.stringify([
+    origin, iata, t.dep_date || '', t.ret_date || '', adults, children, ages,
+  ]);
+}
+
 // resetCardWatchForTrip: after a watch is removed, find any visible card Watch
-// button that matches the removed trip (by dest iata + dep/ret dates) and reset
-// it to the enabled "☆ Watch" state. No-op when no matching card is shown.
+// button whose stored FULL trip key MATCHES the removed watch and reset it to the
+// enabled "☆ Watch" state. Buttons whose key differs (e.g. same dest+dates but a
+// different origin/party) are left as-is. No-op when no matching card is shown.
 function resetCardWatchForTrip(w) {
   if (!w) return;
+  const removedKey = tripKey(w);
   document.querySelectorAll('button.watch').forEach(btn => {
-    if (btn.dataset.iata === w.dest_iata &&
-        btn.dataset.dep === w.dep_date &&
-        btn.dataset.ret === w.ret_date) {
+    if (btn.dataset.tripKey === removedKey) {
       resetWatchButton(btn);
     }
   });
@@ -648,25 +667,24 @@ function wireWatchButtons(metaInfo, bestByCityIdx) {
     // baseline only seeds correctly) when cheapest_cad is present.
     if (!best || best.cheapest_cad == null) return;
     btn.style.display = '';
-    // Record the trip identity so a later watch removal can re-enable this exact
-    // card button (matched by dest iata + dep/ret dates). (codex review)
-    btn.dataset.iata = r.iata;
-    btn.dataset.dep = best.dep;
-    btn.dataset.ret = best.ret;
+    const body = {
+      origin: (metaInfo.origin || '').toUpperCase(),
+      dest_iata: r.iata,
+      dest_city: r.city,
+      dep_date: best.dep,
+      ret_date: best.ret,
+      adults: metaInfo.adults,
+      child_ages: metaInfo.child_ages || [],
+      threshold_pct: metaInfo.nonstop_threshold,
+    };
+    // Record the FULL trip key (origin + dest + dates + party) so a later watch
+    // removal only re-enables this card when the REMOVED watch is the same trip —
+    // not an unrelated watch that merely shares dest+dates. (codex review)
+    btn.dataset.tripKey = tripKey(body);
+    // No last_price/last_source in body: the server re-derives the baseline from
+    // a real get_fare lookup (REAL-DATA-ONLY guardrail) and ignores any
+    // client-supplied price, so we don't send one. (codex review)
     btn.onclick = async () => {
-      const body = {
-        origin: (metaInfo.origin || '').toUpperCase(),
-        dest_iata: r.iata,
-        dest_city: r.city,
-        dep_date: best.dep,
-        ret_date: best.ret,
-        adults: metaInfo.adults,
-        child_ages: metaInfo.child_ages || [],
-        threshold_pct: metaInfo.nonstop_threshold,
-        // No last_price/last_source: the server re-derives the baseline from a
-        // real get_fare lookup (REAL-DATA-ONLY guardrail) and ignores any
-        // client-supplied price, so we don't send one. (codex review)
-      };
       btn.disabled = true;
       try {
         const resp = await fetch('/api/watch', {

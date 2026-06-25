@@ -857,10 +857,19 @@ def api_watch_add():
     b = request.get_json(silent=True)
     if not isinstance(b, dict):
         return jsonify({"error": "watch payload required"}), 400
-    origin = (b.get("origin") or "").strip().upper()
-    dest_iata = (b.get("dest_iata") or "").strip().upper()
-    dep_date = (b.get("dep_date") or "").strip()
-    ret_date = (b.get("ret_date") or "").strip()
+    # Required text fields are .strip()ed below; a non-string value (e.g.
+    # {"origin": 123} or a list/bool) would make .strip() raise AttributeError
+    # -> 500. Validate each is a string up front and reject with a clean 400,
+    # consistent with the other field validations.
+    for _field in ("origin", "dest_iata", "dep_date", "ret_date"):
+        if not isinstance(b.get(_field), str):
+            return jsonify(
+                {"error": "origin, dest_iata, dep_date and ret_date must be strings"}
+            ), 400
+    origin = b["origin"].strip().upper()
+    dest_iata = b["dest_iata"].strip().upper()
+    dep_date = b["dep_date"].strip()
+    ret_date = b["ret_date"].strip()
     if not origin or not dest_iata or not dep_date or not ret_date:
         return jsonify({"error": "origin, dest_iata, dep_date and ret_date required"}), 400
 

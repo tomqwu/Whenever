@@ -147,6 +147,85 @@ def test_card_watch_button_reenabled_after_remove(seed_live_server, page):
     page.wait_for_selector("#watchedList .watched-item", timeout=15000)
 
 
+def test_card_button_not_reenabled_by_unrelated_watch_remove(seed_live_server, page):
+    """Removing a DIFFERENT saved watch that shares dest+dates but has a different
+    origin must NOT re-enable the visible card button — re-enable matches the FULL
+    trip key (origin + dest + dates + party), not just dest+dates (codex review)."""
+    _run_search(page, seed_live_server)
+
+    # Watch card-0's best trip (YYZ -> PEK on some dates) -> 'Watching ✓'.
+    page.click("#card-watch-0")
+    page.wait_for_function(
+        "() => { const b = document.getElementById('card-watch-0'); "
+        "return b && b.disabled && b.classList.contains('watched'); }",
+        timeout=15000,
+    )
+    page.wait_for_selector("#watchedList .watched-item", timeout=15000)
+
+    # Read the card's own watch so we can clone its dest+dates but change origin.
+    own = page.evaluate(
+        "async () => (await (await fetch('/api/watch')).json()).watches[0]"
+    )
+
+    # Seed an UNRELATED watch: same dest + dates, DIFFERENT origin/party.
+    page.evaluate(
+        """async (own) => {
+            const body = {
+                origin: 'JFK',
+                dest_iata: own.dest_iata,
+                dest_city: own.dest_city,
+                dep_date: own.dep_date,
+                ret_date: own.ret_date,
+                adults: 1,
+                child_ages: [],
+            };
+            await fetch('/api/watch', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+            });
+            // Re-render the Watched trips list so the new row appears in the DOM.
+            await loadWatches();
+        }""",
+        own,
+    )
+    # Two distinct watches now exist.
+    page.wait_for_function(
+        "() => document.querySelectorAll('#watchedList .watched-item').length === 2",
+        timeout=15000,
+    )
+
+    # Remove the UNRELATED (JFK) watch — its row is the one whose text has 'JFK'.
+    page.evaluate(
+        """() => {
+            const items = [...document.querySelectorAll('#watchedList .watched-item')];
+            const jfk = items.find(i => i.innerText.indexOf('JFK') !== -1);
+            jfk.querySelector('button.rm').click();
+        }"""
+    )
+    # Wait until only the card's own watch remains.
+    page.wait_for_function(
+        "() => document.querySelectorAll('#watchedList .watched-item').length === 1",
+        timeout=15000,
+    )
+
+    # The card button must STILL be disabled/'Watching ✓' — the removed watch was
+    # a different trip key, so the visible card must not be wrongly re-enabled.
+    assert page.evaluate(
+        "() => { const b = document.getElementById('card-watch-0'); "
+        "return b.disabled && b.classList.contains('watched'); }"
+    )
+
+    # Now remove the MATCHING (card's own) watch -> the card button re-enables.
+    page.click("#watchedList .watched-item button.rm")
+    page.wait_for_function(
+        "() => { const b = document.getElementById('card-watch-0'); "
+        "return b && !b.disabled && !b.classList.contains('watched') "
+        "&& b.textContent.indexOf('Watching') === -1; }",
+        timeout=15000,
+    )
+
+
 def test_watched_list_shows_passenger_party(seed_live_server, page):
     """The watched-trips list shows passenger info using the `children` COUNT so a
     family party is visible (and distinct from adults-only) (codex review)."""

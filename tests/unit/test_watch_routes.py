@@ -110,6 +110,43 @@ def test_add_watch_missing_required_field_400(client, watch_db, missing):
     assert watch_db.list_watches() == []   # nothing persisted on a 400
 
 
+@pytest.mark.parametrize("field", ["origin", "dest_iata", "dep_date", "ret_date"])
+@pytest.mark.parametrize("bad", [123, True, ["a"], {"x": 1}])
+def test_add_watch_non_string_required_field_400(client, watch_db, field, bad):
+    """A non-string required field (e.g. {"origin": 123}, a list, or a bool)
+    must return a clean 400, never a 500 from .strip() raising AttributeError,
+    and must persist no row.
+    """
+    body = {**_VALID_BODY, field: bad}
+    r = client.post("/api/watch", json=body)
+    assert r.status_code == 400
+    assert r.get_json()["error"] == (
+        "origin, dest_iata, dep_date and ret_date must be strings"
+    )
+    assert watch_db.list_watches() == []   # nothing persisted on a 400
+
+
+@pytest.mark.parametrize("field", ["origin", "dest_iata", "dep_date", "ret_date"])
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_add_watch_blank_required_field_400(client, watch_db, field, blank):
+    """A present-but-blank (empty or whitespace-only) required string still
+    strips to empty and is rejected with the 'required' 400 — no row persisted.
+    """
+    r = client.post("/api/watch", json={**_VALID_BODY, field: blank})
+    assert r.status_code == 400
+    assert r.get_json()["error"] == (
+        "origin, dest_iata, dep_date and ret_date required"
+    )
+    assert watch_db.list_watches() == []
+
+
+def test_add_watch_valid_strings_still_work(client, watch_db):
+    """Sanity: the non-string guard does not reject valid string fields."""
+    r = client.post("/api/watch", json=_VALID_BODY)
+    assert r.status_code == 200
+    assert len(watch_db.list_watches()) == 1
+
+
 def test_list_watches_returns_saved(client, watch_db):
     client.post("/api/watch", json=_VALID_BODY)
     client.post("/api/watch", json={**_VALID_BODY, "dest_iata": "PEK", "dest_city": "Beijing"})
