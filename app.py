@@ -221,6 +221,22 @@ SKYSCANNER_POLL_TIMEOUT = int(os.environ.get("SKYSCANNER_POLL_TIMEOUT", "20"))
 # we keep polling, and we only bail after this many back-to-back silences. Bounds the
 # worst case to ~ stalls x SKYSCANNER_POLL_TIMEOUT of pure silence.
 SKYSCANNER_POLL_MAX_STALLS = int(os.environ.get("SKYSCANNER_POLL_MAX_STALLS", "3"))
+# Verbose provider tracing. When on, every flights-sky HTTP call is logged with its
+# status, the session status, and elapsed time so you can SEE what the async search is
+# doing (e.g. polls stuck on "incomplete", timeouts, throttling) instead of just a
+# silent None. Off by default; enable with SKYSCANNER_VERBOSE=1. When enabled and no
+# logging handler is configured yet, we attach a basic INFO handler so the lines show.
+SKYSCANNER_VERBOSE = os.environ.get("SKYSCANNER_VERBOSE", "").lower() in ("1", "true", "yes")
+if SKYSCANNER_VERBOSE and not logging.getLogger().handlers:  # pragma: no cover
+    logging.basicConfig(level=logging.INFO)
+
+
+def _sky_log(msg):
+    """Emit a flights-sky trace line at INFO when SKYSCANNER_VERBOSE is set."""
+    if SKYSCANNER_VERBOSE:
+        _log.info("[skyscanner] %s", msg)
+
+
 # ----------------------------- provider retry/backoff (#41) -----------------------------
 # Bounded exponential-backoff retry for TRANSIENT fare-provider failures (request
 # timeouts, connection errors, HTTP 5xx, and provider-side 429 rate limits). Applied
@@ -1249,6 +1265,8 @@ def skyscanner_fare(origin, dest, dep, ret, adults, children):
         "currency": "CAD", "market": "CA",
         "locale": "en-US", "cabinClass": "economy",
     }
+    t0 = time.time()
+    _sky_log(f"search {origin}->{dest} {dep}/{ret} adults={adults} children={children} …")
     r = _skyscanner_get(
         f"{base}/web/flights/search-roundtrip",
         params=params,
@@ -1257,14 +1275,22 @@ def skyscanner_fare(origin, dest, dep, ret, adults, children):
         # a total cap — a slow-but-progressing search keeps running to completion.
         timeout=(SKYSCANNER_CONNECT_TIMEOUT, SKYSCANNER_SEARCH_TIMEOUT),
     )
-    if r is None or r.status_code != 200:
+    if r is None:
+        _sky_log(f"search {origin}->{dest}: no response (timeout/connection) after {time.time()-t0:.1f}s → None")
+        return None
+    if r.status_code != 200:
+        _sky_log(f"search {origin}->{dest}: HTTP {r.status_code} after {time.time()-t0:.1f}s → None")
         return None
     try:
         data = r.json().get("data", {})
     except Exception:
+        _sky_log(f"search {origin}->{dest}: unparseable JSON → None")
         return None
     if not isinstance(data, dict):
         return None
+    _initial_ctx = data.get("context") if isinstance(data.get("context"), dict) else {}
+    _sky_log(f"search {origin}->{dest}: HTTP 200 in {time.time()-t0:.1f}s, "
+             f"status={_initial_ctx.get('status')}, sessionId={'yes' if _initial_ctx.get('sessionId') else 'no'}")
 
     # Step 2: poll until the session is complete (bounded).
     context = data.get("context") if isinstance(data.get("context"), dict) else {}
@@ -1275,6 +1301,7 @@ def skyscanner_fare(origin, dest, dep, ret, adults, children):
         poll_url = f"{base}/web/flights/search-incomplete"
         completed = False
         stalls = 0
+        poll_n = 0
         # Longer-but-bounded budget: SKYSCANNER_POLL_ATTEMPTS x SKYSCANNER_POLL_INTERVAL
         # (default ~24 x 1.5s) gives even slow long-haul sessions time to reach
         # "complete" instead of returning no data. Still bounded: a generous per-poll
@@ -1283,6 +1310,7 @@ def skyscanner_fare(origin, dest, dep, ret, adults, children):
         # longer aborts the whole search, but a genuinely hung session can't run forever.
         for _ in range(SKYSCANNER_POLL_ATTEMPTS):
             time.sleep(SKYSCANNER_POLL_INTERVAL)
+            poll_n += 1
             pr = _skyscanner_get(
                 poll_url,
                 params={"sessionId": session_id},
@@ -1300,11 +1328,14 @@ def skyscanner_fare(origin, dest, dep, ret, adults, children):
                 # SKYSCANNER_POLL_MAX_STALLS consecutive silences, since the session
                 # may simply be taking a while to finish.
                 stalls += 1
+                _sky_log(f"poll {poll_n}/{SKYSCANNER_POLL_ATTEMPTS} {origin}->{dest}: "
+                         f"no response (stall {stalls}/{SKYSCANNER_POLL_MAX_STALLS}) at {time.time()-t0:.1f}s")
                 if stalls >= SKYSCANNER_POLL_MAX_STALLS:
                     break
                 continue
             stalls = 0
             if pr.status_code != 200:
+                _sky_log(f"poll {poll_n}/{SKYSCANNER_POLL_ATTEMPTS} {origin}->{dest}: HTTP {pr.status_code}")
                 continue
             try:
                 data = pr.json().get("data", {})
@@ -1313,19 +1344,26 @@ def skyscanner_fare(origin, dest, dep, ret, adults, children):
             if not isinstance(data, dict):
                 continue
             ctx = data.get("context") if isinstance(data.get("context"), dict) else {}
+            _sky_log(f"poll {poll_n}/{SKYSCANNER_POLL_ATTEMPTS} {origin}->{dest}: "
+                     f"status={ctx.get('status')} at {time.time()-t0:.1f}s")
             if ctx.get("status") == "complete":
                 completed = True
                 break
         if not completed:
+            _sky_log(f"search {origin}->{dest}: gave up still INCOMPLETE after {poll_n} polls "
+                     f"({time.time()-t0:.1f}s) → None (falls through to next provider)")
             return None
 
     # Step 3: parse buckets[].items[].
     items = [it for it in _skyscanner_flatten_items(data)
              if _skyscanner_price(it) is not None]
     if not items:
+        _sky_log(f"search {origin}->{dest}: complete but 0 priced items ({time.time()-t0:.1f}s) → None")
         return None
 
     cheapest = min(items, key=_skyscanner_price)
+    _sky_log(f"search {origin}->{dest}: DONE in {time.time()-t0:.1f}s — "
+             f"{len(items)} priced itineraries, cheapest CAD {round(_skyscanner_price(cheapest))}")
     nonstops = [it for it in items if _skyscanner_is_nonstop(it)]
     ns = min(nonstops, key=_skyscanner_price) if nonstops else None
 
