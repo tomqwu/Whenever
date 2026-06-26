@@ -62,7 +62,21 @@ def remove_watch(db: WatchDB, watch_id: int) -> None:
 
 
 def main(argv=None) -> int:
-    """Open the DB, run all active watches, print summary, return exit code."""
+    """Open the DB, run all active watches, print summary, return exit code.
+
+    Refuses to run while DEMO_MODE is on (#44): in demo mode app.get_fare returns
+    clearly-labeled SAMPLE fares, and the scheduler PERSISTS each re-priced fare
+    into WATCH_DB — so running it in demo mode would leak demo prices into the
+    real watch database and emit bogus drop alerts. The price-watch checker is a
+    real-pricing background job; it has no business running on sample data, so we
+    refuse loudly rather than poison the DB.
+    """
+    if appmod.DEMO_MODE:
+        print("[ERROR] DEMO_MODE is on — refusing to run the price-watch checker on "
+              "sample fares (it would persist demo prices into the watch DB). "
+              "Unset DEMO_MODE to check real prices.")
+        return 0
+
     db_path = os.environ.get("WATCH_DB") or "whenever_watches.db"
     webhook_url = os.environ.get("WATCH_WEBHOOK_URL")
 

@@ -364,6 +364,14 @@ def check_all_watches(
                 book_ages = []
             book = kayak_link(origin, dest_iata, dep_date, ret_date, adults, book_ages)
 
+        # Defense-in-depth: never persist demo fares to the watch DB (#44).
+        # check_all_watches may be called from any entrypoint (not just
+        # scheduler.main which has its own DEMO_MODE guard), so we guard the
+        # write site directly: if the fare is tagged source="demo" we skip both
+        # db.update_price and the drop-alert logic for this watch.
+        if source == "demo":
+            continue
+
         # Record the check (null price OK in history)
         db.update_price(watch_id, new_price, source, book, now_iso)
 

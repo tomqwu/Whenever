@@ -216,6 +216,16 @@ PROVIDER_RETRIES = int(os.environ.get("PROVIDER_RETRIES", "2"))
 PROVIDER_BACKOFF = float(os.environ.get("PROVIDER_BACKOFF", "0.5"))
 PROVIDER_BACKOFF_MAX = float(os.environ.get("PROVIDER_BACKOFF_MAX", "4"))
 CURRENCY = os.environ.get("CURRENCY", "cad").lower()
+# ----------------------------- demo / sample mode (#44) -----------------------------
+# Opt-in, clearly-labeled SAMPLE-fare mode for no-key exploration. Default OFF.
+# When ON, EVERY fare is a deterministic, obviously-fake sample tagged
+# source="demo" (carrier "DemoAir"), real providers are NEVER called, and the UI
+# shows a prominent persistent "DEMO DATA — NOT real prices" banner. This is the
+# SOLE sanctioned exception to the real-data-only guardrail, and ONLY because it is
+# explicit and unmistakably labeled: demo data is NEVER a silent fallback when
+# providers fail/aren't configured (that path returns the no-data sentinel), and
+# demo fares are NEVER written to the real fare cache (FARE_CACHE_PATH).
+DEMO_MODE: bool = os.environ.get("DEMO_MODE", "").lower() in ("1", "true", "yes")
 FARE_CACHE_TTL = int(os.environ.get("FARE_CACHE_TTL", "3600"))
 # Disk-persistence path for the fare cache (#42). A JSON file in the working dir.
 # Empty string disables persistence (memory-only). FARE_CACHE_TTL <= 0 disables
@@ -343,6 +353,13 @@ def rate_limited(bucket: str, limit_fn):
 
 
 def providers_configured():
+    # DEMO_MODE (#44): the app serves ONLY clearly-labeled sample fares and never
+    # calls a real provider, so the configured-provider list is exactly ["demo"].
+    # This keeps demo and real strictly separate (no part-real/part-demo grid) and
+    # lets every existing provider-list consumer (health, meta, footer) surface the
+    # demo state without special-casing.
+    if DEMO_MODE:
+        return ["demo"]
     p = []
     if RAPIDAPI_KEY:
         p.append("skyscanner")
@@ -1429,6 +1446,69 @@ def _no_data_fare():
             "nonstop_airlines": None, "layovers": None, "alternatives": None}
 
 
+def _demo_seed(origin, dest, dep, ret, adults, children):
+    """A stable non-negative integer derived from the cell inputs.
+
+    Uses md5 over the joined inputs so the same cell always yields the same
+    sample numbers across processes and restarts (no randomness — required so a
+    resumed/streamed search is deterministic), yet varies by route AND date so
+    the demo grid looks realistic rather than uniform.
+    """
+    import hashlib
+    raw = "|".join(str(x) for x in (origin, dest, dep, ret, adults, children))
+    return int(hashlib.md5(raw.encode("utf-8")).hexdigest(), 16)
+
+
+def demo_fare(origin, dest, dep, ret, adults, children):
+    """Return a DETERMINISTIC, obviously-fake SAMPLE fare for demo mode (#44).
+
+    NOT a real price and NEVER derived from any provider: every value is computed
+    from a hash of the cell inputs so the grid is plausible-but-clearly-sample and
+    stable across restarts/streaming. The carrier is the obviously-fake "DemoAir"
+    and the result is tagged ``source="demo"`` so it can never be mistaken for or
+    silently substituted for a real fare. Always priced (never None-priced) and in
+    the normalized get_fare dict shape. Children/adults nudge the party total so a
+    family quote differs, like the real providers. Produced ONLY when DEMO_MODE is
+    on (callers gate on it); this function itself calls no provider and no network.
+    """
+    seed = _demo_seed(origin, dest, dep, ret, adults, children)
+    pax = max(1, adults + children)
+    # Per-person base 600..1399, scaled to the party — clearly sample magnitudes.
+    base_pp = 600 + (seed % 800)
+    cheapest = base_pp * pax
+    stops = (seed >> 8) % 3  # 0..2 connections on the cheapest sample
+    # Durations: cheapest 8h..23h59m; nonstop a bit shorter. Minutes, deterministic.
+    duration = 480 + (seed >> 12) % 960
+    nonstop_duration = max(300, duration - 60 - (seed >> 16) % 180)
+    # A clearly-fake connection airport for any non-nonstop sample.
+    layover_codes = ["DMO", "FAK", "SMP", "XXX"]
+    layover_iata = layover_codes[(seed >> 20) % len(layover_codes)]
+    layovers = ([{"iata": layover_iata, "duration_min": 60 + (seed >> 24) % 180}]
+                if stops else [])
+    if stops == 0:
+        # Cheapest IS already nonstop: nonstop fields must agree exactly so
+        # _chosen_price_under_threshold never promotes a fabricated higher price.
+        nonstop = cheapest
+        nonstop_duration = duration
+        nonstop_airlines = ["DemoAir"]
+    else:
+        # Connecting cheapest: a pricier nonstop alternative is realistic.
+        nonstop = round(cheapest * (1 + (5 + (seed >> 4) % 20) / 100.0))
+        nonstop_airlines = ["DemoAir"]
+    return {
+        "cheapest_cad": cheapest,
+        "stops": stops,
+        "nonstop_cad": nonstop,
+        "source": "demo",
+        "book": None,  # omit so _build_cell falls back to child-aware kayak_link (#44)
+        "duration_min": duration,
+        "nonstop_duration_min": nonstop_duration,
+        "airlines": ["DemoAir"],
+        "nonstop_airlines": nonstop_airlines,
+        "layovers": layovers,
+    }
+
+
 def _chosen_price_under_threshold(fare, nonstop_threshold):
     """The post-threshold "chosen" price for a fare dict (#43).
 
@@ -1526,7 +1606,15 @@ def _get_fare_uncached(origin, dest, dep, ret, adults, children, compare=False,
     compare=True: query ALL configured providers and return the one with the
     lowest POST-THRESHOLD chosen price (nonstop_threshold, a float fraction), with
     an "alternatives" list (see _get_fare_compare). Uses (configured) calls/cell.
+
+    DEMO_MODE short-circuits BOTH paths: it returns a clearly-labeled
+    ``demo_fare`` (source="demo") and NEVER calls a real provider — even with
+    compare on (a demo result has no real cross-provider comparison, so it's
+    returned as-is). This is the sole sanctioned exception to real-data-only and is
+    gated solely on the explicit DEMO_MODE flag, never a provider-failure fallback.
     """
+    if DEMO_MODE:
+        return demo_fare(origin, dest, dep, ret, adults, children)
     if compare:
         return _get_fare_compare(origin, dest, dep, ret, adults, children,
                                  nonstop_threshold)
@@ -1579,6 +1667,14 @@ def get_fare(origin, dest, dep, ret, adults, children, compare=False,
     float fraction) only affects compare mode (the post-threshold winner, #43);
     the fallback path and its cache key are unaffected.
     """
+    # DEMO_MODE: return the clearly-labeled sample fare WITHOUT touching the real
+    # fare cache (neither reading nor writing FARE_CACHE_PATH), so demo data can
+    # never land in / be served from the persistent real-fare cache. demo_fare is
+    # itself deterministic, so a per-cell cache buys nothing here.
+    if DEMO_MODE:
+        return _get_fare_uncached(origin, dest, dep, ret, adults, children,
+                                  compare, nonstop_threshold)
+
     if FARE_CACHE_TTL <= 0:
         return _get_fare_uncached(origin, dest, dep, ret, adults, children,
                                   compare, nonstop_threshold)
@@ -1616,8 +1712,10 @@ def index():
 
 @app.route("/api/health")
 def health():
+    # `demo` is an explicit flag (in ADDITION to providers==["demo"]) so the UI can
+    # unambiguously show the prominent "DEMO DATA — NOT real prices" banner (#44).
     return jsonify({"ollama": ollama_ok(), "model": OLLAMA_MODEL,
-                    "providers": providers_configured()})
+                    "providers": providers_configured(), "demo": DEMO_MODE})
 
 @app.route("/api/top-cities", methods=["POST"])
 @rate_limited("api", lambda: API_RATE_PER_MIN)
@@ -2155,7 +2253,14 @@ def api_watch_add():
     # free; if the user searched in compare mode the fallback key differs, so this
     # does one real ordered-fallback fetch (still cheap, one call). The client's
     # last_price/last_source are ignored entirely.
-    fare = get_fare(origin, dest_iata, dep_date, ret_date, adults, len(child_ages))
+    # DEMO_MODE (#44): demo fares are clearly-labeled SAMPLE data and must NEVER be
+    # persisted (here, into WATCH_DB) — a fake baseline would drive bogus scheduler
+    # drop alerts and let demo data leak out of the demo path. Skip the lookup
+    # entirely in demo mode so the watch is created with NO baseline (the scheduler,
+    # which uses real providers, seeds the first real price later). Demo and real
+    # never mix.
+    fare = (_no_data_fare() if DEMO_MODE
+            else get_fare(origin, dest_iata, dep_date, ret_date, adults, len(child_ages)))
     cheapest = fare.get("cheapest_cad")
     if cheapest is not None:
         last_price = int(float(cheapest))
@@ -2301,9 +2406,17 @@ def build_recommendation(origin, results, adults, child_ages, families):
     summary = (f"From {origin}, {adults} adults + {len(child_ages)} kids, "
                f"{families} family/families. Per-family best options: "
                + json.dumps(bests))
+    # In demo mode the data is locally generated SAMPLE fares, NOT real prices, so
+    # the prompt must say so — never tell the LLM it came from live flight APIs (#44).
+    data_provenance = (
+        "The data below is LOCALLY GENERATED SAMPLE DATA for a product demo — these are "
+        "NOT real fares and were NOT collected from any flight API; treat them as illustrative only"
+        if DEMO_MODE else
+        "The data below was COLLECTED FROM LIVE FLIGHT APIs"
+    )
     prompt = (
         "You are a savvy travel planner for someone with FLEXIBLE dates who wants the most "
-        "cost-effective vacation. The data below was COLLECTED FROM LIVE FLIGHT APIs (prices are "
+        "cost-effective vacation. " + data_provenance + " (prices are "
         "CAD per family; `duration_min` is total round-trip flight time in minutes, `duration` is "
         "the same as a human-readable string, and may be null when unknown; `airlines` lists the "
         "operating carrier(s) and `layovers` summarizes connection airports/durations, either of "
@@ -2315,15 +2428,18 @@ def build_recommendation(origin, results, adults, child_ages, families):
         "option) merely because it is the cheapest — a modest saving rarely justifies a vastly "
         "longer trip. Then give a one-line runner-up. Be concise.\n\n" + summary
     )
+    # In demo mode, prefix the summary so even the AI/fallback text is unmistakably
+    # labeled as based on SAMPLE data, never real fares (#44).
+    demo_prefix = "(DEMO — sample fares, NOT real prices) " if DEMO_MODE else ""
     try:
-        return ollama_chat(prompt)
+        return demo_prefix + ollama_chat(prompt)
     except Exception as e:
         # graceful fallback: cheapest by price
         valid = [b for b in bests if b["price_per_family"]]
         if not valid:
-            return "No priceable options found."
+            return demo_prefix + "No priceable options found."
         top = min(valid, key=lambda b: b["price_per_family"])
-        return (f"Best value: {top['city']} ({top['iata']}) at ~CA${top['price_per_family']:,}"
+        return (f"{demo_prefix}Best value: {top['city']} ({top['iata']}) at ~CA${top['price_per_family']:,}"
                 f"/family, {top['dep']} → {top['ret']}, {top['chosen']}. "
                 f"(AI summary unavailable: {e})")
 

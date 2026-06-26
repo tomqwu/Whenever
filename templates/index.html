@@ -74,6 +74,19 @@ td.nodata{color:#b6b6ae;font-size:13px;cursor:default}
 .banner .bicon{font-size:18px;line-height:1.4}
 .banner b,.banner code{color:#8a4b16}
 .banner code{background:#fbeeda;border-radius:4px;padding:1px 5px;font-size:12px}
+/* DEMO/sample mode (#44): a loud, impossible-to-miss persistent bar so demo
+   numbers can NEVER be confused with real fares. Deliberately high-contrast and
+   distinct from the calm #39 banner. */
+.demo-banner{display:flex;gap:10px;align-items:center;background:#b3261e;color:#fff;
+  border-radius:10px;padding:11px 16px;margin-bottom:16px;font-size:14px;
+  font-weight:700;line-height:1.4;letter-spacing:.01em;
+  box-shadow:0 1px 6px rgba(179,38,30,.35)}
+.demo-banner .bicon{font-size:20px}
+.demo-banner small{display:block;font-weight:500;font-size:12px;opacity:.95;margin-top:2px}
+/* Small inline "demo" tag on each sample cell/card. */
+.demo-tag{display:inline-block;font-size:10px;font-weight:700;letter-spacing:.04em;
+  background:#fdecea;border:1px solid #f3b6b1;color:#b3261e;border-radius:5px;
+  padding:0 5px;margin-left:6px;vertical-align:middle}
 /* Wrap each city's matrix so a wide grid scrolls within its box on small
    screens instead of overflowing the viewport (#40). */
 .table-scroll{overflow-x:auto;-webkit-overflow-scrolling:touch;border-radius:11px}
@@ -126,6 +139,7 @@ button.watch.watched{background:#e9f3e9;color:#2f7d32;border-color:#bcdcbc;curso
   <div class="brand"><span class="em">✈️</span><h1>Whenever</h1></div>
   <div class="tag">No fixed dates? That's your advantage. Tell us roughly — we'll find exactly.</div>
   <div class="status" id="status">Checking local model…</div>
+  <div class="demo-banner" id="demoBanner" style="display:none" role="alert"></div>
   <div class="banner" id="noProviderBanner" style="display:none"></div>
 
   <div class="panel">
@@ -297,24 +311,51 @@ function renderKids(ages){
 }
 function kidAges(){ return [...$('#kids').querySelectorAll('input')].map(i=>parseInt(i.value)||0); }
 
+// DEMO_MODE flag (#44): set from /api/health. When true, the app is serving
+// clearly-labeled SAMPLE fares (never real prices) and the prominent demo banner
+// + per-cell demo tags are shown. Read by cell rendering below.
+let IS_DEMO = false;
+
 async function health(){
   try{
     const h = await (await fetch('/api/health')).json();
     const s=$('#status');
     const prov = (h.providers||[]);
+    IS_DEMO = !!h.demo;
     let modelPart = h.ollama
       ? `Local model <b>${escapeHtml(h.model)}</b> connected (analyzes results)`
       : `<span class="warn">Ollama not reachable</span> — run <code>ollama serve</code> &amp; pull <b>${escapeHtml(h.model)}</b>`;
-    let farePart = prov.length
-      ? `flight data: <b>${escapeHtml(prov.join(', '))}</b>`
-      : `<span class="warn">no flight API configured</span> — set TRAVELPAYOUTS_TOKEN or Amadeus keys to fetch real prices`;
+    let farePart = IS_DEMO
+      ? `<span class="warn">DEMO MODE — sample fares, NOT real prices</span>`
+      : (prov.length
+        ? `flight data: <b>${escapeHtml(prov.join(', '))}</b>`
+        : `<span class="warn">no flight API configured</span> — set TRAVELPAYOUTS_TOKEN or Amadeus keys to fetch real prices`);
     s.innerHTML = modelPart + ' · ' + farePart;
+    // Prominent, persistent demo banner (#44): loud and impossible to miss so
+    // demo numbers can NEVER be mistaken for real fares.
+    const demoBanner = $('#demoBanner');
+    if(demoBanner){
+      if(IS_DEMO){
+        demoBanner.style.display = 'flex';
+        demoBanner.innerHTML =
+          '<span class="bicon">⚠️</span>' +
+          '<span>DEMO DATA — sample fares, NOT real prices.' +
+          '<small>Demo mode is ON. Every price below is a deterministic sample (carrier ' +
+          '“DemoAir”), generated locally for exploration — no real flight API was called. ' +
+          'Unset <code>DEMO_MODE</code> to fetch real fares.</small></span>';
+      }else{
+        demoBanner.style.display = 'none';
+        demoBanner.innerHTML = '';
+      }
+    }
     // A prominent, friendly banner when no flight provider is configured (#39):
     // explain the situation in plain language and how to fix it (env keys), rather
-    // than leaving only the quiet status line / empty result cells.
+    // than leaving only the quiet status line / empty result cells. Suppressed in
+    // demo mode (#44) — the demo banner already explains the state, and "demo" is a
+    // configured provider, so the two never show at once.
     const banner = $('#noProviderBanner');
     if(banner){
-      if(prov.length){
+      if(prov.length || IS_DEMO){
         banner.style.display = 'none';
         banner.innerHTML = '';
       }else{
@@ -563,7 +604,10 @@ function _cellHtml(c, thr) {
   const airTxt = fmtAirlines(c.airlines);   // already escaped
   const stopsDur = [airTxt, stopsTxt, durTxt].filter(Boolean).join(' · ');
   const layTxt = fmtLayovers(c.layovers);   // already escaped, '' when none
-  let inner = '<a class="price" href="' + escapeHtml(c.book) + '" target="_blank" rel="noopener">' + money(c.cheapest_cad) + '</a>' +
+  // Demo/sample cell (#44): a small inline tag so even an individual cell is
+  // unmistakably labeled as a sample, never a real fare.
+  const demoTag = (c.source === 'demo') ? '<span class="demo-tag">demo</span>' : '';
+  let inner = '<a class="price" href="' + escapeHtml(c.book) + '" target="_blank" rel="noopener">' + money(c.cheapest_cad) + '</a>' + demoTag +
     '<div class="stops">' + stopsDur + '</div>' +
     (layTxt ? '<div class="layover">' + layTxt + '</div>' : '');
   if (c.nonstop_cad) {
@@ -837,9 +881,15 @@ $('#run').onclick = async () => {
       if (metaInfo) {
         const prov = (metaInfo.providers || []);
         const pax = (metaInfo.adults || 0) + (metaInfo.child_ages || []).length;
-        $('#foot').innerHTML = (prov.length
-            ? 'Live flight data via <b>' + escapeHtml(prov.join(', ')) + '</b>. The model analyzes these real fares — it does not generate prices. '
-            : '<span class="estimate-flag">no flight API</span> Set TRAVELPAYOUTS_TOKEN (or Amadeus keys) so the app can fetch real prices. ') +
+        // Demo mode (#44): the footer must NOT claim "Live flight data"/"real fares"
+        // — these are clearly-labeled SAMPLE fares. Demo is detected via IS_DEMO or
+        // providers==["demo"], so the footer agrees with the demo banner.
+        const isDemo = IS_DEMO || prov.includes('demo');
+        $('#foot').innerHTML = (isDemo
+            ? '<span class="estimate-flag">DEMO</span> Sample fares only — NOT real prices and NOT from any flight API. Unset DEMO_MODE for real data. '
+            : (prov.length
+              ? 'Live flight data via <b>' + escapeHtml(prov.join(', ')) + '</b>. The model analyzes these real fares — it does not generate prices. '
+              : '<span class="estimate-flag">no flight API</span> Set TRAVELPAYOUTS_TOKEN (or Amadeus keys) so the app can fetch real prices. ')) +
           (sawNoData ? '<span class="warn">Some cells returned no fares from the API. </span>' : '') +
           'Per family of ' + pax + '. Prices CAD · click any price to open the booking.';
       }
@@ -911,9 +961,13 @@ function render(data){
   });
   const prov = (data.providers||[]);
   const noData = data.results.some(r=>r.grid.some(row=>row.some(c=>c.source==='no-data')));
-  $('#foot').innerHTML = (prov.length
-      ? 'Live flight data via <b>'+escapeHtml(prov.join(', '))+'</b>. The model analyzes these real fares — it does not generate prices. '
-      : '<span class="estimate-flag">no flight API</span> Set TRAVELPAYOUTS_TOKEN (or Amadeus keys) so the app can fetch real prices. ')+
+  // Demo mode (#44): footer must say SAMPLE/demo, never "Live flight data"/"real fares".
+  const isDemo = IS_DEMO || prov.includes('demo');
+  $('#foot').innerHTML = (isDemo
+      ? '<span class="estimate-flag">DEMO</span> Sample fares only — NOT real prices and NOT from any flight API. Unset DEMO_MODE for real data. '
+      : (prov.length
+        ? 'Live flight data via <b>'+escapeHtml(prov.join(', '))+'</b>. The model analyzes these real fares — it does not generate prices. '
+        : '<span class="estimate-flag">no flight API</span> Set TRAVELPAYOUTS_TOKEN (or Amadeus keys) so the app can fetch real prices. '))+
     (noData?'<span class="warn">Some cells returned no fares from the API. </span>':'')+
     'Per family of '+(data.adults+data.child_ages.length)+'. Prices CAD · click any price to open the booking.';
 }
