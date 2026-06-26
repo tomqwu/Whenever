@@ -1591,6 +1591,53 @@ def test_skyscanner_fare_poll_tolerates_a_transient_stall(monkeypatch, fake_resp
     assert state["n"] == 2
 
 
+def test_skyscanner_verbose_traces_each_call(monkeypatch, fake_resp, caplog):
+    """SKYSCANNER_VERBOSE logs the search + each poll + the outcome at INFO, so the
+    async flow is visible instead of a silent None."""
+    import logging
+    monkeypatch.setattr(appmod, "RAPIDAPI_KEY", "k")
+    monkeypatch.setattr(appmod, "SKYSCANNER_VERBOSE", True)
+    monkeypatch.setattr(appmod.time, "sleep", lambda *_a, **_k: None)
+    complete = _sky_complete_payload()
+    state = {"n": 0}
+
+    def fake_get(url, headers=None, params=None, timeout=None):
+        if url.endswith("/web/flights/search-roundtrip"):
+            return fake_resp(
+                {"data": {"context": {"status": "incomplete", "sessionId": "sid"}}},
+                status=200)
+        state["n"] += 1
+        if state["n"] == 1:
+            return fake_resp(
+                {"data": {"context": {"status": "incomplete", "sessionId": "sid"}}},
+                status=200)
+        return fake_resp(complete, status=200)
+
+    monkeypatch.setattr(appmod.requests, "get", fake_get)
+    with caplog.at_level(logging.INFO, logger="app"):
+        res = appmod.skyscanner_fare("YYZ", "PEK", "2026-12-12", "2027-01-04", 2, 0)
+
+    assert res is not None
+    text = " ".join(r.getMessage() for r in caplog.records)
+    assert "[skyscanner] search YYZ->PEK" in text          # initial call traced
+    assert "status=incomplete" in text                      # a poll trace
+    assert "poll 1/" in text and "poll 2/" in text          # per-poll numbering
+    assert "DONE" in text                                   # outcome with price
+
+
+def test_skyscanner_verbose_off_is_silent(monkeypatch, fake_resp, caplog):
+    """With SKYSCANNER_VERBOSE off (default) no [skyscanner] trace lines are emitted."""
+    import logging
+    monkeypatch.setattr(appmod, "RAPIDAPI_KEY", "k")
+    monkeypatch.setattr(appmod, "SKYSCANNER_VERBOSE", False)
+    monkeypatch.setattr(appmod.time, "sleep", lambda *_a, **_k: None)
+    monkeypatch.setattr(appmod.requests, "get",
+                        lambda *a, **k: fake_resp(_sky_complete_payload(), status=200))
+    with caplog.at_level(logging.INFO, logger="app"):
+        appmod.skyscanner_fare("YYZ", "LAX", "2026-08-07", "2026-08-09", 1, 0)
+    assert "[skyscanner]" not in " ".join(r.getMessage() for r in caplog.records)
+
+
 def test_skyscanner_fare_search_uses_connect_read_timeout_tuple(monkeypatch, fake_resp):
     """The initial search-roundtrip request uses a (connect, read) timeout tuple.
 
