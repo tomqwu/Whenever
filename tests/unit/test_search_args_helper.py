@@ -109,6 +109,43 @@ class TestSearchArgsFromBody:
         assert result["threshold_pct"] == 30.0
         assert result["families"] == 2
 
+    def test_compare_defaults_false(self):
+        """compare_providers absent -> compare=False (ordered fallback, #43)."""
+        body = {
+            "origin": "YYZ",
+            "destinations": [{"city": "Shanghai", "iata": "PVG"}],
+            "dep_dates": ["2026-12-12"],
+            "ret_dates": ["2027-01-04"],
+        }
+        result = appmod._search_args_from_body(body)
+        assert result is not None
+        assert result["compare"] is False
+
+    def test_compare_providers_true_parsed(self):
+        """compare_providers: true -> compare=True (opt-in cross-provider mode)."""
+        body = {
+            "origin": "YYZ",
+            "destinations": [{"city": "Shanghai", "iata": "PVG"}],
+            "dep_dates": ["2026-12-12"],
+            "ret_dates": ["2027-01-04"],
+            "compare_providers": True,
+        }
+        result = appmod._search_args_from_body(body)
+        assert result is not None
+        assert result["compare"] is True
+
+    def test_compare_providers_truthy_coerced_to_bool(self):
+        """A truthy non-bool compare_providers is coerced to a real bool."""
+        body = {
+            "origin": "YYZ",
+            "destinations": [{"city": "Shanghai", "iata": "PVG"}],
+            "dep_dates": ["2026-12-12"],
+            "ret_dates": ["2027-01-04"],
+            "compare_providers": 1,
+        }
+        result = appmod._search_args_from_body(body)
+        assert result["compare"] is True
+
     def test_threshold_parsed_as_float(self):
         """nonstop_threshold must be float (not int-truncated)."""
         body = {

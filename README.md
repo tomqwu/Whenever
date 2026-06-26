@@ -29,6 +29,10 @@ cd Whenever
 - **Flexible dates** → a 4×4 (or larger) grid of departure × return dates.
 - **Best-value matrix** → each cell shows the cheapest fare, stop count, and the nonstop fare
   where one exists; nonstop is auto-picked when its premium is within your threshold.
+- **Compare all providers (opt-in)** → by default each cell makes one provider call (first real
+  price wins). Tick **Compare all providers** to query every configured provider per cell and keep
+  the cheapest, showing the runners-up as a subtle "also: SOURCE $PRICE" line. It's slower and uses
+  more provider quota, so it's off by default.
 - **Clickable prices** → every fare deep-links to Kayak/Google Flights to book.
 - **AI recommendation** → the model reads the grid and names the single best trip.
 - **Export results** → after a search, download the fare matrix as a PDF or CSV from the UI.

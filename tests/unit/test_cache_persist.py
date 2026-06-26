@@ -18,12 +18,15 @@ import os
 
 import app as appmod
 
-_ARGS = ("YYZ", "PVG", "2026-12-12", "2027-01-04", 2, 0)
+# 7-element key: (origin, dest, dep, ret, adults, children, compare). The trailing
+# compare flag (#43) keeps compared vs ordered-fallback fares in separate cache slots.
+_ARGS = ("YYZ", "PVG", "2026-12-12", "2027-01-04", 2, 0, False)
 _REAL_FARE = {"cheapest_cad": 4200, "stops": 1, "nonstop_cad": None, "source": "travelpayouts"}
 _NO_DATA = {"cheapest_cad": None, "stops": None, "nonstop_cad": None,
             "source": "no-data", "duration_min": None,
             "nonstop_duration_min": None, "airlines": None,
-            "nonstop_airlines": None, "layovers": None}
+            "nonstop_airlines": None, "layovers": None,
+            "alternatives": None}
 
 
 def _enable_persistence(monkeypatch, tmp_path, ttl=3600):
@@ -64,7 +67,7 @@ def test_load_drops_stale_entries(monkeypatch, tmp_path):
     now = 1_000_000.0
     monkeypatch.setattr(appmod.time, "time", lambda: now)
 
-    fresh = ("YYZ", "LHR", "2026-12-12", "2027-01-04", 2, 0)
+    fresh = ("YYZ", "LHR", "2026-12-12", "2027-01-04", 2, 0, False)
     # Hand-write a file with one stale (fetched > TTL ago) and one fresh record.
     records = [
         {"key": list(_ARGS), "fetched": now - 3601, "result": _REAL_FARE},   # stale
@@ -113,7 +116,7 @@ def test_save_prunes_stale_entries(monkeypatch, tmp_path):
     now = 1_000_000.0
     monkeypatch.setattr(appmod.time, "time", lambda: now)
 
-    stale_key = ("YYZ", "CDG", "2026-12-12", "2027-01-04", 2, 0)
+    stale_key = ("YYZ", "CDG", "2026-12-12", "2027-01-04", 2, 0, False)
     appmod._fare_cache[stale_key] = (now - 3601, _REAL_FARE)   # fetched > TTL ago
     appmod._fare_cache[_ARGS] = (now - 60, _REAL_FARE)         # fresh
 
@@ -231,8 +234,8 @@ def test_load_missing_file_starts_empty(monkeypatch, tmp_path):
 # per-record validation: mixed valid + invalid records
 # ---------------------------------------------------------------------------
 
-_KEY_B = ("YYZ", "PEK", "2026-12-15", "2027-01-10", 2, 0)  # result is a string
-_KEY_C = ("YYZ", "CAN", "2026-12-20", "2027-01-15", 1, 0)  # result no-data dict
+_KEY_B = ("YYZ", "PEK", "2026-12-15", "2027-01-10", 2, 0, False)  # result is a string
+_KEY_C = ("YYZ", "CAN", "2026-12-20", "2027-01-15", 1, 0, False)  # result no-data dict
 _KEY_D = ("YYZ",)                                            # bad/short key placeholder
 
 
@@ -260,8 +263,9 @@ def test_load_per_record_validation_only_valid_loaded(monkeypatch, tmp_path):
          "result": {"cheapest_cad": None, "stops": None}},
         # (d) bad key — only 1 element
         {"key": ["YYZ"], "fetched": now - 60, "result": _REAL_FARE},
-        # (e) stale (fetched > TTL ago)
-        {"key": list(_ARGS)[:5] + [1], "fetched": now - 3601, "result": _REAL_FARE},
+        # (e) stale (fetched > TTL ago) — valid 7-element key, dropped for staleness
+        {"key": ["YYZ", "MEL", "2026-12-12", "2027-01-04", 2, 1, False],
+         "fetched": now - 3601, "result": _REAL_FARE},
     ]
     path.write_text(json.dumps(records), encoding="utf-8")
 
@@ -337,17 +341,17 @@ def test_load_no_data_result_causes_real_fetch(monkeypatch, tmp_path):
 
 
 def test_load_bad_key_length_dropped(monkeypatch, tmp_path):
-    """A record with a key that isn't exactly 6 elements is dropped silently."""
+    """A record with a key that isn't exactly 7 elements is dropped silently."""
     path = _enable_persistence(monkeypatch, tmp_path)
     now = 1_000_000.0
     monkeypatch.setattr(appmod.time, "time", lambda: now)
 
     records = [
-        # 5 elements (missing children)
-        {"key": ["YYZ", "PVG", "2026-12-12", "2027-01-04", 2],
+        # 6 elements (old pre-#43 layout, missing the compare flag)
+        {"key": ["YYZ", "PVG", "2026-12-12", "2027-01-04", 2, 0],
          "fetched": now - 60, "result": _REAL_FARE},
-        # 7 elements (extra)
-        {"key": ["YYZ", "PVG", "2026-12-12", "2027-01-04", 2, 0, "extra"],
+        # 8 elements (extra)
+        {"key": ["YYZ", "PVG", "2026-12-12", "2027-01-04", 2, 0, False, "extra"],
          "fetched": now - 60, "result": _REAL_FARE},
     ]
     path.write_text(json.dumps(records), encoding="utf-8")

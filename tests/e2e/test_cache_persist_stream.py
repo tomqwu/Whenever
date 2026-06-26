@@ -28,7 +28,9 @@ from .conftest import _patch_common
 
 # One destination, one date pair -> exactly one grid cell -> at most one fare lookup.
 # adults=2/children=0 matches _search_args_from_body's defaults for this body.
-_KEY = ("YYZ", "PVG", "2026-12-12", "2027-01-04", 2, 0)
+# 7-element cache key including the trailing compare flag (#43); the search body
+# omits compare_providers, so the request resolves to compare=False.
+_KEY = ("YYZ", "PVG", "2026-12-12", "2027-01-04", 2, 0, False)
 _SEARCH_BODY = {
     "origin": "YYZ",
     "destinations": [{"city": "Shanghai", "iata": "PVG"}],

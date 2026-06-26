@@ -56,6 +56,7 @@ td a.price:hover{text-decoration:underline}
 .stops{font-size:10.5px;color:#8a8a83}
 .layover{font-size:10px;color:#a08a4a;margin-top:1px}
 .ns{font-size:11px;margin-top:2px}
+.alts{font-size:9.5px;color:#9a9a92;margin-top:2px;font-style:italic}
 td.pick-ns{background:#e9f3e9}
 td.pick-ns .ns{color:#2f7d32;font-weight:600}
 td.best{outline:2px solid var(--accent);outline-offset:-2px}
@@ -168,6 +169,13 @@ button.watch.watched{background:#e9f3e9;color:#2f7d32;border-color:#bcdcbc;curso
       <div class="field"><label>Nonstop premium OK (%)</label><input id="thresh" type="number" value="25"></div>
     </div>
 
+    <div class="row" style="margin-top:12px;align-items:center">
+      <label class="cmp" style="display:flex;align-items:center;gap:8px;font-size:13px;cursor:pointer">
+        <input id="compareProviders" type="checkbox">
+        Compare all providers (slower, uses more quota)
+      </label>
+    </div>
+
     <div class="row" style="margin-top:16px;align-items:center">
       <button id="run">Find best value</button>
       <button id="exportPdf" class="sec" disabled>&#8203;&#11015; PDF</button>
@@ -230,6 +238,18 @@ function fmtLayovers(layovers){
     return dur ? iata + ' (' + dur + ')' : iata;
   });
   return 'via ' + parts.join(', ');
+}
+
+// fmtAlternatives: compact "also: SOURCE $PRICE · SOURCE $PRICE" line for the
+// OTHER providers' real prices in compare mode (#43), or '' when there are none
+// (fallback mode, or comparison found a single provider). Each provider source
+// is escapeHtml'd and each price is rendered numerically via money().
+function fmtAlternatives(alts){
+  if (!Array.isArray(alts) || !alts.length) return '';
+  const parts = alts
+    .filter(a => a && a.cheapest_cad != null)
+    .map(a => escapeHtml(a.source) + ' ' + money(a.cheapest_cad));
+  return parts.length ? 'also: ' + parts.join(' · ') : '';
 }
 
 // escapeHtml: HTML-escape a value so no untrusted string (from the server,
@@ -551,6 +571,10 @@ function _cellHtml(c, thr) {
     const nsDur = (c.nonstop_duration_min != null ? fmtDuration(c.nonstop_duration_min) : '');
     inner += '<div class="ns">ns ' + money(c.nonstop_cad) + (nsDur ? ' · ' + nsDur : '') + '</div>';
   }
+  // compare mode (#43): show the OTHER providers' prices subtly beneath the chosen
+  // (cheapest) price so the user can see the cross-provider comparison.
+  const altTxt = fmtAlternatives(c.alternatives);
+  if (altTxt) inner += '<div class="alts" title="other providers’ prices for these dates">' + altTxt + '</div>';
   return '<td class="' + cls + '" data-k="' + key + '">' + inner + '</td>';
 }
 
@@ -594,6 +618,7 @@ $('#run').onclick = async () => {
     dep_start: $('#depStart').value, dep_span: parseInt($('#depSpan').value) || 2,
     ret_start: $('#retStart').value, ret_span: parseInt($('#retSpan').value) || 2,
     nonstop_threshold: parseFloat($('#thresh').value) || 25,
+    compare_providers: $('#compareProviders').checked,
   };
   // Snapshot the share state NOW, at search start, from the current DOM/CITIES.
   // The results being streamed correspond to this submitted request, so the
@@ -612,6 +637,7 @@ $('#run').onclick = async () => {
     ret_start: $('#retStart').value,
     ret_span: parseInt($('#retSpan').value) || 2,
     nonstop_threshold: parseFloat($('#thresh').value) || 25,
+    compare_providers: $('#compareProviders').checked,
   };
   // Clear any stale export state: a new search invalidates the previous result.
   // LAST_PAYLOAD/export buttons are only re-armed on the `done` event below, so
@@ -1168,6 +1194,9 @@ function restoreFromHash() {
   set('#retStart', retStart);
   set('#retSpan', _vNum(obj.ret_span, 1, 14));
   set('#thresh', _vNum(obj.nonstop_threshold, 0, 500));
+  // compare_providers: opt-in cross-provider comparison (#43). Restore the
+  // checkbox from a shared link; default unchecked when absent/falsy.
+  if ($('#compareProviders')) $('#compareProviders').checked = !!obj.compare_providers;
 
   // child_ages: array of integers 0–17; drop non-numeric entries.
   // A share link is URL-controlled, so a crafted hash could carry thousands of
