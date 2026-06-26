@@ -36,6 +36,34 @@ def test_amadeus_token_fetch_then_cache(monkeypatch, fake_resp):
     assert calls["n"] == 1
 
 
+def test_amadeus_token_persistent_503_returns_none(monkeypatch, fake_resp):
+    """Persistent 503 on the token endpoint must return None (not raise)."""
+    monkeypatch.setattr(appmod, "AMADEUS_ID", "id")
+    monkeypatch.setattr(appmod, "AMADEUS_SECRET", "secret")
+    monkeypatch.setattr(appmod, "_request_with_retry",
+                        lambda *a, **k: fake_resp({}, status=503))
+    assert appmod.amadeus_token() is None
+
+
+def test_amadeus_token_persistent_429_returns_none(monkeypatch, fake_resp):
+    """Persistent 429 on the token endpoint must return None (not raise)."""
+    monkeypatch.setattr(appmod, "AMADEUS_ID", "id")
+    monkeypatch.setattr(appmod, "AMADEUS_SECRET", "secret")
+    monkeypatch.setattr(appmod, "_request_with_retry",
+                        lambda *a, **k: fake_resp({}, status=429))
+    assert appmod.amadeus_token() is None
+
+
+def test_amadeus_fare_token_503_gracefully_degrades(monkeypatch, fake_resp):
+    """If token retrieval gets a persistent 5xx, amadeus_fare returns None (no raise)."""
+    monkeypatch.setattr(appmod, "AMADEUS_ID", "id")
+    monkeypatch.setattr(appmod, "AMADEUS_SECRET", "secret")
+    monkeypatch.setattr(appmod, "_request_with_retry",
+                        lambda *a, **k: fake_resp({}, status=503))
+    result = appmod.amadeus_fare("YYZ", "PVG", "2026-12-12", "2027-01-04", 2, 0)
+    assert result is None
+
+
 def test_amadeus_fare_none_without_token(monkeypatch):
     monkeypatch.setattr(appmod, "amadeus_token", lambda: None)
     assert appmod.amadeus_fare("YYZ", "PVG", "2026-12-12", "2027-01-04", 2, 0) is None

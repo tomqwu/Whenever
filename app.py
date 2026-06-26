@@ -662,9 +662,8 @@ def amadeus_token():
               "client_id": AMADEUS_ID, "client_secret": AMADEUS_SECRET},
         timeout=20,
     )
-    if r is None:
+    if r is None or r.status_code != 200:
         return None
-    r.raise_for_status()
     j = r.json()
     _amadeus_token["value"] = j["access_token"]
     _amadeus_token["exp"] = time.time() + j.get("expires_in", 1799)
