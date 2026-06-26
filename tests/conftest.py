@@ -4,10 +4,11 @@ import app as appmod
 
 class FakeResp:
     """Stand-in for a requests.Response."""
-    def __init__(self, json_data=None, status=200, raise_exc=None):
+    def __init__(self, json_data=None, status=200, raise_exc=None, headers=None):
         self._json = {} if json_data is None else json_data
         self.status_code = status
         self._raise = raise_exc
+        self.headers = {} if headers is None else headers
 
     def json(self):
         return self._json
