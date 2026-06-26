@@ -34,6 +34,8 @@ cd Whenever
 - **Export results** → after a search, download the fare matrix as a PDF or CSV from the UI.
 - **Shareable searches** → Searches are shareable — after running, copy the link from the **Copy link** button to share a prefilled, auto-run search.
 - **Watch a trip** → after a search, tap **☆ Watch** on any priced city to save its best trip for price-drop monitoring; run `python scheduler.py` (e.g. via cron) to re-price all watches and alert when a fare drops.
+- **Mobile-friendly** → the form stacks and the date matrix scrolls horizontally inside its own container on small screens, so the app stays usable on a phone without sideways page-scroll.
+- **Friendly empty/error states** → cells with no fare show a calm "—" (with a "no fare found for these dates" tooltip) instead of an alarming error; a city or search that finds nothing shows a short "try different dates or add a provider key" note; and with no flight provider configured a clear banner explains how to add one.
 
 ## Prerequisites
 

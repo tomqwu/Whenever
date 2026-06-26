@@ -60,6 +60,22 @@ td.pick-ns{background:#e9f3e9}
 td.pick-ns .ns{color:#2f7d32;font-weight:600}
 td.best{outline:2px solid var(--accent);outline-offset:-2px}
 td.err{color:#b94a48;font-size:11px}
+/* A no-data cell reads as a calm "no result", not an error: a muted em dash
+   with an explanatory title — not the alarming red .err style (#39). */
+td.nodata{color:#b6b6ae;font-size:13px;cursor:default}
+/* Friendly empty-state note shown when a whole city/search found no fares (#39). */
+.empty-state{background:#fbf8f2;border:1px dashed #e3dcc8;border-radius:10px;
+  padding:12px 14px;color:#7a6a4a;font-size:13px;line-height:1.5}
+/* Prominent, friendly banner when no flight provider is configured (#39). */
+.banner{display:flex;gap:10px;align-items:flex-start;background:#fff7ef;
+  border:1px solid #f0d9bf;border-radius:12px;padding:12px 16px;margin-bottom:18px;
+  font-size:13px;line-height:1.5;color:#7a5b1a}
+.banner .bicon{font-size:18px;line-height:1.4}
+.banner b,.banner code{color:#8a4b16}
+.banner code{background:#fbeeda;border-radius:4px;padding:1px 5px;font-size:12px}
+/* Wrap each city's matrix so a wide grid scrolls within its box on small
+   screens instead of overflowing the viewport (#40). */
+.table-scroll{overflow-x:auto;-webkit-overflow-scrolling:touch;border-radius:11px}
 .foot{font-size:12px;color:var(--mut);margin-top:6px}
 .estimate-flag{display:inline-block;font-size:11px;background:#fff3cd;border:1px solid #f0e0a0;color:#7a5b00;border-radius:5px;padding:1px 7px;margin-left:8px}
 button.watch{margin-top:8px;padding:4px 10px;font-size:12px;font-weight:600;background:#fff;color:#8a4b16;border-color:var(--accent)}
@@ -71,6 +87,37 @@ button.watch.watched{background:#e9f3e9;color:#2f7d32;border-color:#bcdcbc;curso
 .watched-item .wprice{font-weight:700;color:#1456b0}
 .watched-item button.rm{padding:2px 9px;font-size:13px;background:#fff;color:#b94a48;border-color:#e0c4c4}
 .watched-empty{font-size:12px;color:var(--mut)}
+/* ---------------- mobile-responsive layout (#40) ----------------
+   Tablet / small-laptop: tighten padding, let the summary cards collapse, and
+   make form fields wrap to full width so nothing overflows the viewport. */
+@media (max-width:768px){
+  .wrap{padding:16px 14px 64px}
+  .brand h1{font-size:21px}
+  .row{gap:12px}
+  /* Inputs/fields grow to fill the row and wrap cleanly instead of overflowing. */
+  .field{flex:1 1 160px;min-width:0}
+  .field input:not([type=number]),.field select{width:100%}
+  /* The destination input + its dropdown should span the full field width. */
+  .suggest{min-width:0}
+  .summary{grid-template-columns:repeat(auto-fill,minmax(150px,1fr))}
+  /* Buttons/chips already wrap (.row + .chips use flex-wrap); ensure tap targets. */
+  button{padding:10px 16px}
+  .chip{padding:7px 13px}
+}
+/* Phone: stack the form one field per row and force the summary to a single
+   column; the matrix scrolls horizontally inside its .table-scroll wrapper. */
+@media (max-width:480px){
+  .wrap{padding:14px 12px 56px}
+  .row{flex-direction:column;align-items:stretch;gap:10px}
+  .field{flex:1 1 auto;width:100%}
+  .field input,.field select{width:100%}
+  /* Number inputs are full width on phones too (override their fixed widths). */
+  .field input[type=number],.kids input,#depCode{width:100%}
+  .summary{grid-template-columns:1fr}
+  /* Run-row buttons go full width for comfortable tap targets. */
+  .row button{width:100%}
+  .kids{flex-wrap:wrap}
+}
 </style>
 </head>
 <body>
@@ -78,6 +125,7 @@ button.watch.watched{background:#e9f3e9;color:#2f7d32;border-color:#bcdcbc;curso
   <div class="brand"><span class="em">✈️</span><h1>Whenever</h1></div>
   <div class="tag">No fixed dates? That's your advantage. Tell us roughly — we'll find exactly.</div>
   <div class="status" id="status">Checking local model…</div>
+  <div class="banner" id="noProviderBanner" style="display:none"></div>
 
   <div class="panel">
     <div class="row">
@@ -241,6 +289,25 @@ async function health(){
       ? `flight data: <b>${escapeHtml(prov.join(', '))}</b>`
       : `<span class="warn">no flight API configured</span> — set TRAVELPAYOUTS_TOKEN or Amadeus keys to fetch real prices`;
     s.innerHTML = modelPart + ' · ' + farePart;
+    // A prominent, friendly banner when no flight provider is configured (#39):
+    // explain the situation in plain language and how to fix it (env keys), rather
+    // than leaving only the quiet status line / empty result cells.
+    const banner = $('#noProviderBanner');
+    if(banner){
+      if(prov.length){
+        banner.style.display = 'none';
+        banner.innerHTML = '';
+      }else{
+        banner.style.display = 'flex';
+        banner.innerHTML =
+          '<span class="bicon">✈️</span>' +
+          '<span><b>No flight provider is configured yet.</b> ' +
+          'The app can still show the date matrix, but it can\'t fetch real fares until you add a provider key. ' +
+          'Set <code>RAPIDAPI_KEY</code> or <code>TRAVELPAYOUTS_TOKEN</code> in <code>.env</code> ' +
+          '— or Amadeus: <code>AMADEUS_CLIENT_ID</code> + <code>AMADEUS_CLIENT_SECRET</code>. ' +
+          'See <code>.env.example</code> for all options.</span>';
+      }
+    }
   }catch(e){ $('#status').innerHTML='<span class="warn">Backend not reachable.</span>'; }
 }
 
@@ -466,7 +533,9 @@ $('#depCity').addEventListener('change', async ()=>{
 
 function _cellHtml(c, thr) {
   const key = escapeHtml(c.dep + '|' + c.ret);
-  if (c.cheapest_cad == null) return '<td class="err" data-k="' + key + '">n/a</td>';
+  // No fare for these dates: render a calm em dash with an explanatory title so it
+  // reads as "no result" not "error" — not the alarming red .err style (#39).
+  if (c.cheapest_cad == null) return '<td class="nodata" data-k="' + key + '" title="no fare found for these dates">—</td>';
   const pickNS = c.nonstop_cad && c.cheapest_cad && c.nonstop_cad <= c.cheapest_cad * thr;
   const cls = pickNS ? 'pick-ns' : '';
   const stopsTxt = (c.stops != null ? c.stops + ' stop' + (c.stops === 1 ? '' : 's') : '');
@@ -483,6 +552,20 @@ function _cellHtml(c, thr) {
     inner += '<div class="ns">ns ' + money(c.nonstop_cad) + (nsDur ? ' · ' + nsDur : '') + '</div>';
   }
   return '<td class="' + cls + '" data-k="' + key + '">' + inner + '</td>';
+}
+
+// addEmptyState: append a friendly empty-state note to a city block (by dest
+// index) when that whole city found no fares, so an all-dashes grid is explained
+// rather than left silent (#39). Idempotent: never adds a second note. Static
+// copy only (no untrusted interpolation).
+function addEmptyState(di) {
+  const blk = document.getElementById('blk-' + di);
+  if (!blk || blk.querySelector('.empty-state')) return;
+  const note = document.createElement('div');
+  note.className = 'empty-state';
+  note.textContent = 'No fares found for these dates — try different dates, ' +
+    'a nearby airport, or add a provider key to widen the search.';
+  blk.appendChild(note);
 }
 
 const CONFIRM_CELLS = 40;  // soft threshold: show a confirm() dialog above this cell count
@@ -600,7 +683,7 @@ $('#run').onclick = async () => {
           blk.className = 'cityblock';
           blk.id = 'blk-' + di;
           let html = '<h2>' + escapeHtml(r.city) + ' <small>(' + escapeHtml(r.iata) + ')</small></h2>' +
-            '<table id="tbl-' + di + '"><thead><tr><th>dep \\ ret</th>' +
+            '<div class="table-scroll"><table id="tbl-' + di + '"><thead><tr><th>dep \\ ret</th>' +
             evt.ret_dates.map(d => '<th>' + escapeHtml(fmtDate(d)) + '</th>').join('') +
             '</tr></thead><tbody>';
           evt.dep_dates.forEach(dep => {
@@ -610,7 +693,7 @@ $('#run').onclick = async () => {
             });
             html += '</tr>';
           });
-          html += '</tbody></table>';
+          html += '</tbody></table></div>';
           blk.innerHTML = html;
           g.appendChild(blk);
         });
@@ -711,14 +794,18 @@ $('#run').onclick = async () => {
         const metaEl = document.getElementById('card-meta-' + di);
         const groupEl = document.getElementById('card-group-' + di);
         if (priceEl) priceEl.textContent = '—';
-        if (metaEl) metaEl.textContent = 'no fares';
+        if (metaEl) metaEl.textContent = 'no fares found';
         if (groupEl) groupEl.textContent = '—';
+        // A city with no priced cell at all gets a friendly empty-state note in
+        // its block, so an all-dashes grid is explained rather than silent (#39).
+        addEmptyState(di);
       });
-      // Finalize any grid cell still on the "…" placeholder to the n/a style
-      // the old render() used for null cells.
+      // Finalize any grid cell still on the "…" placeholder to the calm no-data
+      // style (em dash + title), not the alarming red "n/a" (#39).
       document.querySelectorAll('#grids td.loading').forEach(td => {
-        td.className = 'err';
-        td.textContent = 'n/a';
+        td.className = 'nodata';
+        td.textContent = '—';
+        td.title = 'no fare found for these dates';
       });
       // Restore footer provenance (replicates the old render() #foot logic).
       if (metaInfo) {
@@ -781,18 +868,20 @@ function render(data){
   // grids
   const g=$('#grids'); g.innerHTML='';
   const rets = data.ret_dates;
-  data.results.forEach(r=>{
+  data.results.forEach((r,di)=>{
     const blk=document.createElement('div'); blk.className='cityblock';
-    let html=`<h2>${escapeHtml(r.city)} <small>(${escapeHtml(r.iata)})</small></h2><table><thead><tr><th>dep \\ ret</th>`+
+    let html=`<h2>${escapeHtml(r.city)} <small>(${escapeHtml(r.iata)})</small></h2><div class="table-scroll"><table><thead><tr><th>dep \\ ret</th>`+
       rets.map(d=>`<th>${escapeHtml(fmtDate(d))}</th>`).join('')+'</tr></thead><tbody>';
     r.grid.forEach(row=>{
       html+=`<tr><td class="rowh">${escapeHtml(fmtDate(row[0].dep))}</td>`;
       row.forEach(c=>{ html += _cellHtml(c, thr); });
       html+='</tr>';
     });
-    html+='</tbody></table>';
+    html+='</tbody></table></div>';
     blk.innerHTML=html; g.appendChild(blk);
     if(r.best){ const td=blk.querySelector(`td[data-k="${r.best.dep}|${r.best.ret}"]`); if(td) td.classList.add('best'); }
+    // A city with no priced cell at all gets the friendly empty-state note (#39).
+    else { blk.id='blk-'+di; addEmptyState(di); }
   });
   const prov = (data.providers||[]);
   const noData = data.results.some(r=>r.grid.some(row=>row.some(c=>c.source==='no-data')));
