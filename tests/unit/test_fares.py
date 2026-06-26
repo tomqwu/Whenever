@@ -246,8 +246,8 @@ def test_compare_picks_cheapest_with_alternatives(monkeypatch):
     assert res["source"] == "travelpayouts"
     assert res["cheapest_cad"] == 800
     assert res["alternatives"] == [
-        {"source": "kiwi", "cheapest_cad": 850},
-        {"source": "skyscanner", "cheapest_cad": 900},
+        {"source": "kiwi", "cheapest_cad": 850, "chosen_cad": 850},
+        {"source": "skyscanner", "cheapest_cad": 900, "chosen_cad": 900},
     ]
 
 
@@ -281,7 +281,8 @@ def test_compare_skips_unconfigured_providers(monkeypatch):
 
     assert called == [], "unconfigured providers must not be called"
     assert res["source"] == "travelpayouts"
-    assert res["alternatives"] == [{"source": "kiwi", "cheapest_cad": 850}]
+    assert res["alternatives"] == [
+        {"source": "kiwi", "cheapest_cad": 850, "chosen_cad": 850}]
 
 
 def test_compare_all_no_data_returns_sentinel(monkeypatch):
@@ -344,7 +345,8 @@ def test_compare_tie_resolves_to_earlier_provider(monkeypatch):
     res = appmod._get_fare_uncached("YYZ", "PVG", "d", "r", 2, 0, compare=True)
 
     assert res["source"] == "skyscanner", "tie resolves to earlier chain provider"
-    assert res["alternatives"] == [{"source": "travelpayouts", "cheapest_cad": 800}]
+    assert res["alternatives"] == [
+        {"source": "travelpayouts", "cheapest_cad": 800, "chosen_cad": 800}]
 
 
 def test_compare_false_is_ordered_fallback(monkeypatch):
@@ -375,7 +377,7 @@ def test_cache_key_includes_compare(monkeypatch):
 
     calls = {"fallback": 0, "compare": 0}
 
-    def fake_uncached(o, d, dep, ret, ad, ch, compare=False):
+    def fake_uncached(o, d, dep, ret, ad, ch, compare=False, nonstop_threshold=0.0):
         if compare:
             calls["compare"] += 1
             return {"cheapest_cad": 800, "source": "travelpayouts",
@@ -409,7 +411,7 @@ def test_compare_cache_key_includes_provider_set(monkeypatch):
 
     calls = {"n": 0}
 
-    def fake_uncached(o, d, dep, ret, ad, ch, compare=False):
+    def fake_uncached(o, d, dep, ret, ad, ch, compare=False, nonstop_threshold=0.0):
         calls["n"] += 1
         return {"cheapest_cad": 800, "source": "travelpayouts", "alternatives": []}
 
@@ -448,7 +450,104 @@ def test_get_fare_compare_uncached_when_ttl_disabled(monkeypatch):
 
     res = appmod.get_fare("YYZ", "PVG", "d", "r", 2, 0, compare=True)
     assert res["source"] == "travelpayouts"
-    assert res["alternatives"] == [{"source": "skyscanner", "cheapest_cad": 900}]
+    assert res["alternatives"] == [
+        {"source": "skyscanner", "cheapest_cad": 900, "chosen_cad": 900}]
+
+
+def test_compare_picks_post_threshold_winner_not_raw_cheapest(monkeypatch):
+    """Codex P2 (#43): the compare winner is the provider with the lowest
+    POST-THRESHOLD chosen price, NOT raw cheapest_cad.
+
+    Provider A: cheapest=1000, nonstop=1200; under a 25% threshold A's nonstop is
+    promoted (1200 <= 1000*1.25) so A's chosen price is 1200. Provider B:
+    cheapest=1100, nonstop=1100 -> chosen 1100. Picking by raw cheapest would pick
+    A (1000<1100) then _build_cell would display 1200, beaten by B's already-fetched
+    1100. Picking by the chosen price correctly selects B (1100 < 1200)."""
+    _configure_all(monkeypatch)
+    a = {"cheapest_cad": 1000, "nonstop_cad": 1200, "source": "skyscanner"}
+    b = {"cheapest_cad": 1100, "nonstop_cad": 1100, "source": "travelpayouts"}
+    monkeypatch.setattr(appmod, "skyscanner_fare", lambda *x: a)
+    monkeypatch.setattr(appmod, "serpapi_fare", lambda *x: None)
+    monkeypatch.setattr(appmod, "amadeus_fare", lambda *x: None)
+    monkeypatch.setattr(appmod, "travelpayouts_fare", lambda *x: b)
+    monkeypatch.setattr(appmod, "kiwi_fare", lambda *x: None)
+
+    # threshold 25% -> A's nonstop promoted to 1200, so B (chosen 1100) wins.
+    res = appmod._get_fare_uncached("YYZ", "PVG", "d", "r", 2, 0, compare=True,
+                                    nonstop_threshold=0.25)
+    assert res["source"] == "travelpayouts"
+    assert res["cheapest_cad"] == 1100
+    # A is the (only) alternative, ordered/labelled by its chosen price (1200).
+    assert res["alternatives"] == [
+        {"source": "skyscanner", "cheapest_cad": 1000, "chosen_cad": 1200}]
+    # _build_cell on the winner agrees: B's nonstop == cheapest (1100), so chosen
+    # price is 1100 either way — the winning displayed value, beating A's 1200.
+    cell = appmod._build_cell("YYZ", "PVG", "d", "r", 2, [], res, 0.25)
+    assert cell["chosen_cad"] == 1100
+    assert cell["source"] == "travelpayouts"
+
+    # threshold 0% -> no nonstop promotion, chosen == cheapest, so A (1000) wins.
+    res0 = appmod._get_fare_uncached("YYZ", "PVG", "d", "r", 2, 0, compare=True,
+                                     nonstop_threshold=0.0)
+    assert res0["source"] == "skyscanner"
+    assert res0["cheapest_cad"] == 1000
+    assert res0["alternatives"] == [
+        {"source": "travelpayouts", "cheapest_cad": 1100, "chosen_cad": 1100}]
+    cell0 = appmod._build_cell("YYZ", "PVG", "d", "r", 2, [], res0, 0.0)
+    assert cell0["chosen"] == "cheapest" and cell0["chosen_cad"] == 1000
+
+
+def test_chosen_price_under_threshold_helper(monkeypatch):
+    """The shared helper promotes nonstop iff within threshold, else cheapest."""
+    within = {"cheapest_cad": 1000, "nonstop_cad": 1200}
+    assert appmod._chosen_price_under_threshold(within, 0.25) == ("nonstop", 1200)
+    assert appmod._chosen_price_under_threshold(within, 0.0) == ("cheapest", 1000)
+    no_ns = {"cheapest_cad": 1000, "nonstop_cad": None}
+    assert appmod._chosen_price_under_threshold(no_ns, 0.25) == ("cheapest", 1000)
+    nodata = {"cheapest_cad": None, "nonstop_cad": None}
+    assert appmod._chosen_price_under_threshold(nodata, 0.25) == ("cheapest", None)
+
+
+def test_compare_cache_key_includes_threshold(monkeypatch):
+    """Compare results with DIFFERENT thresholds cache separately (the winner now
+    depends on the threshold). The FALLBACK key is independent of threshold."""
+    monkeypatch.setattr(appmod, "FARE_CACHE_TTL", 3600)
+    monkeypatch.setattr(appmod, "FARE_CACHE_PATH", "")  # memory-only
+    appmod._fare_cache.clear()
+    _configure_all(monkeypatch)
+
+    calls = {"compare": 0, "fallback": 0}
+
+    def fake_uncached(o, d, dep, ret, ad, ch, compare=False, nonstop_threshold=0.0):
+        if compare:
+            calls["compare"] += 1
+            return {"cheapest_cad": 800, "source": "travelpayouts", "alternatives": []}
+        calls["fallback"] += 1
+        return {"cheapest_cad": 900, "source": "skyscanner"}
+
+    monkeypatch.setattr(appmod, "_get_fare_uncached", fake_uncached)
+
+    appmod.get_fare("YYZ", "PVG", "d", "r", 2, 0, compare=True, nonstop_threshold=0.25)
+    appmod.get_fare("YYZ", "PVG", "d", "r", 2, 0, compare=True, nonstop_threshold=0.25)  # hit
+    assert calls["compare"] == 1, "same threshold -> cached"
+    appmod.get_fare("YYZ", "PVG", "d", "r", 2, 0, compare=True, nonstop_threshold=0.0)
+    assert calls["compare"] == 2, "different threshold -> separate cache entry"
+
+    # Fallback key must NOT vary with threshold (one fetch, then hits).
+    appmod.get_fare("YYZ", "PVG", "d", "r", 2, 0, compare=False, nonstop_threshold=0.25)
+    appmod.get_fare("YYZ", "PVG", "d", "r", 2, 0, compare=False, nonstop_threshold=0.0)
+    assert calls["fallback"] == 1, "fallback key independent of threshold"
+    appmod._fare_cache.clear()
+
+
+def test_compare_cache_tag_fallback_ignores_threshold(monkeypatch):
+    """_compare_cache_tag: fallback tag is False regardless of threshold; compare
+    tag varies with threshold."""
+    assert appmod._compare_cache_tag(False, 0.25) is False
+    assert appmod._compare_cache_tag(False, 0.0) is False
+    _configure_all(monkeypatch)
+    assert (appmod._compare_cache_tag(True, 0.25)
+            != appmod._compare_cache_tag(True, 0.0))
 
 
 def test_build_cell_carries_alternatives(monkeypatch):

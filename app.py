@@ -1429,7 +1429,27 @@ def _no_data_fare():
             "nonstop_airlines": None, "layovers": None, "alternatives": None}
 
 
-def _get_fare_compare(origin, dest, dep, ret, adults, children):
+def _chosen_price_under_threshold(fare, nonstop_threshold):
+    """The post-threshold "chosen" price for a fare dict (#43).
+
+    nonstop_threshold is a float fraction (e.g. 0.25 for 25%). Returns
+    ``(chosen_label, chosen_cad)`` where chosen_label is "nonstop" when the
+    nonstop fare is within the threshold of the cheapest fare
+    (i.e. ``nonstop_cad <= cheapest_cad * (1 + nonstop_threshold)``) — in which
+    case chosen_cad is nonstop_cad — and "cheapest" otherwise (chosen_cad =
+    cheapest_cad). This is the SINGLE source of truth shared by _build_cell
+    (display) and the compare-winner selection so both agree on best value.
+
+    chosen_cad can be None when cheapest_cad is None (no-data sentinel).
+    """
+    cheap = fare.get("cheapest_cad")
+    ns = fare.get("nonstop_cad")
+    if ns and cheap and ns <= cheap * (1 + nonstop_threshold):
+        return "nonstop", ns
+    return "cheapest", cheap
+
+
+def _get_fare_compare(origin, dest, dep, ret, adults, children, nonstop_threshold=0.0):
     """Query ALL configured providers concurrently; pick the cheapest result.
 
     True cross-provider comparison (opt-in, #43). Only providers whose keys are
@@ -1444,9 +1464,15 @@ def _get_fare_compare(origin, dest, dep, ret, adults, children):
     deliberate cost of compare mode (the #37 cell cap still bounds total cells);
     each provider's own timeout/retry budget keeps any single request bounded.
 
-    Returns the dict for the lowest cheapest_cad, with an extra "alternatives"
-    list of {"source", "cheapest_cad"} for the OTHER real results (ascending).
-    All-no-data -> the no-data sentinel (alternatives []).
+    Returns the dict for the lowest POST-THRESHOLD chosen price (the same metric
+    _build_cell uses to pick the displayed fare, via _chosen_price_under_threshold
+    with nonstop_threshold), with an extra "alternatives" list of
+    {"source", "cheapest_cad", "chosen_cad"} for the OTHER real results (ascending
+    by chosen price). Picking by the chosen price — not raw cheapest_cad — keeps
+    the compared winner consistent with what _build_cell will actually show (#43,
+    codex P2): otherwise a provider that's cheaper on cheapest_cad but pricier on
+    its post-threshold chosen fare could win yet display a worse value than an
+    already-fetched rival. All-no-data -> the no-data sentinel (alternatives []).
     """
     configured = set(providers_configured())
     chain = [(name, fn) for name, fn in _PROVIDER_CHAIN if name in configured]
@@ -1474,27 +1500,36 @@ def _get_fare_compare(origin, dest, dep, ret, adults, children):
         sentinel["alternatives"] = []
         return sentinel
 
-    # Cheapest wins; ties resolve to the earlier provider (stable sort keeps the
-    # chain/priority order on equal prices).
-    results.sort(key=lambda r: r["cheapest_cad"])
+    # Lowest POST-THRESHOLD chosen price wins; ties resolve to the earlier
+    # provider (stable sort keeps the chain/priority order on equal prices). We
+    # rank by the same _chosen_price_under_threshold metric _build_cell applies,
+    # so the winner is the provider _build_cell would actually display cheapest.
+    results.sort(
+        key=lambda r: _chosen_price_under_threshold(r, nonstop_threshold)[1]
+    )
     chosen = dict(results[0])
     chosen["alternatives"] = [
-        {"source": r.get("source"), "cheapest_cad": r.get("cheapest_cad")}
+        {"source": r.get("source"), "cheapest_cad": r.get("cheapest_cad"),
+         "chosen_cad": _chosen_price_under_threshold(r, nonstop_threshold)[1]}
         for r in results[1:]
     ]
     return chosen
 
 
-def _get_fare_uncached(origin, dest, dep, ret, adults, children, compare=False):
+def _get_fare_uncached(origin, dest, dep, ret, adults, children, compare=False,
+                       nonstop_threshold=0.0):
     """Resolve a fare for one cell from the configured providers.
 
     compare=False (default): ordered-fallback — try each provider in priority
-    order and return the FIRST real priced result (1 call/cell).
-    compare=True: query ALL configured providers and return the cheapest, with
+    order and return the FIRST real priced result (1 call/cell). nonstop_threshold
+    is ignored on this path (no cross-provider winner to pick).
+    compare=True: query ALL configured providers and return the one with the
+    lowest POST-THRESHOLD chosen price (nonstop_threshold, a float fraction), with
     an "alternatives" list (see _get_fare_compare). Uses (configured) calls/cell.
     """
     if compare:
-        return _get_fare_compare(origin, dest, dep, ret, adults, children)
+        return _get_fare_compare(origin, dest, dep, ret, adults, children,
+                                 nonstop_threshold)
     for provider in (skyscanner_fare, serpapi_fare, amadeus_fare, travelpayouts_fare, kiwi_fare):
         try:
             res = provider(origin, dest, dep, ret, adults, children)
@@ -1505,24 +1540,31 @@ def _get_fare_uncached(origin, dest, dep, ret, adults, children, compare=False):
     return _no_data_fare()
 
 
-def _compare_cache_tag(compare):
+def _compare_cache_tag(compare, nonstop_threshold=0.0):
     """The 7th fare-cache-key element: distinguishes fallback from compare AND,
-    for compare, pins the EXACT configured-provider set.
+    for compare, pins the EXACT configured-provider set + the nonstop threshold.
 
     Ordered fallback -> ``False`` (a compared result never serves a fallback
-    request and vice-versa). Compare -> ``"cmp:" + sorted provider names``, so a
+    request and vice-versa); the fallback key is INDEPENDENT of nonstop_threshold
+    (the threshold never affects the fallback result, so its key must not change).
+    Compare -> ``"cmp:" + sorted provider names + ":th=" + threshold``, so a
     compared result computed against one provider set is NOT reused after a
     provider key is added/removed (which would otherwise silently skip a
     newly-configured provider until TTL expiry, defeating "compare ALL
-    providers"). Always a single hashable, JSON-round-trippable scalar, so the
-    persisted-cache key stays exactly 7 elements.
+    providers"), AND two compare searches with DIFFERENT thresholds cache
+    separately — the compared winner now depends on nonstop_threshold (#43), so a
+    25%-threshold result must not serve a 0%-threshold request. Always a single
+    hashable, JSON-round-trippable scalar, so the persisted-cache key stays
+    exactly 7 elements.
     """
     if not compare:
         return False
-    return "cmp:" + ",".join(sorted(providers_configured()))
+    return ("cmp:" + ",".join(sorted(providers_configured()))
+            + ":th=" + repr(float(nonstop_threshold)))
 
 
-def get_fare(origin, dest, dep, ret, adults, children, compare=False):
+def get_fare(origin, dest, dep, ret, adults, children, compare=False,
+             nonstop_threshold=0.0):
     """Collect REAL pricing from configured flight APIs. No AI here.
 
     Results with real prices are cached in _fare_cache for FARE_CACHE_TTL seconds
@@ -1531,13 +1573,18 @@ def get_fare(origin, dest, dep, ret, adults, children, compare=False):
 
     compare gates ordered-fallback (False) vs cross-provider comparison (True);
     it is part of the cache key (via _compare_cache_tag, which also pins the
-    configured-provider set in compare mode) so a compared result never serves a
-    fallback request — nor a request made against a different provider set.
+    configured-provider set AND the nonstop_threshold in compare mode) so a
+    compared result never serves a fallback request — nor a request made against a
+    different provider set or a different nonstop threshold. nonstop_threshold (a
+    float fraction) only affects compare mode (the post-threshold winner, #43);
+    the fallback path and its cache key are unaffected.
     """
     if FARE_CACHE_TTL <= 0:
-        return _get_fare_uncached(origin, dest, dep, ret, adults, children, compare)
+        return _get_fare_uncached(origin, dest, dep, ret, adults, children,
+                                  compare, nonstop_threshold)
 
-    key = (origin, dest, dep, ret, adults, children, _compare_cache_tag(compare))
+    key = (origin, dest, dep, ret, adults, children,
+           _compare_cache_tag(compare, nonstop_threshold))
     now = time.time()
     entry = _fare_cache.get(key)
     if entry is not None:
@@ -1545,7 +1592,8 @@ def get_fare(origin, dest, dep, ret, adults, children, compare=False):
         if now - fetched < FARE_CACHE_TTL:  # fresh under the current TTL
             return cached_result  # in-memory fast path; hits never write to disk
 
-    result = _get_fare_uncached(origin, dest, dep, ret, adults, children, compare)
+    result = _get_fare_uncached(origin, dest, dep, ret, adults, children,
+                                compare, nonstop_threshold)
     if result.get("cheapest_cad"):
         with _fare_cache_lock:
             _fare_cache[key] = (now, result)  # store fetch time, not absolute expiry
@@ -1631,10 +1679,9 @@ def _build_cell(origin, code, dep, ret, adults, child_ages, fare, threshold):
     """
     cheap = fare.get("cheapest_cad")
     ns = fare.get("nonstop_cad")
-    chosen = "cheapest"
-    chosen_cad = cheap
-    if ns and cheap and ns <= cheap * (1 + threshold):
-        chosen, chosen_cad = "nonstop", ns
+    # Same helper the compare-winner selection uses (#43), so the displayed pick
+    # is consistent with how compare ranks providers (post-threshold chosen price).
+    chosen, chosen_cad = _chosen_price_under_threshold(fare, threshold)
     # Keep each price line paired with ITS OWN stops/duration (codex P2):
     #   - duration_min ALWAYS = cheapest itinerary's duration (pairs with cheapest_cad + stops)
     #   - nonstop_duration_min = nonstop itinerary's duration (pairs with nonstop_cad, 0 stops)
@@ -1719,7 +1766,8 @@ def run_search(origin, dests, adults, child_ages, dep_dates, ret_dates,
 
     def _fetch(task):
         di, dpi, ri, code, dep, ret = task
-        return (di, dpi, ri), get_fare(origin, code, dep, ret, adults, children, compare)
+        return (di, dpi, ri), get_fare(origin, code, dep, ret, adults, children,
+                                       compare, threshold)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
         for key, fare in pool.map(_fetch, tasks):
@@ -1920,7 +1968,8 @@ def api_search_stream():
         def _fetch(task):
             di, code, dep, ret = task
             try:
-                fare = get_fare(origin, code, dep, ret, adults, children, compare)
+                fare = get_fare(origin, code, dep, ret, adults, children,
+                                compare, threshold)
             except Exception:
                 fare = _no_data_fare()
             cell = _build_cell(origin, code, dep, ret, adults, child_ages, fare, threshold)

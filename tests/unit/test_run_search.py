@@ -115,7 +115,8 @@ def test_run_search_no_data_best_is_none(monkeypatch):
 def test_run_search_multi_city_best_per_city(monkeypatch):
     prices = {"PVG": 800, "PEK": 1200}
 
-    def fake_fare(origin, dest, dep, ret, adults, children, compare=False):
+    def fake_fare(origin, dest, dep, ret, adults, children, compare=False,
+                  nonstop_threshold=0.0):
         return _fake_fare(prices[dest])
 
     monkeypatch.setattr(appmod, "get_fare", fake_fare)

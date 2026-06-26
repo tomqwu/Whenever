@@ -74,9 +74,19 @@ When `compare=True` (request body `compare_providers: true`), `get_fare()`
 delegates to `_get_fare_compare()`, which queries **every configured provider**
 (those listed by `providers_configured()` — unconfigured providers are skipped,
 never called) **concurrently** in a small pool bounded by the provider count, then
-keeps the result with the lowest `cheapest_cad`. The chosen dict's `source` is the
-winning provider; an `alternatives` list — `[{ "source", "cheapest_cad" }]` for the
-other real results, ascending — is attached so the UI can show "also: SOURCE
+keeps the result with the lowest **post-threshold chosen price**. The winner is
+ranked by `_chosen_price_under_threshold(result, nonstop_threshold)` — the **same
+helper `_build_cell` uses** to pick the displayed fare (it promotes a provider's
+nonstop fare when it's within `nonstop_threshold` % of that provider's cheapest,
+else uses the cheapest). Ranking by the chosen price — not raw `cheapest_cad` —
+keeps the compared winner consistent with what `_build_cell` actually displays (#43,
+codex P2): otherwise a provider cheaper on `cheapest_cad` but pricier on its
+post-threshold chosen fare could win yet show a worse value than an already-fetched
+rival. `get_fare()`/`_get_fare_uncached()` therefore thread `nonstop_threshold`
+(a float fraction) into the compare path; `run_search`/the stream pass the search's
+threshold. The chosen dict's `source` is the winning provider; an `alternatives`
+list — `[{ "source", "cheapest_cad", "chosen_cad" }]` for the other real results,
+**ascending by `chosen_cad`** — is attached so the UI can show "also: SOURCE
 $PRICE". Ties resolve to the earlier provider in the chain. All-no-data → the
 no-data sentinel with `alternatives: []`.
 
@@ -88,11 +98,15 @@ quota)" toggle in the web UI. The per-search cell cap (#37) is unchanged.
 `compare` is part of the fare **cache key** `(origin, dest, dep, ret, adults,
 children, compare_tag)`, so a compared result never serves an ordered-fallback
 request (and vice versa); each flavour caches independently. `compare_tag`
-(`_compare_cache_tag`) is `False` for fallback and `"cmp:<sorted configured
-providers>"` for compare mode — pinning the provider set so that adding/removing a
-provider key re-runs comparison instead of serving a stale result computed against
-the old set (which would otherwise silently skip a newly-configured provider until
-TTL expiry).
+(`_compare_cache_tag`) is `False` for fallback and
+`"cmp:<sorted configured providers>:th=<threshold>"` for compare mode — pinning the
+provider set so that adding/removing a provider key re-runs comparison instead of
+serving a stale result computed against the old set (which would otherwise silently
+skip a newly-configured provider until TTL expiry), **and** pinning the
+`nonstop_threshold`, since the compared winner now depends on it — two compare
+searches with different thresholds cache separately. The **fallback** tag is
+`False` regardless of threshold (the threshold never affects the fallback result),
+so the fallback cache key is unchanged.
 
 Each provider returns a normalized dict:
 

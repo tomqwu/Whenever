@@ -99,10 +99,12 @@ You may instead pass explicit `dep_dates` / `ret_dates` arrays.
 `compare_providers` (bool, default `false`) opts into **true cross-provider
 comparison** (#43). When `false` (default) each cell makes **one** provider call
 via the ordered-fallback chain (first real price wins). When `true`, each cell
-queries **every configured provider** concurrently and keeps the **cheapest**
-`cheapest_cad`; the chosen cell's `source` is the winning provider and it carries
-an `alternatives` array. This multiplies provider calls per cell by the number of
-configured providers (quota/cost), so it is opt-in.
+queries **every configured provider** concurrently and keeps the one with the
+lowest **post-threshold chosen price** — the same nonstop-threshold logic the cell
+uses to pick its displayed fare, so the winner matches what's shown (not merely the
+lowest raw `cheapest_cad`). The chosen cell's `source` is the winning provider and
+it carries an `alternatives` array. This multiplies provider calls per cell by the
+number of configured providers (quota/cost), so it is opt-in.
 
 **Response (abridged)**
 ```json
@@ -160,11 +162,13 @@ them, never fabricated):
 
 **Cross-provider alternatives** (`compare_providers: true` only):
 
-- `alternatives` — a list of `{ "source", "cheapest_cad" }` for the **other** real
-  provider results for this cell (the ones that did **not** win), sorted ascending by
-  price. The chosen cell's `source`/`cheapest_cad` are the cheapest across providers;
-  `alternatives` shows what the runners-up quoted (e.g. `[{"source":"kiwi",
-  "cheapest_cad":850},{"source":"skyscanner","cheapest_cad":900}]`). It is `null` in
+- `alternatives` — a list of `{ "source", "cheapest_cad", "chosen_cad" }` for the
+  **other** real provider results for this cell (the ones that did **not** win),
+  sorted ascending by `chosen_cad` (the post-threshold chosen price the winner is
+  also ranked on). The chosen cell's `source`/`cheapest_cad` are the winning
+  provider's; `alternatives` shows what the runners-up quoted, with each one's
+  `chosen_cad` (e.g. `[{"source":"kiwi","cheapest_cad":850,"chosen_cad":850},
+  {"source":"skyscanner","cheapest_cad":900,"chosen_cad":900}]`). It is `null` in
   ordered-fallback mode (`compare_providers` absent/false) and `[]` when comparison
   found only a single real price. The web UI renders it as a subtle "also: SOURCE
   $PRICE" line under the chosen price.

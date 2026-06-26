@@ -168,7 +168,8 @@ def test_stream_cells_map_to_correct_dep_ret(client, monkeypatch):
         ret_day = int(ret.split("-")[2])   # 3 or 4
         return 1000 + dep_day * 10 + ret_day
 
-    def fake_get_fare(origin, dest, dep, ret, adults, children, compare=False):
+    def fake_get_fare(origin, dest, dep, ret, adults, children, compare=False,
+                      nonstop_threshold=0.0):
         price = _price_for(dep, ret)
         return {
             "cheapest_cad": price,
@@ -273,7 +274,8 @@ _TIE_PRICES = {
 }
 
 
-def _tie_fare(origin, dest, dep, ret, adults, children, compare=False):
+def _tie_fare(origin, dest, dep, ret, adults, children, compare=False,
+              nonstop_threshold=0.0):
     return {
         "cheapest_cad": _TIE_PRICES[(dest, dep, ret)],
         "stops": 1, "nonstop_cad": None, "source": "test", "book": None,
