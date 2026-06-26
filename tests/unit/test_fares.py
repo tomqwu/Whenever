@@ -1707,19 +1707,28 @@ def test_retry_get_503_then_200(monkeypatch, fake_resp):
     assert calls["n"] == 2  # one 503 retry, then success
 
 
-def test_retry_get_timeout_then_200(monkeypatch, fake_resp):
-    """A request Timeout followed by a 200 is retried and succeeds (kiwi)."""
+def test_retry_get_timeout_is_terminal(monkeypatch, fake_resp):
+    """A request Timeout is NOT retried — exactly 1 attempt, no sleep, returns None.
+
+    Retrying a timeout would re-pay the full per-attempt cost (e.g. 20–30s) and
+    stack stalls across providers. Instead, the Timeout is terminal: the helper
+    returns None immediately and the provider falls through to the next one.
+    """
     monkeypatch.setattr(appmod, "KIWI_API_KEY", "k")
-    monkeypatch.setattr(appmod.time, "sleep", lambda *_a, **_k: None)
+    sleeps = []
+    monkeypatch.setattr(appmod.time, "sleep", lambda s, *a, **k: sleeps.append(s))
+    monkeypatch.setattr(appmod, "PROVIDER_RETRIES", 2)
     calls = {"n": 0}
-    itin = {"price": 100, "route": [{"return": 0}, {"return": 1}],
-            "deep_link": "http://b", "duration": {"total": 3600}}
-    monkeypatch.setattr(appmod.requests, "get", _seq_get(
-        [appmod.requests.exceptions.Timeout("slow"),
-         fake_resp({"data": [itin]}, status=200)], calls))
+
+    def always_timeout(*a, **k):
+        calls["n"] += 1
+        raise appmod.requests.exceptions.Timeout("slow")
+
+    monkeypatch.setattr(appmod.requests, "get", always_timeout)
     res = appmod.kiwi_fare("YYZ", "PVG", "2026-12-12", "2027-01-04", 1, 0)
-    assert res is not None and res["source"] == "kiwi"
-    assert calls["n"] == 2
+    assert res is None
+    assert calls["n"] == 1   # terminal: exactly one attempt, no retry
+    assert sleeps == []       # no backoff sleep for a Timeout
 
 
 def test_retry_get_429_honours_retry_after_capped(monkeypatch, fake_resp):
@@ -1797,8 +1806,12 @@ def test_retry_get_persistent_503_returns_none_bounded(monkeypatch, fake_resp):
     assert sleeps == [0.5, 1.0]  # backed-off, capped, then give up (no sleep after last)
 
 
-def test_retry_get_persistent_timeout_returns_none_bounded(monkeypatch):
-    """Every attempt times out -> None after retries+1 attempts, no extra sleep."""
+def test_retry_get_persistent_connection_error_returns_none_bounded(monkeypatch):
+    """Every attempt raises ConnectionError -> None after retries+1 attempts with backoff.
+
+    ConnectionError is still retryable (it fails fast — no time was wasted) so
+    the helper backs off and tries again, bounded to retries+1 total.
+    """
     monkeypatch.setattr(appmod, "KIWI_API_KEY", "k")
     sleeps = []
     monkeypatch.setattr(appmod.time, "sleep", lambda s, *a, **k: sleeps.append(s))
@@ -1806,15 +1819,15 @@ def test_retry_get_persistent_timeout_returns_none_bounded(monkeypatch):
     monkeypatch.setattr(appmod, "PROVIDER_BACKOFF", 0.5)
     calls = {"n": 0}
 
-    def always_timeout(*a, **k):
+    def always_connection_error(*a, **k):
         calls["n"] += 1
         raise appmod.requests.exceptions.ConnectionError("down")
 
-    monkeypatch.setattr(appmod.requests, "get", always_timeout)
+    monkeypatch.setattr(appmod.requests, "get", always_connection_error)
     res = appmod.kiwi_fare("YYZ", "PVG", "2026-12-12", "2027-01-04", 1, 0)
     assert res is None
-    assert calls["n"] == 3  # bounded
-    assert sleeps == [0.5, 1.0]
+    assert calls["n"] == 3  # bounded: retries(2)+1 = 3 attempts
+    assert sleeps == [0.5, 1.0]  # backed-off between attempts, no sleep after last
 
 
 def test_retry_single_success_is_one_request(monkeypatch, fake_resp):
@@ -1843,16 +1856,27 @@ def test_retry_post_amadeus_token_retries(monkeypatch, fake_resp):
     assert calls["n"] == 2
 
 
-def test_retry_post_amadeus_token_all_timeout_returns_none(monkeypatch):
-    """All token POSTs time out -> amadeus_token returns None (None response path)."""
+def test_retry_post_amadeus_token_timeout_is_terminal(monkeypatch):
+    """A Timeout on the token POST is NOT retried — exactly 1 attempt, no sleep.
+
+    Timeout is terminal in _request_with_retry so amadeus_token returns None
+    immediately without sleeping, regardless of PROVIDER_RETRIES.
+    """
     monkeypatch.setattr(appmod, "AMADEUS_ID", "id")
     monkeypatch.setattr(appmod, "AMADEUS_SECRET", "secret")
-    monkeypatch.setattr(appmod.time, "sleep", lambda *_a, **_k: None)
-    monkeypatch.setattr(appmod, "PROVIDER_RETRIES", 1)
-    monkeypatch.setattr(appmod.requests, "post",
-                        lambda *a, **k: (_ for _ in ()).throw(
-                            appmod.requests.exceptions.Timeout("t")))
+    monkeypatch.setattr(appmod, "PROVIDER_RETRIES", 2)
+    sleeps = []
+    monkeypatch.setattr(appmod.time, "sleep", lambda s, *a, **k: sleeps.append(s))
+    calls = {"n": 0}
+
+    def timeout_post(*a, **k):
+        calls["n"] += 1
+        raise appmod.requests.exceptions.Timeout("t")
+
+    monkeypatch.setattr(appmod.requests, "post", timeout_post)
     assert appmod.amadeus_token() is None
+    assert calls["n"] == 1   # terminal: one attempt only
+    assert sleeps == []       # no backoff sleep
 
 
 def test_request_with_retry_no_headers_attr(monkeypatch):

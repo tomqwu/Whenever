@@ -591,16 +591,22 @@ def _request_with_retry(method, url, *, headers=None, params=None, data=None,
                         backoff_max=None, retry_statuses=(429, 500, 502, 503, 504)):
     """Issue an HTTP request with BOUNDED exponential-backoff retry on transients.
 
-    Retries on ``requests`` Timeout / ConnectionError and on any response whose
-    status is in ``retry_statuses`` (429 + 5xx by default). Up to ``retries + 1``
-    attempts total. Between attempts it sleeps ``backoff * 2**attempt`` seconds,
-    each sleep capped at ``backoff_max`` (so total wait stays small); a 429 with a
-    ``Retry-After`` delta-seconds header sleeps that value instead, also capped.
+    Retries on ``requests.ConnectionError`` and on any response whose status is in
+    ``retry_statuses`` (429 + 5xx by default). Up to ``retries + 1`` attempts total.
+    Between attempts it sleeps ``backoff * 2**attempt`` seconds, each sleep capped at
+    ``backoff_max`` (so total wait stays small); a 429 with a ``Retry-After``
+    delta-seconds header sleeps that value instead, also capped.
+
+    ``requests.Timeout`` is treated as **terminal** (not retried): the attempt cost
+    was already paid (the full per-attempt timeout elapsed), so retrying would only
+    multiply the stall. On a Timeout the helper returns ``None`` immediately, letting
+    the caller fall through to the next provider exactly as it would for a network
+    error on the last attempt.
 
     Returns the final ``requests.Response`` — even a 5xx/429 on the last attempt —
     so callers keep their existing ``status_code != 200 -> None`` contract. Returns
-    ``None`` if every attempt raised a network error (mirrors providers' bare except).
-    Never raises a network error past the caller; never loops unbounded.
+    ``None`` if every attempt raised a network/timeout error (mirrors providers' bare
+    except). Never raises a network error past the caller; never loops unbounded.
     """
     retries = PROVIDER_RETRIES if retries is None else retries
     backoff = PROVIDER_BACKOFF if backoff is None else backoff
@@ -627,9 +633,13 @@ def _request_with_retry(method, url, *, headers=None, params=None, data=None,
     for attempt in range(retries + 1):
         try:
             resp = sender(url, **kwargs)
-        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError):
-            # Transient network error. Retry while attempts remain, else give up
-            # with None so the provider's caller treats it as no-data.
+        except requests.exceptions.Timeout:
+            # Full per-attempt timeout already elapsed — retrying would only
+            # multiply the stall. Treat as terminal and return None immediately.
+            return None
+        except requests.exceptions.ConnectionError:
+            # Fast connection failure (TCP refused / DNS error). Retry while
+            # attempts remain, then give up with None.
             if attempt < retries:
                 time.sleep(min(backoff * (2 ** attempt), backoff_max))
                 continue

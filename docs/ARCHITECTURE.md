@@ -113,19 +113,29 @@ To add another provider, write one function with the signature above and prepend
 The one-shot provider request calls (Amadeus token + search, Travelpayouts, Kiwi,
 SerpApi) go through a shared `_request_with_retry(method, url, …)` helper that makes a
 **transient** failure degrade gracefully or recover instead of immediately dropping the
-cell to no-data. It retries on `requests` Timeout / ConnectionError and on responses with
-a retryable status (`429`, `500`, `502`, `503`, `504`), up to `PROVIDER_RETRIES + 1` total
-attempts. Between attempts it sleeps `PROVIDER_BACKOFF × 2**attempt` seconds, **each sleep
-capped at `PROVIDER_BACKOFF_MAX`**; a `429` carrying a `Retry-After` delta-seconds header
-honours that value, also clamped to `PROVIDER_BACKOFF_MAX` (so a hostile/large header can't
-stall a worker). After the final attempt it returns the last response (e.g. a persistent
-5xx) so each provider's existing `status_code != 200 → None` contract is unchanged, or
-`None` if every attempt raised a network error. The whole thing is strictly **bounded**
-(default 2 × 0.5s ≈ 1.5s of extra sleeping worst-case) — same discipline as the Skyscanner
-poll fix; a blip recovers, a genuine outage falls back to the next provider in seconds, not
-minutes. The **Skyscanner poll path is deliberately NOT wrapped** by this helper — it keeps
-its own purpose-built bounded 502 retry (`_skyscanner_get`) and the poll-attempt budget, and
-poll requests pass `retries_502=0`, so the two retry mechanisms never stack/double-retry.
+cell to no-data.
+
+**What is retried:** `requests.ConnectionError` (fast TCP refusal / DNS failure) and
+responses with a retryable status (`429`, `500`, `502`, `503`, `504`), up to
+`PROVIDER_RETRIES + 1` total attempts. Between attempts it sleeps
+`PROVIDER_BACKOFF × 2**attempt` seconds, **each sleep capped at `PROVIDER_BACKOFF_MAX`**;
+a `429` carrying a `Retry-After` delta-seconds header honours that value, also clamped to
+`PROVIDER_BACKOFF_MAX` (so a hostile/large header can't stall a worker).
+
+**What is NOT retried — `requests.Timeout` is terminal.** A full Timeout means the
+per-attempt budget (e.g. 20–30s) has already been consumed; retrying would stack identical
+stalls across attempts and potentially block a cell for 60–90s or more with
+`PROVIDER_RETRIES=2`. Instead, on any `Timeout` the helper returns `None` immediately —
+the provider falls through to the next one after just one timeout, not retries+1.
+
+After the final attempt it returns the last response (e.g. a persistent 5xx) so each
+provider's existing `status_code != 200 → None` contract is unchanged, or `None` if the
+attempt raised a network/timeout error. The whole thing is strictly **bounded** — same
+discipline as the Skyscanner poll fix; a blip recovers, a genuine outage falls back to the
+next provider in seconds, not minutes. The **Skyscanner poll path is deliberately NOT
+wrapped** by this helper — it keeps its own purpose-built bounded 502 retry
+(`_skyscanner_get`) and the poll-attempt budget, and poll requests pass `retries_502=0`,
+so the two retry mechanisms never stack/double-retry.
 
 ## Nonstop-preference rule
 
@@ -150,7 +160,7 @@ the nonstop is "chosen"; otherwise the cheapest connection is chosen. Threshold 
 | `SKYSCANNER_POLL_INTERVAL` | Seconds slept between poll attempts. Default ~12 × 1.5s ≈ 18s of total waiting. | `1.5` |
 | `SKYSCANNER_POLL_TIMEOUT` | Per-poll request timeout (seconds). A request-level Timeout/error breaks the loop immediately (no further retries), so a hung session degrades to no-data within ~`attempts × interval` + one timeout — bounded, never minutes. | `8` |
 | `SERPAPI_KEY` | SerpApi API key for live Google Flights data (free trial at serpapi.com) | — |
-| `PROVIDER_RETRIES` | Max **retries** (extra attempts) for a transient provider failure — request Timeout/ConnectionError, HTTP 5xx, or a 429 rate-limit — on the one-shot provider calls (amadeus token + search, travelpayouts, kiwi, serpapi). `retries + 1` total attempts. Set `0` to disable retrying (off-by-default-safe). | `2` |
+| `PROVIDER_RETRIES` | Max **retries** (extra attempts) for a transient provider failure — ConnectionError, HTTP 5xx, or a 429 rate-limit — on the one-shot provider calls (amadeus token + search, travelpayouts, kiwi, serpapi). `retries + 1` total attempts. **Note: `requests.Timeout` is NOT retried** (terminal — returns None immediately); retrying a full timeout would stack stalls and defeat the bounded goal. Set `0` to disable retrying. | `2` |
 | `PROVIDER_BACKOFF` | Base seconds for exponential backoff between provider retries: sleep `PROVIDER_BACKOFF × 2**attempt`, each sleep capped at `PROVIDER_BACKOFF_MAX`. Default 2 retries × 0.5s ≈ 0.5 + 1.0 ≈ 1.5s worst-case extra wait — bounded, never minutes. | `0.5` |
 | `PROVIDER_BACKOFF_MAX` | Per-sleep cap (seconds) for provider backoff **and** for a 429 `Retry-After` header (a large/hostile `Retry-After` is clamped to this), so a single cell can't stall. | `4` |
 | `FARE_CACHE_TTL` | In-memory cache TTL (seconds) for fare results. Set `<= 0` to disable. | `3600` |
