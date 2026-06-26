@@ -1562,9 +1562,19 @@ def test_skyscanner_fare_poll_breaks_on_timeout(monkeypatch, fake_resp):
     assert poll_timeouts == [8]
 
 
-def test_skyscanner_fare_search_uses_capped_timeout(monkeypatch, fake_resp):
-    """The initial search-roundtrip request is capped (<=15s) so it can't hang long."""
+def test_skyscanner_fare_search_uses_connect_read_timeout_tuple(monkeypatch, fake_resp):
+    """The initial search-roundtrip request uses a (connect, read) timeout tuple.
+
+    The async search legitimately takes ~25-30s (sometimes more) to return its
+    session, all while the response IS progressing. So the initial call passes
+    requests a ``(SKYSCANNER_CONNECT_TIMEOUT, SKYSCANNER_SEARCH_TIMEOUT)`` tuple: a
+    short connect timeout (dead host fails fast) and a generous READ/INACTIVITY
+    timeout (fires only after that many seconds of NO data, NOT a total cap) so a
+    slow-but-alive search completes instead of being killed mid-flight.
+    """
     monkeypatch.setattr(appmod, "RAPIDAPI_KEY", "k")
+    monkeypatch.setattr(appmod, "SKYSCANNER_CONNECT_TIMEOUT", 10)
+    monkeypatch.setattr(appmod, "SKYSCANNER_SEARCH_TIMEOUT", 90)
     monkeypatch.setattr(appmod.time, "sleep", lambda *_a, **_k: None)
     complete = _sky_complete_payload()
     search_timeout = {}
@@ -1578,7 +1588,31 @@ def test_skyscanner_fare_search_uses_capped_timeout(monkeypatch, fake_resp):
     res = appmod.skyscanner_fare("YYZ", "LAX", "2026-08-07", "2026-08-09", 1, 0)
 
     assert res is not None
-    assert search_timeout["t"] == 15
+    assert search_timeout["t"] == (
+        appmod.SKYSCANNER_CONNECT_TIMEOUT,
+        appmod.SKYSCANNER_SEARCH_TIMEOUT,
+    ) == (10, 90)
+
+
+def test_skyscanner_search_timeout_honours_env_override(monkeypatch, fake_resp):
+    """Monkeypatched connect/read timeouts flow through to the request tuple."""
+    monkeypatch.setattr(appmod, "RAPIDAPI_KEY", "k")
+    monkeypatch.setattr(appmod, "SKYSCANNER_CONNECT_TIMEOUT", 7)
+    monkeypatch.setattr(appmod, "SKYSCANNER_SEARCH_TIMEOUT", 55)
+    monkeypatch.setattr(appmod.time, "sleep", lambda *_a, **_k: None)
+    complete = _sky_complete_payload()
+    search_timeout = {}
+
+    def fake_get(url, headers=None, params=None, timeout=None):
+        if url.endswith("/web/flights/search-roundtrip"):
+            search_timeout["t"] = timeout
+        return fake_resp(complete, status=200)
+
+    monkeypatch.setattr(appmod.requests, "get", fake_get)
+    res = appmod.skyscanner_fare("YYZ", "LAX", "2026-08-07", "2026-08-09", 1, 0)
+
+    assert res is not None
+    assert search_timeout["t"] == (7, 55)
 
 
 def test_skyscanner_fare_poll_attempts_is_configurable(monkeypatch, fake_resp):

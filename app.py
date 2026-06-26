@@ -197,6 +197,21 @@ RAPIDAPI_HOST = os.environ.get("RAPIDAPI_HOST", "flights-sky.p.rapidapi.com")
 # richer duration/airlines/layovers data. Still bounded — worst case is roughly
 # attempts*interval plus one per-poll request timeout — so a genuinely hung session
 # degrades to no-data in seconds-to-~tens-of-seconds, never minutes.
+# Timeouts for the INITIAL search-roundtrip call. That call is async on
+# Skyscanner's side: it kicks off the search and returns a sessionId (status
+# "incomplete") for us to poll — but returning that session legitimately takes
+# ~25-30s (measured 27.3s live for YYZ->PEK) and sometimes longer, all while the
+# response IS progressing. We pass requests a ``(connect, read)`` tuple:
+#   * SKYSCANNER_CONNECT_TIMEOUT bounds CONNECTION setup so a DEAD host fails fast.
+#   * SKYSCANNER_SEARCH_TIMEOUT is the READ/INACTIVITY timeout: requests fires it
+#     only after that many seconds of NO bytes arriving — it is NOT a total
+#     wall-clock cap. As long as flights-sky keeps the response progressing we keep
+#     waiting; we only give up after prolonged SILENCE. Default 90 is generous so a
+#     slow-but-alive search completes instead of being killed mid-flight (the old
+#     tight cap dropped real long-haul results every time). Distinct from the SHORT
+#     poll timeout below.
+SKYSCANNER_CONNECT_TIMEOUT = int(os.environ.get("SKYSCANNER_CONNECT_TIMEOUT", "10"))
+SKYSCANNER_SEARCH_TIMEOUT = int(os.environ.get("SKYSCANNER_SEARCH_TIMEOUT", "90"))
 SKYSCANNER_POLL_ATTEMPTS = int(os.environ.get("SKYSCANNER_POLL_ATTEMPTS", "12"))
 SKYSCANNER_POLL_INTERVAL = float(os.environ.get("SKYSCANNER_POLL_INTERVAL", "1.5"))
 SKYSCANNER_POLL_TIMEOUT = int(os.environ.get("SKYSCANNER_POLL_TIMEOUT", "8"))
@@ -1228,7 +1243,14 @@ def skyscanner_fare(origin, dest, dep, ret, adults, children):
         "currency": "CAD", "market": "CA",
         "locale": "en-US", "cabinClass": "economy",
     }
-    r = _skyscanner_get(f"{base}/web/flights/search-roundtrip", params=params, timeout=15)
+    r = _skyscanner_get(
+        f"{base}/web/flights/search-roundtrip",
+        params=params,
+        # (connect, read): short connect so a dead host fails fast; generous read is
+        # an INACTIVITY timeout (fires only after that many seconds of NO data), not
+        # a total cap — a slow-but-progressing search keeps running to completion.
+        timeout=(SKYSCANNER_CONNECT_TIMEOUT, SKYSCANNER_SEARCH_TIMEOUT),
+    )
     if r is None or r.status_code != 200:
         return None
     try:
