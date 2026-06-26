@@ -423,12 +423,32 @@ def _load_fare_cache():
             raise ValueError("fare cache file is not a list")
         now = time.time()
         loaded = {}
+        skipped = 0
         for rec in records:
-            key = tuple(rec["key"])
-            expiry = rec["expiry"]
-            if expiry <= now:
-                continue  # drop already-expired entries on load
-            loaded[key] = (expiry, rec["result"])
+            try:
+                if not isinstance(rec, dict):
+                    skipped += 1
+                    continue
+                raw_key = rec.get("key")
+                expiry = rec.get("expiry")
+                result = rec.get("result")
+                # key must be a sequence of exactly 6 elements
+                if not isinstance(raw_key, (list, tuple)) or len(raw_key) != 6:
+                    skipped += 1
+                    continue
+                # expiry must be a number and not yet expired
+                if not isinstance(expiry, (int, float)) or expiry <= now:
+                    skipped += 1
+                    continue
+                # result must be a real-priced dict (same guard get_fare uses to cache)
+                if not isinstance(result, dict) or not result.get("cheapest_cad"):
+                    skipped += 1
+                    continue
+                loaded[tuple(raw_key)] = (expiry, result)
+            except Exception:  # noqa: BLE001 — never let one bad record abort the load
+                skipped += 1
+        if skipped:
+            _log.debug("_load_fare_cache: skipped %d invalid/expired record(s)", skipped)
     except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
         _log.warning("Could not load fare cache from %s (%s); starting empty",
                      FARE_CACHE_PATH, exc)

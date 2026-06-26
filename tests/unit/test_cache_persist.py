@@ -175,6 +175,199 @@ def test_load_missing_file_starts_empty(monkeypatch, tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# per-record validation: mixed valid + invalid records
+# ---------------------------------------------------------------------------
+
+_KEY_B = ("YYZ", "PEK", "2026-12-15", "2027-01-10", 2, 0)  # result is a string
+_KEY_C = ("YYZ", "CAN", "2026-12-20", "2027-01-15", 1, 0)  # result no-data dict
+_KEY_D = ("YYZ",)                                            # bad/short key placeholder
+
+
+def test_load_per_record_validation_only_valid_loaded(monkeypatch, tmp_path):
+    """A mix of valid and invalid records: only the real-priced record is loaded.
+
+    Records:
+      (a) valid real-priced entry  -> loaded
+      (b) result is a string       -> dropped
+      (c) result is no-data dict   -> dropped
+      (d) key has wrong length     -> dropped
+      (e) expired entry            -> dropped
+    """
+    path = _enable_persistence(monkeypatch, tmp_path)
+    now = 1_000_000.0
+    monkeypatch.setattr(appmod.time, "time", lambda: now)
+
+    records = [
+        # (a) valid
+        {"key": list(_ARGS), "expiry": now + 3600, "result": _REAL_FARE},
+        # (b) result is a string
+        {"key": list(_KEY_B), "expiry": now + 3600, "result": "some string"},
+        # (c) result is no-data dict (cheapest_cad absent)
+        {"key": list(_KEY_C), "expiry": now + 3600,
+         "result": {"cheapest_cad": None, "stops": None}},
+        # (d) bad key — only 1 element
+        {"key": ["YYZ"], "expiry": now + 3600, "result": _REAL_FARE},
+        # (e) expired
+        {"key": list(_ARGS)[:5] + [1], "expiry": now - 1, "result": _REAL_FARE},
+    ]
+    path.write_text(json.dumps(records), encoding="utf-8")
+
+    appmod._fare_cache.clear()
+    appmod._load_fare_cache()
+
+    # Only record (a) should be in the cache
+    assert _ARGS in appmod._fare_cache, "valid real-priced record must be loaded"
+    assert _KEY_B not in appmod._fare_cache, "string result must be dropped"
+    assert _KEY_C not in appmod._fare_cache, "no-data dict result must be dropped"
+    assert len(appmod._fare_cache) == 1, "only the one valid record must be in cache"
+
+
+def test_load_string_result_causes_real_fetch(monkeypatch, tmp_path):
+    """A poisoned record (string result) is dropped so get_fare does a real fetch."""
+    path = _enable_persistence(monkeypatch, tmp_path)
+    now = 1_000_000.0
+    monkeypatch.setattr(appmod.time, "time", lambda: now)
+
+    records = [
+        {"key": list(_KEY_B), "expiry": now + 3600, "result": "poison"},
+    ]
+    path.write_text(json.dumps(records), encoding="utf-8")
+
+    appmod._fare_cache.clear()
+    appmod._load_fare_cache()
+
+    assert _KEY_B not in appmod._fare_cache
+
+    calls = {"n": 0}
+
+    def fake_provider(*a):
+        calls["n"] += 1
+        return _REAL_FARE
+
+    monkeypatch.setattr(appmod, "amadeus_fare", fake_provider)
+    monkeypatch.setattr(appmod, "travelpayouts_fare", lambda *a: None)
+
+    result = appmod.get_fare(*_KEY_B)
+    assert result == _REAL_FARE
+    assert calls["n"] == 1, "poisoned cache must not suppress provider call"
+
+
+def test_load_no_data_result_causes_real_fetch(monkeypatch, tmp_path):
+    """A no-data dict (cheapest_cad None) is dropped so get_fare does a real fetch."""
+    path = _enable_persistence(monkeypatch, tmp_path)
+    now = 1_000_000.0
+    monkeypatch.setattr(appmod.time, "time", lambda: now)
+
+    records = [
+        {"key": list(_KEY_C), "expiry": now + 3600,
+         "result": {"cheapest_cad": None, "stops": None}},
+    ]
+    path.write_text(json.dumps(records), encoding="utf-8")
+
+    appmod._fare_cache.clear()
+    appmod._load_fare_cache()
+
+    assert _KEY_C not in appmod._fare_cache
+
+    calls = {"n": 0}
+
+    def fake_provider(*a):
+        calls["n"] += 1
+        return _REAL_FARE
+
+    monkeypatch.setattr(appmod, "amadeus_fare", fake_provider)
+    monkeypatch.setattr(appmod, "travelpayouts_fare", lambda *a: None)
+
+    result = appmod.get_fare(*_KEY_C)
+    assert result == _REAL_FARE
+    assert calls["n"] == 1, "no-data dict in cache must not suppress provider call"
+
+
+def test_load_bad_key_length_dropped(monkeypatch, tmp_path):
+    """A record with a key that isn't exactly 6 elements is dropped silently."""
+    path = _enable_persistence(monkeypatch, tmp_path)
+    now = 1_000_000.0
+    monkeypatch.setattr(appmod.time, "time", lambda: now)
+
+    records = [
+        # 5 elements (missing children)
+        {"key": ["YYZ", "PVG", "2026-12-12", "2027-01-04", 2],
+         "expiry": now + 3600, "result": _REAL_FARE},
+        # 7 elements (extra)
+        {"key": ["YYZ", "PVG", "2026-12-12", "2027-01-04", 2, 0, "extra"],
+         "expiry": now + 3600, "result": _REAL_FARE},
+    ]
+    path.write_text(json.dumps(records), encoding="utf-8")
+
+    appmod._fare_cache.clear()
+    appmod._load_fare_cache()
+
+    assert appmod._fare_cache == {}, "bad-length keys must be dropped"
+
+
+def test_load_non_dict_record_dropped(monkeypatch, tmp_path):
+    """A list item that isn't a dict (e.g. a string or int) is skipped, no crash."""
+    path = _enable_persistence(monkeypatch, tmp_path)
+    now = 1_000_000.0
+    monkeypatch.setattr(appmod.time, "time", lambda: now)
+
+    # Mix: two non-dict items, then one valid real-priced record
+    records_raw = json.dumps([
+        "just a string",
+        42,
+        {"key": list(_ARGS), "expiry": now + 3600, "result": _REAL_FARE},
+    ])
+    path.write_text(records_raw, encoding="utf-8")
+
+    appmod._fare_cache.clear()
+    appmod._load_fare_cache()
+
+    assert _ARGS in appmod._fare_cache, "valid record after non-dict items must still load"
+    assert len(appmod._fare_cache) == 1
+
+
+def test_load_exception_in_record_skipped(monkeypatch, tmp_path):
+    """If processing a record raises unexpectedly, it is skipped and load continues."""
+    import json as _json
+
+    path = _enable_persistence(monkeypatch, tmp_path)
+    now = 1_000_000.0
+    monkeypatch.setattr(appmod.time, "time", lambda: now)
+
+    # Write a valid record; we'll inject an exception on the first iteration only
+    records_raw = _json.dumps([
+        {"key": list(_ARGS), "expiry": now + 3600, "result": _REAL_FARE},
+        {"key": list(_KEY_B), "expiry": now + 3600, "result": _REAL_FARE},
+    ])
+    path.write_text(records_raw, encoding="utf-8")
+
+    original_tuple = __builtins__["tuple"] if isinstance(__builtins__, dict) else tuple
+    call_count = {"n": 0}
+
+    def raising_tuple(iterable):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise RuntimeError("simulated unexpected error on first record")
+        return original_tuple(iterable)
+
+    monkeypatch.setattr(appmod, "tuple", raising_tuple, raising=False)
+
+    # Patch tuple inside _load_fare_cache's scope via the app module's builtins
+    import builtins as _builtins
+    original = _builtins.tuple
+    _builtins.tuple = raising_tuple
+
+    try:
+        appmod._fare_cache.clear()
+        appmod._load_fare_cache()  # must not raise
+    finally:
+        _builtins.tuple = original
+
+    # Second record should still have loaded
+    assert _KEY_B in appmod._fare_cache, "second record must load despite first raising"
+
+
+# ---------------------------------------------------------------------------
 # disabled persistence
 # ---------------------------------------------------------------------------
 
