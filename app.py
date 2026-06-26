@@ -217,6 +217,10 @@ PROVIDER_BACKOFF = float(os.environ.get("PROVIDER_BACKOFF", "0.5"))
 PROVIDER_BACKOFF_MAX = float(os.environ.get("PROVIDER_BACKOFF_MAX", "4"))
 CURRENCY = os.environ.get("CURRENCY", "cad").lower()
 FARE_CACHE_TTL = int(os.environ.get("FARE_CACHE_TTL", "3600"))
+# Disk-persistence path for the fare cache (#42). A JSON file in the working dir.
+# Empty string disables persistence (memory-only). FARE_CACHE_TTL <= 0 disables
+# caching entirely, including persistence. Real fares survive a restart within TTL.
+FARE_CACHE_PATH = os.environ.get("FARE_CACHE_PATH", "whenever_fare_cache.json")
 SEARCH_CONCURRENCY = int(os.environ.get("SEARCH_CONCURRENCY", "8"))
 # Hard cap on search grid size. Each cell = one provider API call. A value <= 0 disables the cap.
 MAX_SEARCH_CELLS = int(os.environ.get("MAX_SEARCH_CELLS", "200"))
@@ -355,10 +359,112 @@ def providers_configured():
 app = Flask(__name__)
 
 # ----------------------- fare cache -----------------------
-# Maps (origin, dest, dep, ret, adults, children) -> (expiry_epoch, result_dict).
+# Maps (origin, dest, dep, ret, adults, children) -> (fetched_epoch, result_dict).
+# We store WHEN the fare was fetched (not an absolute expiry) and judge freshness as
+# (now - fetched) < FARE_CACHE_TTL everywhere, so lowering FARE_CACHE_TTL between runs
+# takes effect immediately — old long-TTL entries are dropped on the next check/load.
 # Only real priced results (cheapest_cad is truthy) are stored; no-data sentinels
 # are never cached so a transient provider failure is not persisted.
 _fare_cache: dict = {}
+# Guards _fare_cache mutations AND disk writes (the search is concurrent — #33/#42),
+# so a save never serialises a half-mutated dict and two threads never race a file.
+_fare_cache_lock = threading.Lock()
+
+
+def _persistence_enabled():
+    """True when the fare cache should be written to / read from disk.
+
+    Disabled (memory-only) when caching is off (FARE_CACHE_TTL <= 0) or when
+    FARE_CACHE_PATH is empty/blank.
+    """
+    return FARE_CACHE_TTL > 0 and bool((FARE_CACHE_PATH or "").strip())
+
+
+def _save_fare_cache():
+    """Atomically persist the current still-fresh _fare_cache to FARE_CACHE_PATH.
+
+    Prunes entries that are stale under the CURRENT FARE_CACHE_TTL opportunistically,
+    serialises the tuple-keyed cache as a JSON list of records (storing each fare's
+    fetch time, not an absolute expiry), writes to a temp file in the same dir, then
+    os.replace (atomic on POSIX) so a reader never sees a partial file and no temp
+    file lingers. No-op when persistence is disabled. Call with _fare_cache_lock held.
+    """
+    if not _persistence_enabled():
+        return
+    now = time.time()
+    # Prune entries no longer fresh under the current TTL while we hold the lock,
+    # then snapshot what survives.
+    stale = [k for k, (fetched, _r) in _fare_cache.items()
+             if now - fetched >= FARE_CACHE_TTL]
+    for k in stale:
+        del _fare_cache[k]
+    records = [{"key": list(key), "fetched": fetched, "result": res}
+               for key, (fetched, res) in _fare_cache.items()]
+    tmp = f"{FARE_CACHE_PATH}.tmp.{os.getpid()}"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(records, f)
+        os.replace(tmp, FARE_CACHE_PATH)
+    except OSError as exc:
+        _log.warning("Failed to persist fare cache to %s (%s)", FARE_CACHE_PATH, exc)
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+
+
+def _load_fare_cache():
+    """Populate _fare_cache from FARE_CACHE_PATH on startup, revalidating freshness.
+
+    Each record's stored ``fetched`` time is checked against the CURRENT FARE_CACHE_TTL
+    (``now - fetched < FARE_CACHE_TTL``), so a TTL lowered between runs immediately
+    drops fares that are now stale instead of honouring their old longer lifetime.
+    No-op when persistence is disabled or the file does not exist. A missing,
+    corrupt, or malformed file leaves the cache empty (logged, never crashes).
+    Rebuilds tuple keys from the stored list-of-records.
+    """
+    if not _persistence_enabled() or not os.path.exists(FARE_CACHE_PATH):
+        return
+    try:
+        with open(FARE_CACHE_PATH, encoding="utf-8") as f:
+            records = json.load(f)
+        if not isinstance(records, list):
+            raise ValueError("fare cache file is not a list")
+        now = time.time()
+        loaded = {}
+        skipped = 0
+        for rec in records:
+            try:
+                if not isinstance(rec, dict):
+                    skipped += 1
+                    continue
+                raw_key = rec.get("key")
+                fetched = rec.get("fetched")
+                result = rec.get("result")
+                # key must be a sequence of exactly 6 elements
+                if not isinstance(raw_key, (list, tuple)) or len(raw_key) != 6:
+                    skipped += 1
+                    continue
+                # fetched must be a number and the fare still fresh under the CURRENT
+                # TTL (drops entries written with an older, longer TTL — this is the fix)
+                if not isinstance(fetched, (int, float)) or now - fetched >= FARE_CACHE_TTL:
+                    skipped += 1
+                    continue
+                # result must be a real-priced dict (same guard get_fare uses to cache)
+                if not isinstance(result, dict) or not result.get("cheapest_cad"):
+                    skipped += 1
+                    continue
+                loaded[tuple(raw_key)] = (fetched, result)
+            except Exception:  # noqa: BLE001 — never let one bad record abort the load
+                skipped += 1
+        if skipped:
+            _log.debug("_load_fare_cache: skipped %d invalid/stale record(s)", skipped)
+    except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
+        _log.warning("Could not load fare cache from %s (%s); starting empty",
+                     FARE_CACHE_PATH, exc)
+        return
+    with _fare_cache_lock:
+        _fare_cache.update(loaded)
 
 # ----------------------------- Ollama -----------------------------
 def _ollama_headers():
@@ -1314,7 +1420,8 @@ def _get_fare_uncached(origin, dest, dep, ret, adults, children):
 def get_fare(origin, dest, dep, ret, adults, children):
     """Collect REAL pricing from configured flight APIs. No AI here.
 
-    Results with real prices are cached in _fare_cache for FARE_CACHE_TTL seconds.
+    Results with real prices are cached in _fare_cache for FARE_CACHE_TTL seconds
+    and persisted to FARE_CACHE_PATH so they survive a restart (within TTL).
     No-data sentinels are never cached.  Set FARE_CACHE_TTL <= 0 to disable caching.
     """
     if FARE_CACHE_TTL <= 0:
@@ -1324,13 +1431,15 @@ def get_fare(origin, dest, dep, ret, adults, children):
     now = time.time()
     entry = _fare_cache.get(key)
     if entry is not None:
-        expiry, cached_result = entry
-        if expiry > now:
-            return cached_result
+        fetched, cached_result = entry
+        if now - fetched < FARE_CACHE_TTL:  # fresh under the current TTL
+            return cached_result  # in-memory fast path; hits never write to disk
 
     result = _get_fare_uncached(origin, dest, dep, ret, adults, children)
     if result.get("cheapest_cad"):
-        _fare_cache[key] = (now + FARE_CACHE_TTL, result)
+        with _fare_cache_lock:
+            _fare_cache[key] = (now, result)  # store fetch time, not absolute expiry
+            _save_fare_cache()  # persist atomically; no-op when persistence disabled
     return result
 
 # ------------------------ booking links ---------------------------
@@ -2047,6 +2156,11 @@ def build_recommendation(origin, results, adults, child_ages, families):
         return (f"Best value: {top['city']} ({top['iata']}) at ~CA${top['price_per_family']:,}"
                 f"/family, {top['dep']} → {top['ret']}, {top['chosen']}. "
                 f"(AI summary unavailable: {e})")
+
+# Load any disk-persisted fare cache at import (#42), after the cache, config, and
+# helpers are defined. Guarded/no-op when persistence is disabled or the file is
+# missing/corrupt, so import never fails on a bad cache file.
+_load_fare_cache()
 
 if __name__ == "__main__":
     print(f"Whenever -> http://localhost:{PORT}  (model={OLLAMA_MODEL}, "

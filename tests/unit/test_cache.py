@@ -95,11 +95,11 @@ def test_cache_entry_expires_after_ttl(monkeypatch):
     monkeypatch.setattr(appmod, "amadeus_fare", fake_amadeus)
     monkeypatch.setattr(appmod, "travelpayouts_fare", lambda *a: None)
 
-    # First call — caches with expiry = now[0] + 60
+    # First call — caches with fetched = now[0] (fresh for the next 60s)
     appmod.get_fare(*_ARGS)
     assert calls["n"] == 1
 
-    # Advance time past expiry
+    # Advance time past the TTL since fetch
     now[0] += 61
 
     # Second call — entry is stale; provider must fire again

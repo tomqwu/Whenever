@@ -51,6 +51,10 @@ def _reset_state(monkeypatch):
     monkeypatch.setattr(appmod, "RAPIDAPI_KEY", None)
     # Disable rate limiting for all tests unless explicitly re-enabled.
     monkeypatch.setattr(appmod, "RATE_LIMIT_ENABLED", False)
+    # Disable fare-cache disk persistence by default so the existing suite never
+    # writes whenever_fare_cache.json into the repo (#42). Tests that exercise
+    # persistence set FARE_CACHE_PATH to a tmp_path via their own monkeypatch.
+    monkeypatch.setattr(appmod, "FARE_CACHE_PATH", "")
     appmod._rate_state.clear()
     appmod.top_cities.cache_clear()
     appmod.resolve_airport.cache_clear()

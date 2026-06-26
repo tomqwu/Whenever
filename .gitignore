@@ -30,3 +30,5 @@ htmlcov/
 flight-matrix-history.csv
 flight-matrix-latest.md
 whenever_watches.db*
+whenever_fare_cache.json
+whenever_fare_cache.json.tmp.*
