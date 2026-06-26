@@ -444,3 +444,52 @@ def test_scheduler_runs_when_demo_off(monkeypatch, tmp_path, capsys):
     assert rc == 0
     out = capsys.readouterr().out
     assert "[SUMMARY]" in out
+
+
+# ---------------------------------------------------------------------------
+# Fix 2 (P3, #44): demo booking links must be child-aware
+# ---------------------------------------------------------------------------
+
+def test_demo_fare_book_is_none():
+    """demo_fare must return book=None so _build_cell falls back to child-aware kayak_link.
+
+    With book=None, _build_cell's ``fare.get("book") or kayak_link(...)`` path
+    always builds a fresh kayak link carrying the actual child_ages from the
+    search, not an adult-only link baked into the demo fare at creation time.
+    """
+    f = appmod.demo_fare("YYZ", "PVG", "2026-07-01", "2026-07-15", 2, 2)
+    assert f.get("book") is None, (
+        "demo_fare must not set 'book' so _build_cell can use child-aware kayak_link"
+    )
+
+
+def test_demo_fare_build_cell_child_aware_booking_link():
+    """_build_cell on a demo fare with child_ages → booking link includes child ages.
+
+    Previously demo_fare baked kayak_link(..., []) (empty child list) into 'book',
+    so the cell always opened an adult-only KAYAK page even for family searches.
+    With book=None the fallback branch runs and encodes the actual ages.
+    """
+    child_ages = [5, 9]
+    fare = appmod.demo_fare("YYZ", "PVG", "2026-07-01", "2026-07-15", 2, len(child_ages))
+    cell = appmod._build_cell(
+        "YYZ", "PVG", "2026-07-01", "2026-07-15",
+        adults=2, child_ages=child_ages,
+        fare=fare, threshold=0.25,
+    )
+    book = cell["book"]
+    # kayak_link encodes ages as /children-5-9 path segment
+    assert "children-5-9" in book, f"Expected child ages 5 and 9 in book link, got: {book}"
+
+
+def test_demo_fare_build_cell_adult_only_link_when_no_children():
+    """_build_cell on demo fare with no children still produces a valid book link."""
+    fare = appmod.demo_fare("YYZ", "PVG", "2026-07-01", "2026-07-15", 2, 0)
+    cell = appmod._build_cell(
+        "YYZ", "PVG", "2026-07-01", "2026-07-15",
+        adults=2, child_ages=[],
+        fare=fare, threshold=0.25,
+    )
+    book = cell["book"]
+    assert book, "book link must not be empty"
+    assert "children" not in book, "adult-only search must not encode children segment"

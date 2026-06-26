@@ -903,3 +903,46 @@ def test_check_all_watches_webhook_exception_does_not_crash(db):
     # Drop should still be reported despite webhook failure
     assert len(drops) == 1
     assert drops[0]["new_price"] == 7000
+
+
+# ---------------------------------------------------------------------------
+# Fix 1 (P2, #44): demo fares must never be persisted via check_all_watches
+# ---------------------------------------------------------------------------
+
+def test_check_all_watches_skips_persist_and_alert_on_demo_source(db):
+    """source="demo" fare: db.update_price NOT called, no drop alert emitted.
+
+    Defense-in-depth guard at the write site — demo fares must never land in
+    WATCH_DB regardless of the entrypoint (e.g. a direct call bypassing the
+    scheduler.main DEMO_MODE guard).
+    """
+    _sample_watch(db, last_price=8000)
+    demo_fare_fn = _fare_fn_returning(7000, source="demo", book="https://k.com/demo")
+
+    update_price_calls = []
+    original_update_price = db.update_price
+
+    def spy_update_price(*a, **k):
+        update_price_calls.append(a)
+        return original_update_price(*a, **k)
+
+    db.update_price = spy_update_price
+
+    drops = check_all_watches(db, fare_fn=demo_fare_fn)
+
+    # Must NOT persist — no DB write, no drop alert
+    assert update_price_calls == [], "update_price must not be called for demo fare"
+    assert drops == [], "demo fare must not trigger a drop alert"
+    # last_price must remain unchanged
+    w = db.list_watches()[0]
+    assert w["last_price"] == 8000, "last_price must not be overwritten by demo fare"
+
+
+def test_check_all_watches_persists_on_real_source_after_demo_guard(db):
+    """Non-demo source still persists and alerts as before (guard is additive)."""
+    _sample_watch(db, last_price=8000)
+    drops = check_all_watches(db, fare_fn=_fare_fn_returning(7000, source="kiwi"))
+    assert len(drops) == 1
+    assert drops[0]["new_price"] == 7000
+    w = db.list_watches()[0]
+    assert w["last_price"] == 7000

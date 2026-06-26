@@ -1500,7 +1500,7 @@ def demo_fare(origin, dest, dep, ret, adults, children):
         "stops": stops,
         "nonstop_cad": nonstop,
         "source": "demo",
-        "book": kayak_link(origin, dest, dep, ret, adults, []),
+        "book": None,  # omit so _build_cell falls back to child-aware kayak_link (#44)
         "duration_min": duration,
         "nonstop_duration_min": nonstop_duration,
         "airlines": ["DemoAir"],
