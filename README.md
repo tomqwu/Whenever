@@ -87,6 +87,19 @@ best-value trip — it is never the source of a price.
 The fare layer is a simple adapter (`get_fare` in `app.py`); Amadeus, Travelpayouts, and Kiwi/Tequila
 are wired in this way, and new providers (e.g. Skyscanner) plug in the same way.
 
+### Demo / sample mode (no key required)
+
+Want to explore the UI without a provider key? Set `DEMO_MODE=1` (default **off**). The app then
+serves **clearly-labeled SAMPLE fares** — deterministic, obviously-fake numbers (carrier `DemoAir`)
+generated locally, **not real prices and never from a flight API**. A prominent persistent
+**“⚠️ DEMO DATA — sample fares, NOT real prices”** banner stays on screen, each cell is tagged
+`demo`, and the AI summary is prefixed `(DEMO …)`.
+
+This is the **only** exception to the real-data-only rule, and only because it is explicit and
+unmistakable: demo data is **never** a silent fallback (turn it off and a missing/failed provider
+just shows “no fares”), demo and real **never mix**, and demo fares are **never** written to the
+real fare cache. Leave `DEMO_MODE` off (blank) for any real pricing.
+
 ## Files
 
 - `app.py` — Flask backend + `run_search` core (search logic shared by routes and tests).

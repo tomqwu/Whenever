@@ -38,6 +38,28 @@ The model **never produces a price**. All fares are fetched from flight APIs. Th
 operates *on* collected data (suggesting cities, ranking the result grid). If no flight API is
 configured, cells return `source: "no-data"` rather than a fabricated number.
 
+### Demo / sample mode (#44) — the sole, labeled exception
+
+`DEMO_MODE` (default **off**) is an **opt-in, clearly-labeled SAMPLE-fare mode** for exploring
+the app with no provider key. It is the **only** sanctioned exception to the real-data-only
+rule, and **only** because it is explicit and unmistakable:
+
+- Demo fares are produced **only** when `DEMO_MODE` is explicitly on — **never** as a silent
+  fallback when providers fail or aren't configured (that path still returns `source: "no-data"`).
+- `demo_fare()` returns a **deterministic** sample (a hash of route + dates seeds plausible-but-
+  obviously-fake numbers that vary by cell), tagged **`source: "demo"`**, carrier **`DemoAir`**.
+  It calls **no provider** and **no network**.
+- Demo and real **never mix**: with demo on, `providers_configured()` is exactly `["demo"]`,
+  `/api/health` reports `"demo": true`, every cell is demo, and the UI shows a prominent
+  persistent **“⚠️ DEMO DATA — sample fares, NOT real prices”** banner plus a per-cell `demo`
+  tag; the AI summary is prefixed `(DEMO …)`. No cell is ever part-real/part-demo.
+- Demo fares are **never persisted** anywhere: the demo path bypasses the real fare cache
+  (`FARE_CACHE_PATH`), `/api/watch` skips its baseline lookup so no demo price/source lands in
+  `WATCH_DB`, and `scheduler.py` **refuses to run** while `DEMO_MODE` is on (it would otherwise
+  re-price watches with sample fares and write them to the watch DB). The recommendation prompt
+  also describes the data as locally generated sample data in demo mode, so the LLM never
+  analyzes demo numbers under a real-fare prompt.
+
 ## Request flow
 
 1. **`GET /`** — serves `templates/index.html`.
@@ -195,6 +217,7 @@ the nonstop is "chosen"; otherwise the cheapest connection is chosen. Threshold 
 | `OLLAMA_MODEL` | model tag (local default `qwen3:8b`; cloud e.g. `gpt-oss:120b`). Tiers: small/fast `qwen3.5:4b`; balanced `qwen3:8b` (default); prosumer `qwen3:30b`; cloud `gpt-oss:120b`. | `qwen3:8b` |
 | `OLLAMA_API_KEY` | Bearer API key for Ollama cloud (`https://ollama.com/settings/keys`); leave unset for local Ollama | — |
 | `CURRENCY` | output currency | `cad` |
+| `DEMO_MODE` | Opt-in, clearly-labeled **SAMPLE-fare** mode for no-key exploration (#44). `1`/`true`/`yes` ⇒ every fare is a deterministic obviously-fake sample (carrier `DemoAir`, `source="demo"`); **no** real provider is called, `/api/health` reports `"demo": true`, `providers_configured()` is `["demo"]`, the UI shows a prominent persistent “DEMO DATA — NOT real prices” banner, and demo fares are **never** written to `FARE_CACHE_PATH`. **Never** a silent fallback — only on when explicitly set. | `` (off) |
 | `TRAVELPAYOUTS_TOKEN` | Travelpayouts API token | — |
 | `AMADEUS_CLIENT_ID` / `AMADEUS_CLIENT_SECRET` | Amadeus creds | — |
 | `KIWI_API_KEY` | Kiwi/Tequila API key (free Self-Service tier at tequila.kiwi.com) | — |
