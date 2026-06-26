@@ -212,9 +212,15 @@ RAPIDAPI_HOST = os.environ.get("RAPIDAPI_HOST", "flights-sky.p.rapidapi.com")
 #     poll timeout below.
 SKYSCANNER_CONNECT_TIMEOUT = int(os.environ.get("SKYSCANNER_CONNECT_TIMEOUT", "10"))
 SKYSCANNER_SEARCH_TIMEOUT = int(os.environ.get("SKYSCANNER_SEARCH_TIMEOUT", "90"))
-SKYSCANNER_POLL_ATTEMPTS = int(os.environ.get("SKYSCANNER_POLL_ATTEMPTS", "12"))
+SKYSCANNER_POLL_ATTEMPTS = int(os.environ.get("SKYSCANNER_POLL_ATTEMPTS", "24"))
 SKYSCANNER_POLL_INTERVAL = float(os.environ.get("SKYSCANNER_POLL_INTERVAL", "1.5"))
-SKYSCANNER_POLL_TIMEOUT = int(os.environ.get("SKYSCANNER_POLL_TIMEOUT", "8"))
+SKYSCANNER_POLL_TIMEOUT = int(os.environ.get("SKYSCANNER_POLL_TIMEOUT", "20"))
+# How many CONSECUTIVE poll requests may stall (request-level timeout/network error,
+# i.e. NO response) before we give up. A single slow poll no longer aborts the whole
+# search: as long as the session keeps responding ("incomplete" = still progressing)
+# we keep polling, and we only bail after this many back-to-back silences. Bounds the
+# worst case to ~ stalls x SKYSCANNER_POLL_TIMEOUT of pure silence.
+SKYSCANNER_POLL_MAX_STALLS = int(os.environ.get("SKYSCANNER_POLL_MAX_STALLS", "3"))
 # ----------------------------- provider retry/backoff (#41) -----------------------------
 # Bounded exponential-backoff retry for TRANSIENT fare-provider failures (request
 # timeouts, connection errors, HTTP 5xx, and provider-side 429 rate limits). Applied
@@ -1268,15 +1274,15 @@ def skyscanner_fare(origin, dest, dep, ret, adults, children):
             return None
         poll_url = f"{base}/web/flights/search-incomplete"
         completed = False
+        stalls = 0
         # Longer-but-bounded budget: SKYSCANNER_POLL_ATTEMPTS x SKYSCANNER_POLL_INTERVAL
-        # (default ~12 x 1.5s ~= 18s) gives most routes — incl. long-haul — time to
-        # reach "complete" instead of falling back to serpapi. Still bounded: a short
-        # per-poll request timeout plus break-on-Timeout means a hung session can't run
-        # for minutes.
+        # (default ~24 x 1.5s) gives even slow long-haul sessions time to reach
+        # "complete" instead of returning no data. Still bounded: a generous per-poll
+        # READ timeout (waits while the session responds), and we only give up after
+        # SKYSCANNER_POLL_MAX_STALLS consecutive silences — so a single slow poll no
+        # longer aborts the whole search, but a genuinely hung session can't run forever.
         for _ in range(SKYSCANNER_POLL_ATTEMPTS):
             time.sleep(SKYSCANNER_POLL_INTERVAL)
-            # Short poll timeout so a hung/slow session can't tie up a search
-            # worker for attempts x 30s; without it one fare cell could stall for minutes.
             pr = _skyscanner_get(
                 poll_url,
                 params={"sessionId": session_id},
@@ -1289,10 +1295,15 @@ def skyscanner_fare(origin, dest, dep, ret, adults, children):
                 retries_502=0,
             )
             if pr is None:
-                # A request-level timeout/network error returns None. Don't keep
-                # retrying after a timeout — bail out and let _get_fare_uncached
-                # fall through to the next provider quickly.
-                break
+                # A request-level timeout/network error returns None (the poll went
+                # SILENT). Tolerate transient slow polls: only bail after
+                # SKYSCANNER_POLL_MAX_STALLS consecutive silences, since the session
+                # may simply be taking a while to finish.
+                stalls += 1
+                if stalls >= SKYSCANNER_POLL_MAX_STALLS:
+                    break
+                continue
+            stalls = 0
             if pr.status_code != 200:
                 continue
             try:

@@ -1530,14 +1530,16 @@ def test_skyscanner_fare_poll_uses_raw_session_id(monkeypatch, fake_resp):
     assert poll_params["sessionId"] == raw_sid
 
 
-def test_skyscanner_fare_poll_breaks_on_timeout(monkeypatch, fake_resp):
-    """A poll that times out (requests.Timeout) bails immediately instead of
-    looping the full 8 attempts — so a hung session degrades to no-data fast.
+def test_skyscanner_fare_poll_bails_after_consecutive_stalls(monkeypatch, fake_resp):
+    """Polls that keep timing out (silence) bail after SKYSCANNER_POLL_MAX_STALLS
+    consecutive stalls — NOT on the very first one (a single slow poll must not
+    abort a session that may simply be taking a while), and NOT looping forever.
 
-    Also asserts the poll request uses the SHORT 8s timeout (not the default 30s),
-    bounding how long one fare cell can spend before falling through.
+    Also asserts the poll request uses the configured SKYSCANNER_POLL_TIMEOUT.
     """
     monkeypatch.setattr(appmod, "RAPIDAPI_KEY", "k")
+    monkeypatch.setattr(appmod, "SKYSCANNER_POLL_MAX_STALLS", 3)
+    monkeypatch.setattr(appmod, "SKYSCANNER_POLL_TIMEOUT", 20)
     monkeypatch.setattr(appmod.time, "sleep", lambda *_a, **_k: None)
     poll_count = {"n": 0}
     poll_timeouts = []
@@ -1549,17 +1551,44 @@ def test_skyscanner_fare_poll_breaks_on_timeout(monkeypatch, fake_resp):
                 status=200)
         poll_count["n"] += 1
         poll_timeouts.append(timeout)
-        # First poll hangs and times out.
+        # Every poll hangs and times out (the session goes silent).
         raise appmod.requests.exceptions.Timeout("poll hung")
 
     monkeypatch.setattr(appmod.requests, "get", fake_get)
     res = appmod.skyscanner_fare("YYZ", "LAX", "2026-08-07", "2026-08-09", 1, 0)
 
     assert res is None
-    # Broke out on the first timeout — did NOT loop all 8 attempts.
-    assert poll_count["n"] == 1
-    # Poll used the short timeout, not the default 30s.
-    assert poll_timeouts == [8]
+    # Bailed after exactly MAX_STALLS consecutive silences — tolerant of one slow
+    # poll, but bounded (not all 24 attempts, not infinite).
+    assert poll_count["n"] == 3
+    assert poll_timeouts == [20, 20, 20]
+
+
+def test_skyscanner_fare_poll_tolerates_a_transient_stall(monkeypatch, fake_resp):
+    """A single slow poll (timeout) does NOT abort the search: the loop keeps
+    polling and still succeeds when the session reaches 'complete' afterwards."""
+    monkeypatch.setattr(appmod, "RAPIDAPI_KEY", "k")
+    monkeypatch.setattr(appmod, "SKYSCANNER_POLL_MAX_STALLS", 3)
+    monkeypatch.setattr(appmod.time, "sleep", lambda *_a, **_k: None)
+    complete = _sky_complete_payload()
+    state = {"n": 0}
+
+    def fake_get(url, headers=None, params=None, timeout=None):
+        if url.endswith("/web/flights/search-roundtrip"):
+            return fake_resp(
+                {"data": {"context": {"status": "incomplete", "sessionId": "sid"}}},
+                status=200)
+        state["n"] += 1
+        if state["n"] == 1:
+            raise appmod.requests.exceptions.Timeout("one slow poll")
+        return fake_resp(complete, status=200)
+
+    monkeypatch.setattr(appmod.requests, "get", fake_get)
+    res = appmod.skyscanner_fare("YYZ", "LAX", "2026-08-07", "2026-08-09", 1, 0)
+
+    # The transient stall was tolerated; the next poll completed → real result.
+    assert res is not None
+    assert state["n"] == 2
 
 
 def test_skyscanner_fare_search_uses_connect_read_timeout_tuple(monkeypatch, fake_resp):
@@ -1700,7 +1729,7 @@ def test_skyscanner_fare_poll_interval_is_used(monkeypatch, fake_resp):
 
 
 def test_skyscanner_fare_poll_timeout_is_configurable(monkeypatch, fake_resp):
-    """The poll request timeout honours SKYSCANNER_POLL_TIMEOUT (default 8)."""
+    """The poll request timeout honours SKYSCANNER_POLL_TIMEOUT (default 20)."""
     monkeypatch.setattr(appmod, "RAPIDAPI_KEY", "k")
     monkeypatch.setattr(appmod, "SKYSCANNER_POLL_TIMEOUT", 11)
     monkeypatch.setattr(appmod, "SKYSCANNER_POLL_INTERVAL", 0.0)
@@ -1752,7 +1781,7 @@ def test_skyscanner_fare_poll_config_defaults():
         cwd=repo, env=env, capture_output=True, text=True,
     )
     assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() == "12 1.5 8"
+    assert result.stdout.strip() == "24 1.5 20"
 
 
 def test_skyscanner_tried_first_in_provider_chain(monkeypatch):
