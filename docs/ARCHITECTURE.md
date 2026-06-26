@@ -164,7 +164,7 @@ the nonstop is "chosen"; otherwise the cheapest connection is chosen. Threshold 
 | `PROVIDER_BACKOFF` | Base seconds for exponential backoff between provider retries: sleep `PROVIDER_BACKOFF × 2**attempt`, each sleep capped at `PROVIDER_BACKOFF_MAX`. Default 2 retries × 0.5s ≈ 0.5 + 1.0 ≈ 1.5s worst-case extra wait — bounded, never minutes. | `0.5` |
 | `PROVIDER_BACKOFF_MAX` | Per-sleep cap (seconds) for provider backoff **and** for a 429 `Retry-After` header (a large/hostile `Retry-After` is clamped to this), so a single cell can't stall. | `4` |
 | `FARE_CACHE_TTL` | In-memory cache TTL (seconds) for fare results. Set `<= 0` to disable. | `3600` |
-| `FARE_CACHE_PATH` | JSON file the fare cache is persisted to so real fares survive a restart (within `FARE_CACHE_TTL`), cutting provider calls/quota. Empty string = memory-only (no disk I/O). `FARE_CACHE_TTL <= 0` disables caching **and** persistence. Only real priced results are written; no-data sentinels never are. Writes are atomic (temp file + `os.replace`) and lock-guarded for concurrent searches. | `whenever_fare_cache.json` |
+| `FARE_CACHE_PATH` | JSON file the fare cache is persisted to so real fares survive a restart, cutting provider calls/quota. Each entry stores its fetch time and is revalidated against the **current** `FARE_CACHE_TTL` on load, so lowering the TTL takes effect immediately (no stale serving). Empty string = memory-only (no disk I/O). `FARE_CACHE_TTL <= 0` disables caching **and** persistence. Only real priced results are written; no-data sentinels never are. Writes are atomic (temp file + `os.replace`) and lock-guarded for concurrent searches. | `whenever_fare_cache.json` |
 | `SEARCH_CONCURRENCY` | Max parallel threads for the departure×return grid fetch in `run_search`. Each cell is one provider call, so large grids × many cities = many provider calls (quota/cost) — recommend modest date spans (default UI: 2×2). | `8` |
 | `MAX_SEARCH_CELLS` | Hard cap on total search grid cells (cities × dep_dates × ret_dates). Each cell = one provider API call. A request exceeding the cap returns HTTP 400 before any fare calls are made. Set `<= 0` to disable the cap. The frontend also shows a soft confirm dialog above 40 cells (see `CONFIRM_CELLS` in `templates/index.html`). | `200` |
 | `MAX_DATE_SPAN` | Generous per-direction day cap. `dep_span`/`ret_span` (and `date_range`'s `count`) are clamped to this ceiling **before** the date arrays are expanded, so a malformed huge span (e.g. `dep_span=10000000`) can't allocate millions of dates and tie up the worker before the cell cap's 400 fires. The form max is small; this is a safety ceiling, not the typical value. | `60` |
@@ -288,9 +288,13 @@ A lightweight in-memory per-IP sliding-window rate limiter (no new dependencies)
   Only real priced results are cached; no-data sentinels are never stored. Configure via
   `FARE_CACHE_TTL`; set `<= 0` to disable. The cache is process-local (not shared across
   workers), but is **persisted to disk** (`FARE_CACHE_PATH`, default
-  `whenever_fare_cache.json`) so real fares survive a restart within the TTL. On a write of
-  a new real fare the whole non-expired cache is rewritten atomically (temp file +
-  `os.replace`) under a `threading.Lock`; in-memory cache hits never touch disk. On startup
-  `_load_fare_cache()` reads the file, drops already-expired entries, and rebuilds the
-  tuple-keyed cache; a missing/corrupt/malformed file is logged and starts empty (never
-  crashes). Set `FARE_CACHE_PATH=""` for memory-only (no disk I/O).
+  `whenever_fare_cache.json`) so real fares survive a restart while still fresh. Each entry
+  stores **when its fare was fetched** (not an absolute expiry), and freshness is judged as
+  `now - fetched < FARE_CACHE_TTL` everywhere — in memory and on load — so **lowering the
+  TTL between runs takes effect immediately**: a fare written under a longer TTL is dropped
+  on the next check/load instead of being served stale. On a write of a new real fare the
+  whole still-fresh cache is rewritten atomically (temp file + `os.replace`) under a
+  `threading.Lock`; in-memory cache hits never touch disk. On startup `_load_fare_cache()`
+  reads the file, drops entries no longer fresh under the **current** `FARE_CACHE_TTL`, and
+  rebuilds the tuple-keyed cache; a missing/corrupt/malformed file is logged and starts
+  empty (never crashes). Set `FARE_CACHE_PATH=""` for memory-only (no disk I/O).

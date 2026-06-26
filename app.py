@@ -359,7 +359,10 @@ def providers_configured():
 app = Flask(__name__)
 
 # ----------------------- fare cache -----------------------
-# Maps (origin, dest, dep, ret, adults, children) -> (expiry_epoch, result_dict).
+# Maps (origin, dest, dep, ret, adults, children) -> (fetched_epoch, result_dict).
+# We store WHEN the fare was fetched (not an absolute expiry) and judge freshness as
+# (now - fetched) < FARE_CACHE_TTL everywhere, so lowering FARE_CACHE_TTL between runs
+# takes effect immediately — old long-TTL entries are dropped on the next check/load.
 # Only real priced results (cheapest_cad is truthy) are stored; no-data sentinels
 # are never cached so a transient provider failure is not persisted.
 _fare_cache: dict = {}
@@ -378,22 +381,25 @@ def _persistence_enabled():
 
 
 def _save_fare_cache():
-    """Atomically persist the current non-expired _fare_cache to FARE_CACHE_PATH.
+    """Atomically persist the current still-fresh _fare_cache to FARE_CACHE_PATH.
 
-    Prunes expired entries opportunistically, serialises the tuple-keyed cache as
-    a JSON list of records, writes to a temp file in the same dir, then os.replace
-    (atomic on POSIX) so a reader never sees a partial file and no temp file lingers.
-    No-op when persistence is disabled. Must be called with _fare_cache_lock held.
+    Prunes entries that are stale under the CURRENT FARE_CACHE_TTL opportunistically,
+    serialises the tuple-keyed cache as a JSON list of records (storing each fare's
+    fetch time, not an absolute expiry), writes to a temp file in the same dir, then
+    os.replace (atomic on POSIX) so a reader never sees a partial file and no temp
+    file lingers. No-op when persistence is disabled. Call with _fare_cache_lock held.
     """
     if not _persistence_enabled():
         return
     now = time.time()
-    # Prune expired entries while we hold the lock, then snapshot what survives.
-    expired = [k for k, (exp, _r) in _fare_cache.items() if exp <= now]
-    for k in expired:
+    # Prune entries no longer fresh under the current TTL while we hold the lock,
+    # then snapshot what survives.
+    stale = [k for k, (fetched, _r) in _fare_cache.items()
+             if now - fetched >= FARE_CACHE_TTL]
+    for k in stale:
         del _fare_cache[k]
-    records = [{"key": list(key), "expiry": exp, "result": res}
-               for key, (exp, res) in _fare_cache.items()]
+    records = [{"key": list(key), "fetched": fetched, "result": res}
+               for key, (fetched, res) in _fare_cache.items()]
     tmp = f"{FARE_CACHE_PATH}.tmp.{os.getpid()}"
     try:
         with open(tmp, "w", encoding="utf-8") as f:
@@ -408,8 +414,11 @@ def _save_fare_cache():
 
 
 def _load_fare_cache():
-    """Populate _fare_cache from FARE_CACHE_PATH on startup, dropping expired entries.
+    """Populate _fare_cache from FARE_CACHE_PATH on startup, revalidating freshness.
 
+    Each record's stored ``fetched`` time is checked against the CURRENT FARE_CACHE_TTL
+    (``now - fetched < FARE_CACHE_TTL``), so a TTL lowered between runs immediately
+    drops fares that are now stale instead of honouring their old longer lifetime.
     No-op when persistence is disabled or the file does not exist. A missing,
     corrupt, or malformed file leaves the cache empty (logged, never crashes).
     Rebuilds tuple keys from the stored list-of-records.
@@ -430,25 +439,26 @@ def _load_fare_cache():
                     skipped += 1
                     continue
                 raw_key = rec.get("key")
-                expiry = rec.get("expiry")
+                fetched = rec.get("fetched")
                 result = rec.get("result")
                 # key must be a sequence of exactly 6 elements
                 if not isinstance(raw_key, (list, tuple)) or len(raw_key) != 6:
                     skipped += 1
                     continue
-                # expiry must be a number and not yet expired
-                if not isinstance(expiry, (int, float)) or expiry <= now:
+                # fetched must be a number and the fare still fresh under the CURRENT
+                # TTL (drops entries written with an older, longer TTL — this is the fix)
+                if not isinstance(fetched, (int, float)) or now - fetched >= FARE_CACHE_TTL:
                     skipped += 1
                     continue
                 # result must be a real-priced dict (same guard get_fare uses to cache)
                 if not isinstance(result, dict) or not result.get("cheapest_cad"):
                     skipped += 1
                     continue
-                loaded[tuple(raw_key)] = (expiry, result)
+                loaded[tuple(raw_key)] = (fetched, result)
             except Exception:  # noqa: BLE001 — never let one bad record abort the load
                 skipped += 1
         if skipped:
-            _log.debug("_load_fare_cache: skipped %d invalid/expired record(s)", skipped)
+            _log.debug("_load_fare_cache: skipped %d invalid/stale record(s)", skipped)
     except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
         _log.warning("Could not load fare cache from %s (%s); starting empty",
                      FARE_CACHE_PATH, exc)
@@ -1421,14 +1431,14 @@ def get_fare(origin, dest, dep, ret, adults, children):
     now = time.time()
     entry = _fare_cache.get(key)
     if entry is not None:
-        expiry, cached_result = entry
-        if expiry > now:
+        fetched, cached_result = entry
+        if now - fetched < FARE_CACHE_TTL:  # fresh under the current TTL
             return cached_result  # in-memory fast path; hits never write to disk
 
     result = _get_fare_uncached(origin, dest, dep, ret, adults, children)
     if result.get("cheapest_cad"):
         with _fare_cache_lock:
-            _fare_cache[key] = (now + FARE_CACHE_TTL, result)
+            _fare_cache[key] = (now, result)  # store fetch time, not absolute expiry
             _save_fare_cache()  # persist atomically; no-op when persistence disabled
     return result
 
