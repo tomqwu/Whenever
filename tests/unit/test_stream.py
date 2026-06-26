@@ -168,7 +168,7 @@ def test_stream_cells_map_to_correct_dep_ret(client, monkeypatch):
         ret_day = int(ret.split("-")[2])   # 3 or 4
         return 1000 + dep_day * 10 + ret_day
 
-    def fake_get_fare(origin, dest, dep, ret, adults, children):
+    def fake_get_fare(origin, dest, dep, ret, adults, children, compare=False):
         price = _price_for(dep, ret)
         return {
             "cheapest_cad": price,
@@ -215,7 +215,7 @@ def test_stream_tolerates_get_fare_exception(client, monkeypatch):
     fut.result() and truncate the stream mid-flight.
     """
 
-    def always_raises(origin, dest, dep, ret, adults, children):
+    def always_raises(origin, dest, dep, ret, adults, children, compare=False):
         raise RuntimeError("provider down")
 
     monkeypatch.setattr(appmod, "get_fare", always_raises)
@@ -273,7 +273,7 @@ _TIE_PRICES = {
 }
 
 
-def _tie_fare(origin, dest, dep, ret, adults, children):
+def _tie_fare(origin, dest, dep, ret, adults, children, compare=False):
     return {
         "cheapest_cad": _TIE_PRICES[(dest, dep, ret)],
         "stops": 1, "nonstop_cad": None, "source": "test", "book": None,

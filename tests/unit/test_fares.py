@@ -210,7 +210,261 @@ def test_get_fare_no_data(monkeypatch):
     assert res == {"cheapest_cad": None, "stops": None, "nonstop_cad": None,
                    "source": "no-data", "duration_min": None,
                    "nonstop_duration_min": None, "airlines": None,
-                   "nonstop_airlines": None, "layovers": None}
+                   "nonstop_airlines": None, "layovers": None,
+                   "alternatives": None}
+
+
+# ---------------------------------------------------------------------------
+# cross-provider compare mode (#43)
+# ---------------------------------------------------------------------------
+
+def _configure_all(monkeypatch):
+    """Mark every provider as configured so compare mode queries all of them."""
+    monkeypatch.setattr(appmod, "RAPIDAPI_KEY", "k")       # skyscanner
+    monkeypatch.setattr(appmod, "SERPAPI_KEY", "k")        # serpapi
+    monkeypatch.setattr(appmod, "AMADEUS_ID", "k")
+    monkeypatch.setattr(appmod, "AMADEUS_SECRET", "k")     # amadeus
+    monkeypatch.setattr(appmod, "TRAVELPAYOUTS_TOKEN", "k")  # travelpayouts
+    monkeypatch.setattr(appmod, "KIWI_API_KEY", "k")       # kiwi
+
+
+def test_compare_picks_cheapest_with_alternatives(monkeypatch):
+    """compare=True queries all configured providers and returns the cheapest,
+    attaching the OTHER real results as ascending alternatives."""
+    _configure_all(monkeypatch)
+    monkeypatch.setattr(appmod, "skyscanner_fare",
+                        lambda *a: {"cheapest_cad": 900, "source": "skyscanner"})
+    monkeypatch.setattr(appmod, "serpapi_fare", lambda *a: None)
+    monkeypatch.setattr(appmod, "amadeus_fare", lambda *a: None)
+    monkeypatch.setattr(appmod, "travelpayouts_fare",
+                        lambda *a: {"cheapest_cad": 800, "source": "travelpayouts"})
+    monkeypatch.setattr(appmod, "kiwi_fare",
+                        lambda *a: {"cheapest_cad": 850, "source": "kiwi"})
+
+    res = appmod._get_fare_uncached("YYZ", "PVG", "d", "r", 2, 0, compare=True)
+
+    assert res["source"] == "travelpayouts"
+    assert res["cheapest_cad"] == 800
+    assert res["alternatives"] == [
+        {"source": "kiwi", "cheapest_cad": 850},
+        {"source": "skyscanner", "cheapest_cad": 900},
+    ]
+
+
+def test_compare_skips_unconfigured_providers(monkeypatch):
+    """Only configured providers are queried; unconfigured ones are never called."""
+    # Configure only travelpayouts + kiwi.
+    monkeypatch.setattr(appmod, "RAPIDAPI_KEY", None)
+    monkeypatch.setattr(appmod, "SERPAPI_KEY", None)
+    monkeypatch.setattr(appmod, "AMADEUS_ID", None)
+    monkeypatch.setattr(appmod, "AMADEUS_SECRET", None)
+    monkeypatch.setattr(appmod, "TRAVELPAYOUTS_TOKEN", "k")
+    monkeypatch.setattr(appmod, "KIWI_API_KEY", "k")
+
+    called = []
+
+    def _sky(*a):
+        called.append("skyscanner")
+        return {"cheapest_cad": 1, "source": "skyscanner"}
+
+    monkeypatch.setattr(appmod, "skyscanner_fare", _sky)
+    monkeypatch.setattr(appmod, "serpapi_fare",
+                        lambda *a: called.append("serpapi") or None)
+    monkeypatch.setattr(appmod, "amadeus_fare",
+                        lambda *a: called.append("amadeus") or None)
+    monkeypatch.setattr(appmod, "travelpayouts_fare",
+                        lambda *a: {"cheapest_cad": 800, "source": "travelpayouts"})
+    monkeypatch.setattr(appmod, "kiwi_fare",
+                        lambda *a: {"cheapest_cad": 850, "source": "kiwi"})
+
+    res = appmod._get_fare_uncached("YYZ", "PVG", "d", "r", 2, 0, compare=True)
+
+    assert called == [], "unconfigured providers must not be called"
+    assert res["source"] == "travelpayouts"
+    assert res["alternatives"] == [{"source": "kiwi", "cheapest_cad": 850}]
+
+
+def test_compare_all_no_data_returns_sentinel(monkeypatch):
+    """All providers returning no real price -> no-data sentinel with alternatives []."""
+    _configure_all(monkeypatch)
+    for name in ("skyscanner_fare", "serpapi_fare", "amadeus_fare",
+                 "travelpayouts_fare", "kiwi_fare"):
+        monkeypatch.setattr(appmod, name, lambda *a: None)
+
+    res = appmod._get_fare_uncached("YYZ", "PVG", "d", "r", 2, 0, compare=True)
+
+    assert res["source"] == "no-data"
+    assert res["cheapest_cad"] is None
+    assert res["alternatives"] == []
+
+
+def test_compare_no_configured_providers_returns_sentinel(monkeypatch):
+    """No providers configured at all -> sentinel (empty chain, no calls)."""
+    for name in ("RAPIDAPI_KEY", "SERPAPI_KEY", "AMADEUS_ID", "AMADEUS_SECRET",
+                 "TRAVELPAYOUTS_TOKEN", "KIWI_API_KEY"):
+        monkeypatch.setattr(appmod, name, None)
+
+    res = appmod._get_fare_uncached("YYZ", "PVG", "d", "r", 2, 0, compare=True)
+
+    assert res["source"] == "no-data"
+    assert res["alternatives"] == []
+
+
+def test_compare_swallows_provider_exception(monkeypatch):
+    """A raising provider is ignored; the rest still produce a winner."""
+    _configure_all(monkeypatch)
+
+    def boom(*a):
+        raise RuntimeError("provider down")
+
+    monkeypatch.setattr(appmod, "skyscanner_fare", boom)
+    monkeypatch.setattr(appmod, "serpapi_fare", lambda *a: None)
+    monkeypatch.setattr(appmod, "amadeus_fare", lambda *a: None)
+    monkeypatch.setattr(appmod, "travelpayouts_fare",
+                        lambda *a: {"cheapest_cad": 800, "source": "travelpayouts"})
+    monkeypatch.setattr(appmod, "kiwi_fare", lambda *a: None)
+
+    res = appmod._get_fare_uncached("YYZ", "PVG", "d", "r", 2, 0, compare=True)
+
+    assert res["source"] == "travelpayouts"
+    assert res["alternatives"] == []
+
+
+def test_compare_tie_resolves_to_earlier_provider(monkeypatch):
+    """Equal cheapest_cad ties resolve to the earlier provider in the chain order."""
+    _configure_all(monkeypatch)
+    monkeypatch.setattr(appmod, "skyscanner_fare",
+                        lambda *a: {"cheapest_cad": 800, "source": "skyscanner"})
+    monkeypatch.setattr(appmod, "serpapi_fare", lambda *a: None)
+    monkeypatch.setattr(appmod, "amadeus_fare", lambda *a: None)
+    monkeypatch.setattr(appmod, "travelpayouts_fare",
+                        lambda *a: {"cheapest_cad": 800, "source": "travelpayouts"})
+    monkeypatch.setattr(appmod, "kiwi_fare", lambda *a: None)
+
+    res = appmod._get_fare_uncached("YYZ", "PVG", "d", "r", 2, 0, compare=True)
+
+    assert res["source"] == "skyscanner", "tie resolves to earlier chain provider"
+    assert res["alternatives"] == [{"source": "travelpayouts", "cheapest_cad": 800}]
+
+
+def test_compare_false_is_ordered_fallback(monkeypatch):
+    """compare=False keeps the first-match ordered fallback (cheapest is NOT chosen)."""
+    _configure_all(monkeypatch)
+    # skyscanner is first in the chain and returns a real (pricier) fare; ordered
+    # fallback must return IT, not the cheaper travelpayouts result.
+    monkeypatch.setattr(appmod, "skyscanner_fare",
+                        lambda *a: {"cheapest_cad": 900, "source": "skyscanner"})
+    monkeypatch.setattr(appmod, "serpapi_fare", lambda *a: None)
+    monkeypatch.setattr(appmod, "amadeus_fare", lambda *a: None)
+    monkeypatch.setattr(appmod, "travelpayouts_fare",
+                        lambda *a: {"cheapest_cad": 800, "source": "travelpayouts"})
+    monkeypatch.setattr(appmod, "kiwi_fare", lambda *a: None)
+
+    res = appmod._get_fare_uncached("YYZ", "PVG", "d", "r", 2, 0, compare=False)
+
+    assert res["source"] == "skyscanner"
+    assert res.get("alternatives") is None
+
+
+def test_cache_key_includes_compare(monkeypatch):
+    """A compared result must NOT serve a fallback request and vice versa: each
+    caches independently under a key that includes the compare flag."""
+    monkeypatch.setattr(appmod, "FARE_CACHE_TTL", 3600)
+    monkeypatch.setattr(appmod, "FARE_CACHE_PATH", "")  # memory-only
+    appmod._fare_cache.clear()
+
+    calls = {"fallback": 0, "compare": 0}
+
+    def fake_uncached(o, d, dep, ret, ad, ch, compare=False):
+        if compare:
+            calls["compare"] += 1
+            return {"cheapest_cad": 800, "source": "travelpayouts",
+                    "alternatives": [{"source": "kiwi", "cheapest_cad": 850}]}
+        calls["fallback"] += 1
+        return {"cheapest_cad": 900, "source": "skyscanner"}
+
+    monkeypatch.setattr(appmod, "_get_fare_uncached", fake_uncached)
+
+    fb1 = appmod.get_fare("YYZ", "PVG", "d", "r", 2, 0, compare=False)
+    cmp1 = appmod.get_fare("YYZ", "PVG", "d", "r", 2, 0, compare=True)
+    # Second round: both must be cache hits (no extra uncached calls).
+    fb2 = appmod.get_fare("YYZ", "PVG", "d", "r", 2, 0, compare=False)
+    cmp2 = appmod.get_fare("YYZ", "PVG", "d", "r", 2, 0, compare=True)
+
+    assert calls == {"fallback": 1, "compare": 1}, "each compare flavour cached separately"
+    assert fb1["source"] == "skyscanner" and fb2["source"] == "skyscanner"
+    assert cmp1["source"] == "travelpayouts" and cmp2["source"] == "travelpayouts"
+    assert (appmod.get_fare("YYZ", "PVG", "d", "r", 2, 0, compare=True)["alternatives"]
+            == [{"source": "kiwi", "cheapest_cad": 850}])
+    appmod._fare_cache.clear()
+
+
+def test_compare_cache_key_includes_provider_set(monkeypatch):
+    """A compared result is NOT reused after the configured-provider set changes:
+    adding a provider must re-run comparison (so the new provider is included),
+    not serve the stale result computed against the old set."""
+    monkeypatch.setattr(appmod, "FARE_CACHE_TTL", 3600)
+    monkeypatch.setattr(appmod, "FARE_CACHE_PATH", "")  # memory-only
+    appmod._fare_cache.clear()
+
+    calls = {"n": 0}
+
+    def fake_uncached(o, d, dep, ret, ad, ch, compare=False):
+        calls["n"] += 1
+        return {"cheapest_cad": 800, "source": "travelpayouts", "alternatives": []}
+
+    monkeypatch.setattr(appmod, "_get_fare_uncached", fake_uncached)
+
+    # Provider set A = {travelpayouts}.
+    monkeypatch.setattr(appmod, "RAPIDAPI_KEY", None)
+    monkeypatch.setattr(appmod, "SERPAPI_KEY", None)
+    monkeypatch.setattr(appmod, "AMADEUS_ID", None)
+    monkeypatch.setattr(appmod, "AMADEUS_SECRET", None)
+    monkeypatch.setattr(appmod, "TRAVELPAYOUTS_TOKEN", "k")
+    monkeypatch.setattr(appmod, "KIWI_API_KEY", None)
+
+    appmod.get_fare("YYZ", "PVG", "d", "r", 2, 0, compare=True)
+    appmod.get_fare("YYZ", "PVG", "d", "r", 2, 0, compare=True)  # cache hit
+    assert calls["n"] == 1, "same provider set -> cached"
+
+    # Provider set B = {travelpayouts, kiwi}: a NEW provider was configured.
+    monkeypatch.setattr(appmod, "KIWI_API_KEY", "k")
+    appmod.get_fare("YYZ", "PVG", "d", "r", 2, 0, compare=True)
+    assert calls["n"] == 2, "provider set changed -> compare must re-run, not serve stale"
+    appmod._fare_cache.clear()
+
+
+def test_get_fare_compare_uncached_when_ttl_disabled(monkeypatch):
+    """TTL<=0 bypasses the cache but still honours compare (no-cache compare path)."""
+    monkeypatch.setattr(appmod, "FARE_CACHE_TTL", 0)
+    _configure_all(monkeypatch)
+    monkeypatch.setattr(appmod, "skyscanner_fare",
+                        lambda *a: {"cheapest_cad": 900, "source": "skyscanner"})
+    monkeypatch.setattr(appmod, "serpapi_fare", lambda *a: None)
+    monkeypatch.setattr(appmod, "amadeus_fare", lambda *a: None)
+    monkeypatch.setattr(appmod, "travelpayouts_fare",
+                        lambda *a: {"cheapest_cad": 800, "source": "travelpayouts"})
+    monkeypatch.setattr(appmod, "kiwi_fare", lambda *a: None)
+
+    res = appmod.get_fare("YYZ", "PVG", "d", "r", 2, 0, compare=True)
+    assert res["source"] == "travelpayouts"
+    assert res["alternatives"] == [{"source": "skyscanner", "cheapest_cad": 900}]
+
+
+def test_build_cell_carries_alternatives(monkeypatch):
+    """_build_cell must propagate the fare's alternatives into the cell dict."""
+    fare = {"cheapest_cad": 800, "stops": 1, "nonstop_cad": None,
+            "source": "travelpayouts",
+            "alternatives": [{"source": "kiwi", "cheapest_cad": 850}]}
+    cell = appmod._build_cell("YYZ", "PVG", "2026-12-12", "2027-01-04", 2, [], fare, 0.25)
+    assert cell["alternatives"] == [{"source": "kiwi", "cheapest_cad": 850}]
+
+
+def test_build_cell_alternatives_none_in_fallback(monkeypatch):
+    """A fallback fare (no alternatives key) yields a cell with alternatives None."""
+    fare = {"cheapest_cad": 800, "stops": 1, "nonstop_cad": None, "source": "skyscanner"}
+    cell = appmod._build_cell("YYZ", "PVG", "2026-12-12", "2027-01-04", 2, [], fare, 0.25)
+    assert cell["alternatives"] is None
 
 
 # ---------------------------------------------------------------------------

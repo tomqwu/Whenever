@@ -89,11 +89,20 @@ Run the multi-city × multi-date best-value search.
   "families": 3,
   "dep_start": "2026-12-12", "dep_span": 4,
   "ret_start": "2027-01-04", "ret_span": 4,
-  "nonstop_threshold": 25
+  "nonstop_threshold": 25,
+  "compare_providers": false
 }
 ```
 
 You may instead pass explicit `dep_dates` / `ret_dates` arrays.
+
+`compare_providers` (bool, default `false`) opts into **true cross-provider
+comparison** (#43). When `false` (default) each cell makes **one** provider call
+via the ordered-fallback chain (first real price wins). When `true`, each cell
+queries **every configured provider** concurrently and keeps the **cheapest**
+`cheapest_cad`; the chosen cell's `source` is the winning provider and it carries
+an `alternatives` array. This multiplies provider calls per cell by the number of
+configured providers (quota/cost), so it is opt-in.
 
 **Response (abridged)**
 ```json
@@ -149,8 +158,20 @@ them, never fabricated):
   `[]` when the nonstop line is chosen, else the cheapest itinerary's `layovers`. The
   `best` summary and recommendation use `chosen_layovers`.
 
+**Cross-provider alternatives** (`compare_providers: true` only):
+
+- `alternatives` — a list of `{ "source", "cheapest_cad" }` for the **other** real
+  provider results for this cell (the ones that did **not** win), sorted ascending by
+  price. The chosen cell's `source`/`cheapest_cad` are the cheapest across providers;
+  `alternatives` shows what the runners-up quoted (e.g. `[{"source":"kiwi",
+  "cheapest_cad":850},{"source":"skyscanner","cheapest_cad":900}]`). It is `null` in
+  ordered-fallback mode (`compare_providers` absent/false) and `[]` when comparison
+  found only a single real price. The web UI renders it as a subtle "also: SOURCE
+  $PRICE" line under the chosen price.
+
 Cells with no API result have `"cheapest_cad": null, "source": "no-data"` (and
-`airlines`/`layovers`/`chosen_layovers` `null`).
+`airlines`/`layovers`/`chosen_layovers` `null`; `alternatives` `null`, or `[]` when
+`compare_providers` was set but every provider returned no fare).
 
 **Errors**
 
@@ -175,7 +196,7 @@ Use this endpoint to populate the flight grid live as each cell's fare arrives.
 | type | When | Key fields |
 |------|------|------------|
 | `meta` | First line | `origin`, `adults`, `child_ages`, `families`, `dep_dates`, `ret_dates`, `providers`, `results` (array of `{city,iata}`), `total_cells` |
-| `cell` | One per cell, as completed | `dest_index` (index into `meta.results`), plus all fields from a `/api/search` grid cell: `dep`, `ret`, `cheapest_cad`, `stops`, `duration_min`, `nonstop_cad`, `nonstop_duration_min`, `chosen`, `chosen_cad`, `chosen_duration_min`, `airlines`, `layovers`, `chosen_layovers`, `source`, `book` |
+| `cell` | One per cell, as completed | `dest_index` (index into `meta.results`), plus all fields from a `/api/search` grid cell: `dep`, `ret`, `cheapest_cad`, `stops`, `duration_min`, `nonstop_cad`, `nonstop_duration_min`, `chosen`, `chosen_cad`, `chosen_duration_min`, `airlines`, `layovers`, `chosen_layovers`, `alternatives` (compare mode), `source`, `book` |
 | `recommendation` | After all cells | `text` (same string as `/api/search`'s `recommendation` field) |
 | `done` | Last line | _(no extra fields)_ |
 

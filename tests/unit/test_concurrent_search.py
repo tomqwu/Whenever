@@ -19,7 +19,7 @@ import app as appmod
 # Helpers
 # ---------------------------------------------------------------------------
 
-def _fare_from_args(origin, dest, dep, ret, adults, children):
+def _fare_from_args(origin, dest, dep, ret, adults, children, compare=False):
     """Return a deterministic price derived from the call arguments so we can
     assert each grid position got the right value (proves no cell mismapping
     under parallel assembly)."""
@@ -52,7 +52,7 @@ def test_each_cell_called_exactly_once(monkeypatch):
     """get_fare must be invoked exactly once per (dest, dep, ret) triple."""
     call_log = []
 
-    def counting_fare(origin, dest, dep, ret, adults, children):
+    def counting_fare(origin, dest, dep, ret, adults, children, compare=False):
         call_log.append((dest, dep, ret))
         return _fare_from_args(origin, dest, dep, ret, adults, children)
 
@@ -162,7 +162,7 @@ def test_calls_run_in_multiple_threads(monkeypatch):
     thread_names = set()
     lock = threading.Lock()
 
-    def threaded_fare(origin, dest, dep, ret, adults, children):
+    def threaded_fare(origin, dest, dep, ret, adults, children, compare=False):
         with lock:
             thread_names.add(threading.current_thread().name)
         time.sleep(0.005)  # 5 ms — small enough for fast tests

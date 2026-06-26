@@ -359,7 +359,11 @@ def providers_configured():
 app = Flask(__name__)
 
 # ----------------------- fare cache -----------------------
-# Maps (origin, dest, dep, ret, adults, children) -> (fetched_epoch, result_dict).
+# Maps (origin, dest, dep, ret, adults, children, compare_tag) -> (fetched_epoch, result_dict).
+# `compare_tag` (#43, see _compare_cache_tag) is False for ordered fallback and
+# "cmp:<sorted providers>" for compare mode, so a cross-provider-compared fare never
+# serves an ordered-fallback request (or a compare request made against a different
+# configured-provider set), and vice versa.
 # We store WHEN the fare was fetched (not an absolute expiry) and judge freshness as
 # (now - fetched) < FARE_CACHE_TTL everywhere, so lowering FARE_CACHE_TTL between runs
 # takes effect immediately — old long-TTL entries are dropped on the next check/load.
@@ -441,8 +445,11 @@ def _load_fare_cache():
                 raw_key = rec.get("key")
                 fetched = rec.get("fetched")
                 result = rec.get("result")
-                # key must be a sequence of exactly 6 elements
-                if not isinstance(raw_key, (list, tuple)) or len(raw_key) != 6:
+                # key must be a sequence of exactly 7 elements
+                # (origin, dest, dep, ret, adults, children, compare); the trailing
+                # compare flag (#43) separates compared from fallback fares. Records
+                # from an older 6-element layout are skipped as invalid.
+                if not isinstance(raw_key, (list, tuple)) or len(raw_key) != 7:
                     skipped += 1
                     continue
                 # fetched must be a number and the fare still fresh under the CURRENT
@@ -1402,8 +1409,92 @@ def serpapi_fare(origin, dest, dep, ret, adults, children):
     }
 
 
-def _get_fare_uncached(origin, dest, dep, ret, adults, children):
-    """Try each configured provider in order; return first real priced result."""
+# Single source of truth for the provider chain: (name, fare_function) in the
+# ordered-fallback priority order. The name MUST match the label producible by
+# providers_configured() so compare mode can skip unconfigured providers.
+_PROVIDER_CHAIN = (
+    ("skyscanner", lambda *a: skyscanner_fare(*a)),
+    ("serpapi", lambda *a: serpapi_fare(*a)),
+    ("amadeus", lambda *a: amadeus_fare(*a)),
+    ("travelpayouts", lambda *a: travelpayouts_fare(*a)),
+    ("kiwi", lambda *a: kiwi_fare(*a)),
+)
+
+
+def _no_data_fare():
+    """The no-data sentinel returned when no provider yields a real price."""
+    return {"cheapest_cad": None, "stops": None, "nonstop_cad": None,
+            "source": "no-data", "duration_min": None,
+            "nonstop_duration_min": None, "airlines": None,
+            "nonstop_airlines": None, "layovers": None, "alternatives": None}
+
+
+def _get_fare_compare(origin, dest, dep, ret, adults, children):
+    """Query ALL configured providers concurrently; pick the cheapest result.
+
+    True cross-provider comparison (opt-in, #43). Only providers whose keys are
+    configured (see providers_configured()) are queried, so we never call a
+    provider with unset credentials. Providers run concurrently in a small pool
+    bounded by the provider count so comparison isn't N× slower in wall-clock;
+    each provider call already has its own bounded timeouts/retries.
+
+    Concurrency note: under run_search's outer grid pool (SEARCH_CONCURRENCY
+    workers) this inner pool nests, so peak in-flight provider requests are
+    bounded by SEARCH_CONCURRENCY × len(configured providers) (≤ 5). That is the
+    deliberate cost of compare mode (the #37 cell cap still bounds total cells);
+    each provider's own timeout/retry budget keeps any single request bounded.
+
+    Returns the dict for the lowest cheapest_cad, with an extra "alternatives"
+    list of {"source", "cheapest_cad"} for the OTHER real results (ascending).
+    All-no-data -> the no-data sentinel (alternatives []).
+    """
+    configured = set(providers_configured())
+    chain = [(name, fn) for name, fn in _PROVIDER_CHAIN if name in configured]
+
+    def _call(item):
+        name, fn = item
+        try:
+            res = fn(origin, dest, dep, ret, adults, children)
+            if res and res.get("cheapest_cad"):
+                return res
+        except Exception:
+            pass
+        return None
+
+    results = []
+    if chain:
+        workers = max(1, min(len(chain), SEARCH_CONCURRENCY))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+            for res in pool.map(_call, chain):
+                if res is not None:
+                    results.append(res)
+
+    if not results:
+        sentinel = _no_data_fare()
+        sentinel["alternatives"] = []
+        return sentinel
+
+    # Cheapest wins; ties resolve to the earlier provider (stable sort keeps the
+    # chain/priority order on equal prices).
+    results.sort(key=lambda r: r["cheapest_cad"])
+    chosen = dict(results[0])
+    chosen["alternatives"] = [
+        {"source": r.get("source"), "cheapest_cad": r.get("cheapest_cad")}
+        for r in results[1:]
+    ]
+    return chosen
+
+
+def _get_fare_uncached(origin, dest, dep, ret, adults, children, compare=False):
+    """Resolve a fare for one cell from the configured providers.
+
+    compare=False (default): ordered-fallback — try each provider in priority
+    order and return the FIRST real priced result (1 call/cell).
+    compare=True: query ALL configured providers and return the cheapest, with
+    an "alternatives" list (see _get_fare_compare). Uses (configured) calls/cell.
+    """
+    if compare:
+        return _get_fare_compare(origin, dest, dep, ret, adults, children)
     for provider in (skyscanner_fare, serpapi_fare, amadeus_fare, travelpayouts_fare, kiwi_fare):
         try:
             res = provider(origin, dest, dep, ret, adults, children)
@@ -1411,23 +1502,42 @@ def _get_fare_uncached(origin, dest, dep, ret, adults, children):
                 return res
         except Exception:
             continue
-    return {"cheapest_cad": None, "stops": None, "nonstop_cad": None,
-            "source": "no-data", "duration_min": None,
-            "nonstop_duration_min": None, "airlines": None,
-            "nonstop_airlines": None, "layovers": None}
+    return _no_data_fare()
 
 
-def get_fare(origin, dest, dep, ret, adults, children):
+def _compare_cache_tag(compare):
+    """The 7th fare-cache-key element: distinguishes fallback from compare AND,
+    for compare, pins the EXACT configured-provider set.
+
+    Ordered fallback -> ``False`` (a compared result never serves a fallback
+    request and vice-versa). Compare -> ``"cmp:" + sorted provider names``, so a
+    compared result computed against one provider set is NOT reused after a
+    provider key is added/removed (which would otherwise silently skip a
+    newly-configured provider until TTL expiry, defeating "compare ALL
+    providers"). Always a single hashable, JSON-round-trippable scalar, so the
+    persisted-cache key stays exactly 7 elements.
+    """
+    if not compare:
+        return False
+    return "cmp:" + ",".join(sorted(providers_configured()))
+
+
+def get_fare(origin, dest, dep, ret, adults, children, compare=False):
     """Collect REAL pricing from configured flight APIs. No AI here.
 
     Results with real prices are cached in _fare_cache for FARE_CACHE_TTL seconds
     and persisted to FARE_CACHE_PATH so they survive a restart (within TTL).
     No-data sentinels are never cached.  Set FARE_CACHE_TTL <= 0 to disable caching.
+
+    compare gates ordered-fallback (False) vs cross-provider comparison (True);
+    it is part of the cache key (via _compare_cache_tag, which also pins the
+    configured-provider set in compare mode) so a compared result never serves a
+    fallback request — nor a request made against a different provider set.
     """
     if FARE_CACHE_TTL <= 0:
-        return _get_fare_uncached(origin, dest, dep, ret, adults, children)
+        return _get_fare_uncached(origin, dest, dep, ret, adults, children, compare)
 
-    key = (origin, dest, dep, ret, adults, children)
+    key = (origin, dest, dep, ret, adults, children, _compare_cache_tag(compare))
     now = time.time()
     entry = _fare_cache.get(key)
     if entry is not None:
@@ -1435,7 +1545,7 @@ def get_fare(origin, dest, dep, ret, adults, children):
         if now - fetched < FARE_CACHE_TTL:  # fresh under the current TTL
             return cached_result  # in-memory fast path; hits never write to disk
 
-    result = _get_fare_uncached(origin, dest, dep, ret, adults, children)
+    result = _get_fare_uncached(origin, dest, dep, ret, adults, children, compare)
     if result.get("cheapest_cad"):
         with _fare_cache_lock:
             _fare_cache[key] = (now, result)  # store fetch time, not absolute expiry
@@ -1569,18 +1679,23 @@ def _build_cell(origin, code, dep, ret, adults, child_ages, fare, threshold):
         "chosen_airlines": chosen_airlines,
         "layovers": layovers,
         "chosen_layovers": chosen_layovers,
+        # alternatives (#43): other providers' real prices for this cell in compare
+        # mode, [{"source","cheapest_cad"}] ascending. None/absent in fallback mode.
+        "alternatives": fare.get("alternatives"),
         "book": fare.get("book") or kayak_link(origin, code, dep, ret, adults, child_ages),
     }
 
 
 def run_search(origin, dests, adults, child_ages, dep_dates, ret_dates,
-               threshold_pct=25, families=1):
+               threshold_pct=25, families=1, compare=False):
     """Core best-value search shared by the web route and the CLI.
 
     origin: IATA str; dests: list of {"city","iata"}; child_ages: list[int];
-    threshold_pct: nonstop premium % (e.g. 25). Returns dict with keys
-    origin, adults, child_ages, families, dep_dates, ret_dates, results,
-    recommendation, providers.
+    threshold_pct: nonstop premium % (e.g. 25). compare: when True, every cell
+    queries ALL configured providers and keeps the cheapest, attaching each
+    cell's `alternatives` (#43); default False = 1 provider call/cell (ordered
+    fallback). Returns dict with keys origin, adults, child_ages, families,
+    dep_dates, ret_dates, results, recommendation, providers.
 
     All dep×ret cells across all destinations are fetched concurrently via a
     bounded ThreadPoolExecutor (SEARCH_CONCURRENCY workers, default 8).
@@ -1604,7 +1719,7 @@ def run_search(origin, dests, adults, child_ages, dep_dates, ret_dates,
 
     def _fetch(task):
         di, dpi, ri, code, dep, ret = task
-        return (di, dpi, ri), get_fare(origin, code, dep, ret, adults, children)
+        return (di, dpi, ri), get_fare(origin, code, dep, ret, adults, children, compare)
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
         for key, fare in pool.map(_fetch, tasks):
@@ -1679,6 +1794,10 @@ def _search_args_from_body(b: dict):
         ret_dates = date_range(b.get("ret_start", ""), _span(b.get("ret_span", 4)))
     threshold_pct = float(b.get("nonstop_threshold", 25))
     families = int(b.get("families", 1))
+    # Opt-in cross-provider comparison (#43). Default False: ordered fallback,
+    # one provider call per cell. True multiplies calls by configured-provider
+    # count, so it must be explicitly requested.
+    compare = bool(b.get("compare_providers", False))
 
     if not origin or not dests or not dep_dates or not ret_dates:
         return None
@@ -1686,7 +1805,7 @@ def _search_args_from_body(b: dict):
     return dict(
         origin=origin, dests=dests, adults=adults, child_ages=child_ages,
         dep_dates=dep_dates, ret_dates=ret_dates,
-        threshold_pct=threshold_pct, families=families,
+        threshold_pct=threshold_pct, families=families, compare=compare,
     )
 
 
@@ -1759,6 +1878,7 @@ def api_search_stream():
     ret_dates = args["ret_dates"]
     threshold_pct = args["threshold_pct"]
     families = args["families"]
+    compare = args["compare"]
 
     @stream_with_context
     def generate():
@@ -1800,12 +1920,9 @@ def api_search_stream():
         def _fetch(task):
             di, code, dep, ret = task
             try:
-                fare = get_fare(origin, code, dep, ret, adults, children)
+                fare = get_fare(origin, code, dep, ret, adults, children, compare)
             except Exception:
-                fare = {"cheapest_cad": None, "stops": None, "nonstop_cad": None,
-                        "source": "no-data", "duration_min": None,
-                        "nonstop_duration_min": None, "airlines": None,
-                        "nonstop_airlines": None, "layovers": None}
+                fare = _no_data_fare()
             cell = _build_cell(origin, code, dep, ret, adults, child_ages, fare, threshold)
             return di, cell
 
@@ -1840,6 +1957,7 @@ def api_search_stream():
                     "airlines": None, "nonstop_airlines": None,
                     "chosen_airlines": None,
                     "layovers": None, "chosen_layovers": None,
+                    "alternatives": None,
                     "book": kayak_link(origin, code, dep, ret, adults, child_ages),
                 }) for ret in ret_dates]
                 for dep in dep_dates
@@ -1982,8 +2100,11 @@ def api_watch_add():
     # REAL-DATA-ONLY guardrail: never trust a client-supplied last_price. A
     # direct/tampered POST could inject a fabricated baseline and trigger bogus
     # drop alerts. Re-derive the baseline server-side from a real fare lookup
-    # (get_fare). Because the user just searched this trip, the cell is usually
-    # a cache HIT, so this is cheap and returns the same real price. The client's
+    # (get_fare). The watch baseline always uses ordered fallback (compare=False)
+    # — a cheap single provider call the scheduler can re-price the same way. For
+    # a default (non-compare) search the cell is usually a cache HIT so this is
+    # free; if the user searched in compare mode the fallback key differs, so this
+    # does one real ordered-fallback fetch (still cheap, one call). The client's
     # last_price/last_source are ignored entirely.
     fare = get_fare(origin, dest_iata, dep_date, ret_date, adults, len(child_ages))
     cheapest = fare.get("cheapest_cad")

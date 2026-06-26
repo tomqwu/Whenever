@@ -169,7 +169,7 @@ def nofare_live_server(monkeypatch):
     no-fare city card to '— / no fares / —' (not the '…' placeholder)."""
     _patch_common(monkeypatch)
 
-    def partial_fare(origin, dest, dep, ret, adults, children):
+    def partial_fare(origin, dest, dep, ret, adults, children, compare=False):
         if dest == "PEK":
             return {"cheapest_cad": None, "stops": None, "nonstop_cad": None,
                     "source": "no-data"}

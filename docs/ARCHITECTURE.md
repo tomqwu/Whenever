@@ -45,7 +45,7 @@ configured, cells return `source: "no-data"` rather than a fabricated number.
 3. **`POST /api/resolve`** `{city}` → `resolve_airport()` maps a city name to an IATA code.
 4. **`POST /api/search`** — the main endpoint:
    - builds the departure × return date grid,
-   - calls `get_fare(origin, dest, dep, ret, adults, children)` per cell **concurrently** via a `ThreadPoolExecutor` (bounded by `SEARCH_CONCURRENCY`, default 8),
+   - calls `get_fare(origin, dest, dep, ret, adults, children, compare)` per cell **concurrently** via a `ThreadPoolExecutor` (bounded by `SEARCH_CONCURRENCY`, default 8); `compare` (from `compare_providers`, default off) selects ordered fallback vs. cross-provider comparison,
    - applies the **nonstop-preference rule** (pick nonstop if within the premium threshold),
    - finds the best cell per city,
    - calls `build_recommendation()` → Ollama analyzes the grid and names the best value.
@@ -56,13 +56,43 @@ configured, cells return `source: "no-data"` rather than a fabricated number.
 `get_fare()` tries each configured provider in order and returns the first real result:
 
 ```python
-def get_fare(origin, dest, dep, ret, adults, children):
+def get_fare(origin, dest, dep, ret, adults, children, compare=False):
     for provider in (skyscanner_fare, serpapi_fare, amadeus_fare, travelpayouts_fare, kiwi_fare):
         res = provider(...)
         if res and res.get("cheapest_cad"):
             return res
     return {"cheapest_cad": None, "source": "no-data"}
 ```
+
+### Opt-in cross-provider comparison (#43)
+
+By default (`compare=False`) the adapter is an **ordered fallback**: the first
+provider with a real price wins, **one** provider call per cell. This keeps the
+common case cheap on provider quota.
+
+When `compare=True` (request body `compare_providers: true`), `get_fare()`
+delegates to `_get_fare_compare()`, which queries **every configured provider**
+(those listed by `providers_configured()` — unconfigured providers are skipped,
+never called) **concurrently** in a small pool bounded by the provider count, then
+keeps the result with the lowest `cheapest_cad`. The chosen dict's `source` is the
+winning provider; an `alternatives` list — `[{ "source", "cheapest_cad" }]` for the
+other real results, ascending — is attached so the UI can show "also: SOURCE
+$PRICE". Ties resolve to the earlier provider in the chain. All-no-data → the
+no-data sentinel with `alternatives: []`.
+
+**Quota implication:** comparison makes *(configured providers)* calls per cell
+instead of one, so it multiplies provider cost/quota. It is therefore **off by
+default** and surfaced as an explicit "Compare all providers (slower, uses more
+quota)" toggle in the web UI. The per-search cell cap (#37) is unchanged.
+
+`compare` is part of the fare **cache key** `(origin, dest, dep, ret, adults,
+children, compare_tag)`, so a compared result never serves an ordered-fallback
+request (and vice versa); each flavour caches independently. `compare_tag`
+(`_compare_cache_tag`) is `False` for fallback and `"cmp:<sorted configured
+providers>"` for compare mode — pinning the provider set so that adding/removing a
+provider key re-runs comparison instead of serving a stale result computed against
+the old set (which would otherwise silently skip a newly-configured provider until
+TTL expiry).
 
 Each provider returns a normalized dict:
 
@@ -297,4 +327,7 @@ A lightweight in-memory per-IP sliding-window rate limiter (no new dependencies)
   `threading.Lock`; in-memory cache hits never touch disk. On startup `_load_fare_cache()`
   reads the file, drops entries no longer fresh under the **current** `FARE_CACHE_TTL`, and
   rebuilds the tuple-keyed cache; a missing/corrupt/malformed file is logged and starts
-  empty (never crashes). Set `FARE_CACHE_PATH=""` for memory-only (no disk I/O).
+  empty (never crashes). Set `FARE_CACHE_PATH=""` for memory-only (no disk I/O). The cache
+  key is a 7-tuple `(origin, dest, dep, ret, adults, children, compare_tag)` (#43); records
+  from a pre-#43 6-element layout are dropped on load as invalid-length — a benign one-time
+  cache invalidation (the cache is TTL-bounded ephemeral data, so no migration is needed).
