@@ -1476,8 +1476,6 @@ def demo_fare(origin, dest, dep, ret, adults, children):
     # Per-person base 600..1399, scaled to the party — clearly sample magnitudes.
     base_pp = 600 + (seed % 800)
     cheapest = base_pp * pax
-    # Nonstop is a deterministic premium (5..24%) over the cheapest sample.
-    nonstop = round(cheapest * (1 + (5 + (seed >> 4) % 20) / 100.0))
     stops = (seed >> 8) % 3  # 0..2 connections on the cheapest sample
     # Durations: cheapest 8h..23h59m; nonstop a bit shorter. Minutes, deterministic.
     duration = 480 + (seed >> 12) % 960
@@ -1487,6 +1485,16 @@ def demo_fare(origin, dest, dep, ret, adults, children):
     layover_iata = layover_codes[(seed >> 20) % len(layover_codes)]
     layovers = ([{"iata": layover_iata, "duration_min": 60 + (seed >> 24) % 180}]
                 if stops else [])
+    if stops == 0:
+        # Cheapest IS already nonstop: nonstop fields must agree exactly so
+        # _chosen_price_under_threshold never promotes a fabricated higher price.
+        nonstop = cheapest
+        nonstop_duration = duration
+        nonstop_airlines = ["DemoAir"]
+    else:
+        # Connecting cheapest: a pricier nonstop alternative is realistic.
+        nonstop = round(cheapest * (1 + (5 + (seed >> 4) % 20) / 100.0))
+        nonstop_airlines = ["DemoAir"]
     return {
         "cheapest_cad": cheapest,
         "stops": stops,
@@ -1496,7 +1504,7 @@ def demo_fare(origin, dest, dep, ret, adults, children):
         "duration_min": duration,
         "nonstop_duration_min": nonstop_duration,
         "airlines": ["DemoAir"],
-        "nonstop_airlines": ["DemoAir"],
+        "nonstop_airlines": nonstop_airlines,
         "layovers": layovers,
     }
 

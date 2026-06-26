@@ -98,6 +98,71 @@ def test_demo_fare_party_size_changes_price():
     assert family["cheapest_cad"] != solo["cheapest_cad"]
 
 
+def test_demo_fare_nonstop_equals_cheapest_when_stops_zero():
+    """When cheapest is already nonstop (stops==0), nonstop_cad must equal cheapest_cad.
+
+    Fixes P2 (#44): fabricating a nonstop premium over a nonstop cheapest made
+    _chosen_price_under_threshold promote the higher fake nonstop fare.
+    YYZ->PVG is confirmed stops==0 by _demo_seed hash.
+    """
+    f = appmod.demo_fare("YYZ", "PVG", "2026-07-01", "2026-07-15", 2, 1)
+    assert f["stops"] == 0, "test pre-condition: route must yield stops==0"
+    assert f["nonstop_cad"] == f["cheapest_cad"], (
+        "nonstop_cad must equal cheapest_cad when stops==0"
+    )
+    assert f["nonstop_duration_min"] == f["duration_min"], (
+        "nonstop_duration_min must equal duration_min when stops==0"
+    )
+
+
+def test_demo_fare_nonstop_premium_when_stops_positive():
+    """When cheapest has stops>0, nonstop_cad must be a premium over cheapest_cad.
+
+    YYZ->PEK is confirmed stops==2 by _demo_seed hash.
+    """
+    f = appmod.demo_fare("YYZ", "PEK", "2026-07-01", "2026-07-15", 2, 1)
+    assert f["stops"] > 0, "test pre-condition: route must yield stops>0"
+    assert f["nonstop_cad"] > f["cheapest_cad"], (
+        "nonstop_cad must exceed cheapest_cad when stops>0"
+    )
+
+
+def test_demo_fare_stops_zero_invariant_across_routes():
+    """Parametric: for every demo cell, stops==0 ⇒ nonstop_cad==cheapest_cad."""
+    routes = [
+        ("YYZ", "PVG"), ("YYZ", "CAN"), ("YYZ", "NRT"), ("YYZ", "SIN"),
+        ("YYZ", "PEK"), ("YYZ", "HKG"), ("YYZ", "TPE"), ("YYZ", "ICN"),
+    ]
+    for origin, dest in routes:
+        f = appmod.demo_fare(origin, dest, "2026-07-01", "2026-07-15", 2, 1)
+        if f["stops"] == 0:
+            assert f["nonstop_cad"] == f["cheapest_cad"], (
+                f"{origin}->{dest}: nonstop_cad should equal cheapest_cad when stops==0"
+            )
+            assert f["nonstop_duration_min"] == f["duration_min"], (
+                f"{origin}->{dest}: nonstop_duration_min should equal duration_min when stops==0"
+            )
+        else:
+            assert f["nonstop_cad"] > f["cheapest_cad"], (
+                f"{origin}->{dest}: nonstop_cad should exceed cheapest_cad when stops>0"
+            )
+
+
+def test_chosen_price_under_threshold_stops_zero_selects_cheapest():
+    """_chosen_price_under_threshold on a stops==0 demo cell must choose cheapest_cad.
+
+    When the cheapest IS already nonstop and nonstop_cad==cheapest_cad, the chosen
+    label is 'nonstop' (it equals cheapest), but chosen_cad must equal cheapest_cad —
+    not a fabricated higher price. This verifies the end-to-end fix.
+    """
+    f = appmod.demo_fare("YYZ", "PVG", "2026-07-01", "2026-07-15", 2, 1)
+    assert f["stops"] == 0, "test pre-condition"
+    _label, chosen_cad = appmod._chosen_price_under_threshold(f, 0.25)
+    assert chosen_cad == f["cheapest_cad"], (
+        "chosen_cad must equal cheapest_cad (not a higher fabricated nonstop)"
+    )
+
+
 # --------------------------- get_fare wiring ---------------------------
 
 def test_get_fare_returns_demo_when_demo_on(monkeypatch, no_real_providers):
