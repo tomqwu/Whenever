@@ -1646,3 +1646,248 @@ def test_kiwi_helpers_defensive_non_dict():
     assert appmod._kiwi_gap_minutes(None, 5) is None
     assert appmod._kiwi_gap_minutes(10, 5) is None  # negative
     assert appmod._kiwi_gap_minutes(0, 120) == 2
+
+
+# ----------------------------- provider retry/backoff (#41) -----------------------------
+def _seq_get(responses, calls, exc_for_none=None):
+    """Build a fake requests.get that yields `responses` in order.
+
+    Each entry is either a FakeResp-like object (returned) or an Exception
+    instance (raised). `calls` is a dict whose "n" is incremented per call.
+    """
+    def fake_get(*a, **k):
+        i = calls["n"]
+        calls["n"] += 1
+        item = responses[i]
+        if isinstance(item, Exception):
+            raise item
+        return item
+    return fake_get
+
+
+def test_retry_get_503_then_200(monkeypatch, fake_resp):
+    """A 503 followed by a 200 is retried and returns the 200 result (travelpayouts)."""
+    monkeypatch.setattr(appmod, "TRAVELPAYOUTS_TOKEN", "tok")
+    monkeypatch.setattr(appmod.time, "sleep", lambda *_a, **_k: None)
+    calls = {"n": 0}
+    offers = {"data": [{"price": 100, "transfers": 0, "return_transfers": 0,
+                        "airline": "AC", "link": "/x"}]}
+    monkeypatch.setattr(appmod.requests, "get", _seq_get(
+        [fake_resp({}, status=503), fake_resp(offers, status=200)], calls))
+    res = appmod.travelpayouts_fare("YYZ", "PVG", "2026-12-12", "2027-01-04", 1, 0)
+    assert res is not None and res["source"] == "travelpayouts"
+    assert calls["n"] == 2  # one 503 retry, then success
+
+
+def test_retry_get_timeout_then_200(monkeypatch, fake_resp):
+    """A request Timeout followed by a 200 is retried and succeeds (kiwi)."""
+    monkeypatch.setattr(appmod, "KIWI_API_KEY", "k")
+    monkeypatch.setattr(appmod.time, "sleep", lambda *_a, **_k: None)
+    calls = {"n": 0}
+    itin = {"price": 100, "route": [{"return": 0}, {"return": 1}],
+            "deep_link": "http://b", "duration": {"total": 3600}}
+    monkeypatch.setattr(appmod.requests, "get", _seq_get(
+        [appmod.requests.exceptions.Timeout("slow"),
+         fake_resp({"data": [itin]}, status=200)], calls))
+    res = appmod.kiwi_fare("YYZ", "PVG", "2026-12-12", "2027-01-04", 1, 0)
+    assert res is not None and res["source"] == "kiwi"
+    assert calls["n"] == 2
+
+
+def test_retry_get_429_honours_retry_after_capped(monkeypatch, fake_resp):
+    """A 429 with Retry-After sleeps the capped header value, then retries."""
+    monkeypatch.setattr(appmod, "TRAVELPAYOUTS_TOKEN", "tok")
+    sleeps = []
+    monkeypatch.setattr(appmod.time, "sleep", lambda s, *a, **k: sleeps.append(s))
+    monkeypatch.setattr(appmod, "PROVIDER_BACKOFF_MAX", 4.0)
+    calls = {"n": 0}
+    offers = {"data": [{"price": 100, "transfers": 0, "return_transfers": 0}]}
+    responses = [
+        fake_resp({}, status=429, headers={"Retry-After": "1"}),
+        fake_resp(offers, status=200),
+    ]
+    monkeypatch.setattr(appmod.requests, "get", _seq_get(responses, calls))
+    res = appmod.travelpayouts_fare("YYZ", "PVG", "2026-12-12", "2027-01-04", 1, 0)
+    assert res is not None
+    assert sleeps == [1.0]  # Retry-After honoured (<= cap), not exp-backoff
+    assert calls["n"] == 2
+
+
+def test_retry_get_429_retry_after_clamped_to_cap(monkeypatch, fake_resp):
+    """A huge Retry-After is clamped to PROVIDER_BACKOFF_MAX (bounded)."""
+    monkeypatch.setattr(appmod, "TRAVELPAYOUTS_TOKEN", "tok")
+    sleeps = []
+    monkeypatch.setattr(appmod.time, "sleep", lambda s, *a, **k: sleeps.append(s))
+    monkeypatch.setattr(appmod, "PROVIDER_BACKOFF_MAX", 4.0)
+    calls = {"n": 0}
+    offers = {"data": [{"price": 100, "transfers": 0, "return_transfers": 0}]}
+    responses = [
+        fake_resp({}, status=429, headers={"Retry-After": "999"}),
+        fake_resp(offers, status=200),
+    ]
+    monkeypatch.setattr(appmod.requests, "get", _seq_get(responses, calls))
+    appmod.travelpayouts_fare("YYZ", "PVG", "2026-12-12", "2027-01-04", 1, 0)
+    assert sleeps == [4.0]  # clamped to cap
+
+
+def test_retry_get_429_bad_retry_after_falls_back_to_backoff(monkeypatch, fake_resp):
+    """A non-numeric / negative Retry-After is ignored; exp-backoff is used instead."""
+    monkeypatch.setattr(appmod, "TRAVELPAYOUTS_TOKEN", "tok")
+    sleeps = []
+    monkeypatch.setattr(appmod.time, "sleep", lambda s, *a, **k: sleeps.append(s))
+    monkeypatch.setattr(appmod, "PROVIDER_BACKOFF", 0.5)
+    monkeypatch.setattr(appmod, "PROVIDER_BACKOFF_MAX", 4.0)
+    calls = {"n": 0}
+    offers = {"data": [{"price": 100, "transfers": 0, "return_transfers": 0}]}
+    # First 429: non-numeric header -> backoff 0.5; second 429: negative -> backoff 1.0.
+    responses = [
+        fake_resp({}, status=429, headers={"Retry-After": "soon"}),
+        fake_resp({}, status=429, headers={"Retry-After": "-5"}),
+        fake_resp(offers, status=200),
+    ]
+    monkeypatch.setattr(appmod, "PROVIDER_RETRIES", 2)
+    monkeypatch.setattr(appmod.requests, "get", _seq_get(responses, calls))
+    appmod.travelpayouts_fare("YYZ", "PVG", "2026-12-12", "2027-01-04", 1, 0)
+    assert sleeps == [0.5, 1.0]  # exponential backoff, capped
+
+
+def test_retry_get_persistent_503_returns_none_bounded(monkeypatch, fake_resp):
+    """Every attempt is 503 -> provider returns None after exactly retries+1 calls."""
+    monkeypatch.setattr(appmod, "TRAVELPAYOUTS_TOKEN", "tok")
+    sleeps = []
+    monkeypatch.setattr(appmod.time, "sleep", lambda s, *a, **k: sleeps.append(s))
+    monkeypatch.setattr(appmod, "PROVIDER_RETRIES", 2)
+    monkeypatch.setattr(appmod, "PROVIDER_BACKOFF", 0.5)
+    monkeypatch.setattr(appmod, "PROVIDER_BACKOFF_MAX", 4.0)
+    calls = {"n": 0}
+    monkeypatch.setattr(appmod.requests, "get",
+                        lambda *a, **k: (calls.__setitem__("n", calls["n"] + 1)
+                                         or fake_resp({}, status=503)))
+    res = appmod.travelpayouts_fare("YYZ", "PVG", "2026-12-12", "2027-01-04", 1, 0)
+    assert res is None
+    assert calls["n"] == 3  # retries(2) + 1, bounded — no infinite loop
+    assert sleeps == [0.5, 1.0]  # backed-off, capped, then give up (no sleep after last)
+
+
+def test_retry_get_persistent_timeout_returns_none_bounded(monkeypatch):
+    """Every attempt times out -> None after retries+1 attempts, no extra sleep."""
+    monkeypatch.setattr(appmod, "KIWI_API_KEY", "k")
+    sleeps = []
+    monkeypatch.setattr(appmod.time, "sleep", lambda s, *a, **k: sleeps.append(s))
+    monkeypatch.setattr(appmod, "PROVIDER_RETRIES", 2)
+    monkeypatch.setattr(appmod, "PROVIDER_BACKOFF", 0.5)
+    calls = {"n": 0}
+
+    def always_timeout(*a, **k):
+        calls["n"] += 1
+        raise appmod.requests.exceptions.ConnectionError("down")
+
+    monkeypatch.setattr(appmod.requests, "get", always_timeout)
+    res = appmod.kiwi_fare("YYZ", "PVG", "2026-12-12", "2027-01-04", 1, 0)
+    assert res is None
+    assert calls["n"] == 3  # bounded
+    assert sleeps == [0.5, 1.0]
+
+
+def test_retry_single_success_is_one_request(monkeypatch, fake_resp):
+    """A first-try 200 makes exactly ONE request (retry wrapper adds no overhead)."""
+    monkeypatch.setattr(appmod, "TRAVELPAYOUTS_TOKEN", "tok")
+    monkeypatch.setattr(appmod.time, "sleep", lambda *_a, **_k: None)
+    calls = {"n": 0}
+    offers = {"data": [{"price": 100, "transfers": 0, "return_transfers": 0}]}
+    monkeypatch.setattr(appmod.requests, "get",
+                        lambda *a, **k: (calls.__setitem__("n", calls["n"] + 1)
+                                         or fake_resp(offers, status=200)))
+    appmod.travelpayouts_fare("YYZ", "PVG", "2026-12-12", "2027-01-04", 1, 0)
+    assert calls["n"] == 1
+
+
+def test_retry_post_amadeus_token_retries(monkeypatch, fake_resp):
+    """The amadeus token POST retries a transient 502 then succeeds."""
+    monkeypatch.setattr(appmod, "AMADEUS_ID", "id")
+    monkeypatch.setattr(appmod, "AMADEUS_SECRET", "secret")
+    monkeypatch.setattr(appmod.time, "sleep", lambda *_a, **_k: None)
+    calls = {"n": 0}
+    responses = [fake_resp({}, status=502),
+                 fake_resp({"access_token": "TOK", "expires_in": 1799}, status=200)]
+    monkeypatch.setattr(appmod.requests, "post", _seq_get(responses, calls))
+    assert appmod.amadeus_token() == "TOK"
+    assert calls["n"] == 2
+
+
+def test_retry_post_amadeus_token_all_timeout_returns_none(monkeypatch):
+    """All token POSTs time out -> amadeus_token returns None (None response path)."""
+    monkeypatch.setattr(appmod, "AMADEUS_ID", "id")
+    monkeypatch.setattr(appmod, "AMADEUS_SECRET", "secret")
+    monkeypatch.setattr(appmod.time, "sleep", lambda *_a, **_k: None)
+    monkeypatch.setattr(appmod, "PROVIDER_RETRIES", 1)
+    monkeypatch.setattr(appmod.requests, "post",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            appmod.requests.exceptions.Timeout("t")))
+    assert appmod.amadeus_token() is None
+
+
+def test_request_with_retry_no_headers_attr(monkeypatch):
+    """_retry_after_seconds tolerates a response object with no .headers attr."""
+    class NoHeaders:
+        status_code = 200
+    assert appmod._retry_after_seconds(NoHeaders(), 4.0) is None
+
+
+def test_request_with_retry_headers_without_get(monkeypatch):
+    """_retry_after_seconds tolerates a .headers that lacks .get (AttributeError)."""
+    class Weird:
+        headers = object()  # no .get
+        status_code = 429
+    assert appmod._retry_after_seconds(Weird(), 4.0) is None
+
+
+def test_request_with_retry_missing_retry_after(monkeypatch, fake_resp):
+    """A 429 with NO Retry-After header falls back to capped exponential backoff."""
+    sleeps = []
+    monkeypatch.setattr(appmod.time, "sleep", lambda s, *a, **k: sleeps.append(s))
+    calls = {"n": 0}
+    responses = [fake_resp({}, status=429), fake_resp({"ok": 1}, status=200)]
+    monkeypatch.setattr(appmod.requests, "get", _seq_get(responses, calls))
+    r = appmod._request_with_retry("GET", "http://x", retries=2, backoff=0.5,
+                                   backoff_max=4.0)
+    assert r.status_code == 200
+    assert sleeps == [0.5]  # no Retry-After -> exp backoff
+
+
+def test_skyscanner_poll_not_double_retried(monkeypatch, fake_resp):
+    """The skyscanner poll path keeps its own bounded 502 retry and is NOT wrapped
+    by _request_with_retry. With attempts=2 and every poll a 502, exactly 2 poll
+    HTTP calls happen (retries_502=0 on polls), not multiplied by PROVIDER_RETRIES."""
+    monkeypatch.setattr(appmod, "RAPIDAPI_KEY", "rk")
+    monkeypatch.setattr(appmod, "SKYSCANNER_POLL_ATTEMPTS", 2)
+    monkeypatch.setattr(appmod, "PROVIDER_RETRIES", 5)  # must NOT influence polls
+    monkeypatch.setattr(appmod.time, "sleep", lambda *_a, **_k: None)
+    state = {"i": 0}
+    incomplete = {"data": {"context": {"status": "incomplete", "sessionId": "S"}}}
+
+    def fake_get(url, *a, **k):
+        if url.endswith("search-roundtrip"):
+            return fake_resp(incomplete, status=200)
+        state["i"] += 1
+        return fake_resp({}, status=502)  # poll always 502
+
+    monkeypatch.setattr(appmod.requests, "get", fake_get)
+    res = appmod.skyscanner_fare("YYZ", "PVG", "2026-12-12", "2027-01-04", 1, 0)
+    assert res is None
+    assert state["i"] == 2  # exactly SKYSCANNER_POLL_ATTEMPTS, not x PROVIDER_RETRIES
+
+
+def test_request_with_retry_post_json_kwarg(monkeypatch, fake_resp):
+    """A POST with a json= body forwards it to requests.post (json kwarg path)."""
+    captured = {}
+
+    def fake_post(url, **k):
+        captured.update(k)
+        return fake_resp({"ok": 1}, status=200)
+
+    monkeypatch.setattr(appmod.requests, "post", fake_post)
+    r = appmod._request_with_retry("POST", "http://x", json={"a": 1}, data={"b": 2},
+                                   timeout=5)
+    assert r.status_code == 200
+    assert captured["json"] == {"a": 1} and captured["data"] == {"b": 2}

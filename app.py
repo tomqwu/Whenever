@@ -200,6 +200,21 @@ RAPIDAPI_HOST = os.environ.get("RAPIDAPI_HOST", "flights-sky.p.rapidapi.com")
 SKYSCANNER_POLL_ATTEMPTS = int(os.environ.get("SKYSCANNER_POLL_ATTEMPTS", "12"))
 SKYSCANNER_POLL_INTERVAL = float(os.environ.get("SKYSCANNER_POLL_INTERVAL", "1.5"))
 SKYSCANNER_POLL_TIMEOUT = int(os.environ.get("SKYSCANNER_POLL_TIMEOUT", "8"))
+# ----------------------------- provider retry/backoff (#41) -----------------------------
+# Bounded exponential-backoff retry for TRANSIENT fare-provider failures (request
+# timeouts, connection errors, HTTP 5xx, and provider-side 429 rate limits). Applied
+# to the simple one-shot provider request calls (amadeus token + search, travelpayouts,
+# kiwi, serpapi) via _request_with_retry. Kept strictly bounded so a blip degrades
+# gracefully / recovers without ever hanging a search worker for minutes:
+#   worst-case extra wait ~= sum(min(BACKOFF*2**attempt, BACKOFF_MAX) for retries)
+#   default 2 retries, 0.5s backoff, 4s cap -> ~0.5 + 1.0 = ~1.5s of sleeping.
+# A 429 carrying Retry-After honours it but capped at BACKOFF_MAX so a hostile/large
+# header can't stall a cell. The skyscanner poll path is NOT wrapped here — it keeps
+# its own purpose-built bounded 502 retry (_skyscanner_get) and poll budget (#64) so
+# the two retry mechanisms never stack.
+PROVIDER_RETRIES = int(os.environ.get("PROVIDER_RETRIES", "2"))
+PROVIDER_BACKOFF = float(os.environ.get("PROVIDER_BACKOFF", "0.5"))
+PROVIDER_BACKOFF_MAX = float(os.environ.get("PROVIDER_BACKOFF_MAX", "4"))
 CURRENCY = os.environ.get("CURRENCY", "cad").lower()
 FARE_CACHE_TTL = int(os.environ.get("FARE_CACHE_TTL", "3600"))
 SEARCH_CONCURRENCY = int(os.environ.get("SEARCH_CONCURRENCY", "8"))
@@ -544,6 +559,95 @@ def _iso_gap_minutes(start, end):
     return int(round(secs / 60.0))
 
 
+# ----------------------------- provider retry/backoff helper (#41) -----------------------------
+def _retry_after_seconds(resp, cap):
+    """Parse a Retry-After header (delta-seconds form) into a capped sleep.
+
+    Returns the header value clamped to [0, cap] if it's a non-negative integer
+    number of seconds, else None (caller falls back to exponential backoff). The
+    HTTP-date form is intentionally not honoured — we only ever sleep a small,
+    bounded amount, so a date would just fall back to the capped backoff anyway.
+    """
+    val = None
+    headers = getattr(resp, "headers", None)
+    if headers:
+        try:
+            val = headers.get("Retry-After")
+        except AttributeError:
+            val = None
+    if val is None:
+        return None
+    try:
+        secs = float(val)
+    except (TypeError, ValueError):
+        return None
+    if secs < 0:
+        return None
+    return min(secs, cap)
+
+
+def _request_with_retry(method, url, *, headers=None, params=None, data=None,
+                        json=None, timeout=30, retries=None, backoff=None,
+                        backoff_max=None, retry_statuses=(429, 500, 502, 503, 504)):
+    """Issue an HTTP request with BOUNDED exponential-backoff retry on transients.
+
+    Retries on ``requests`` Timeout / ConnectionError and on any response whose
+    status is in ``retry_statuses`` (429 + 5xx by default). Up to ``retries + 1``
+    attempts total. Between attempts it sleeps ``backoff * 2**attempt`` seconds,
+    each sleep capped at ``backoff_max`` (so total wait stays small); a 429 with a
+    ``Retry-After`` delta-seconds header sleeps that value instead, also capped.
+
+    Returns the final ``requests.Response`` — even a 5xx/429 on the last attempt —
+    so callers keep their existing ``status_code != 200 -> None`` contract. Returns
+    ``None`` if every attempt raised a network error (mirrors providers' bare except).
+    Never raises a network error past the caller; never loops unbounded.
+    """
+    retries = PROVIDER_RETRIES if retries is None else retries
+    backoff = PROVIDER_BACKOFF if backoff is None else backoff
+    backoff_max = PROVIDER_BACKOFF_MAX if backoff_max is None else backoff_max
+    # Dispatch via requests.get / requests.post (not requests.request) so the
+    # method-specific call sites stay patchable the way the rest of the codebase
+    # and its tests already monkeypatch them.
+    kwargs = {"timeout": timeout}
+    if headers is not None:
+        kwargs["headers"] = headers
+    if params is not None:
+        kwargs["params"] = params
+    if method.upper() == "POST":
+        sender = requests.post
+        if data is not None:
+            kwargs["data"] = data
+        if json is not None:
+            kwargs["json"] = json
+    else:
+        sender = requests.get
+    # range(retries+1) guarantees a bounded number of attempts; the last attempt
+    # (attempt == retries) always returns (success/None), so the loop never falls
+    # through — there is no unbounded path and no implicit None at the end.
+    for attempt in range(retries + 1):
+        try:
+            resp = sender(url, **kwargs)
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError):
+            # Transient network error. Retry while attempts remain, else give up
+            # with None so the provider's caller treats it as no-data.
+            if attempt < retries:
+                time.sleep(min(backoff * (2 ** attempt), backoff_max))
+                continue
+            return None
+        # Success / non-retryable status, or the final attempt -> return for the
+        # caller to handle (e.g. 200 parsed, 404 -> None, last-attempt 5xx -> None).
+        if resp.status_code not in retry_statuses or attempt >= retries:
+            return resp
+        # Retryable status with attempts left: prefer a (capped) Retry-After on a
+        # 429, else exponential backoff (capped).
+        delay = None
+        if resp.status_code == 429:
+            delay = _retry_after_seconds(resp, backoff_max)
+        if delay is None:
+            delay = min(backoff * (2 ** attempt), backoff_max)
+        time.sleep(delay)
+
+
 _amadeus_token = {"value": None, "exp": 0}
 
 def amadeus_token():
@@ -551,12 +655,15 @@ def amadeus_token():
         return None
     if _amadeus_token["value"] and time.time() < _amadeus_token["exp"] - 30:
         return _amadeus_token["value"]
-    r = requests.post(
+    r = _request_with_retry(
+        "POST",
         "https://test.api.amadeus.com/v1/security/oauth2/token",
         data={"grant_type": "client_credentials",
               "client_id": AMADEUS_ID, "client_secret": AMADEUS_SECRET},
         timeout=20,
     )
+    if r is None:
+        return None
     r.raise_for_status()
     j = r.json()
     _amadeus_token["value"] = j["access_token"]
@@ -573,10 +680,10 @@ def amadeus_fare(origin, dest, dep, ret, adults, children):
         "adults": adults, "children": children,
         "currencyCode": "CAD", "max": 8,
     }
-    r = requests.get("https://test.api.amadeus.com/v2/shopping/flight-offers",
-                     headers={"Authorization": f"Bearer {tok}"},
-                     params=params, timeout=30)
-    if r.status_code != 200:
+    r = _request_with_retry("GET", "https://test.api.amadeus.com/v2/shopping/flight-offers",
+                            headers={"Authorization": f"Bearer {tok}"},
+                            params=params, timeout=30)
+    if r is None or r.status_code != 200:
         return None
     offers = r.json().get("data", [])
     if not offers:
@@ -622,9 +729,9 @@ def travelpayouts_fare(origin, dest, dep, ret, adults, children):
         "currency": CURRENCY, "sorting": "price", "direct": "false",
         "limit": 30, "one_way": "false", "token": TRAVELPAYOUTS_TOKEN,
     }
-    r = requests.get("https://api.travelpayouts.com/aviasales/v3/prices_for_dates",
-                     params=params, timeout=30)
-    if r.status_code != 200:
+    r = _request_with_retry("GET", "https://api.travelpayouts.com/aviasales/v3/prices_for_dates",
+                            params=params, timeout=30)
+    if r is None or r.status_code != 200:
         return None
     data = r.json().get("data", [])
     if not data:
@@ -749,13 +856,14 @@ def kiwi_fare(origin, dest, dep, ret, adults, children):
         "adults": adults, "children": children,
         "curr": "CAD", "limit": 20,
     }
-    r = requests.get(
+    r = _request_with_retry(
+        "GET",
         "https://tequila-api.kiwi.com/v2/search",
         headers={"apikey": KIWI_API_KEY},
         params=params,
         timeout=30,
     )
-    if r.status_code != 200:
+    if r is None or r.status_code != 200:
         return None
     try:
         data = r.json().get("data", [])
@@ -1125,8 +1233,8 @@ def serpapi_fare(origin, dest, dep, ret, adults, children):
         "sort_by": 2,
         "api_key": SERPAPI_KEY,
     }
-    r = requests.get("https://serpapi.com/search.json", params=params, timeout=30)
-    if r.status_code != 200:
+    r = _request_with_retry("GET", "https://serpapi.com/search.json", params=params, timeout=30)
+    if r is None or r.status_code != 200:
         return None
     try:
         data = r.json()
