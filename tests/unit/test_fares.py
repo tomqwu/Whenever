@@ -1638,6 +1638,52 @@ def test_skyscanner_verbose_off_is_silent(monkeypatch, fake_resp, caplog):
     assert "[skyscanner]" not in " ".join(r.getMessage() for r in caplog.records)
 
 
+def test_skyscanner_unwrap_single_double_and_error():
+    """_skyscanner_unwrap descends 1 or 2 envelope layers to the payload and surfaces
+    an inner upstream error (status False)."""
+    payload = {"context": {"status": "complete", "sessionId": "s"}, "itineraries": {"buckets": []}}
+    # single-nested (older shape): {data: payload}
+    p1, e1 = appmod._skyscanner_unwrap({"status": True, "data": payload})
+    assert p1 is payload and e1 is None
+    # double-nested (current shape): {data: {data: payload, status: True}}
+    p2, e2 = appmod._skyscanner_unwrap({"data": {"data": payload, "status": True}, "status": True})
+    assert p2 is payload and e2 is None
+    # upstream error: inner envelope status False with a message, empty payload
+    p3, e3 = appmod._skyscanner_unwrap(
+        {"data": {"data": {}, "status": False, "message": "Connection aborted"}, "status": True})
+    assert e3 == "Connection aborted" and p3 == {}
+    # non-dict → ({}, None)
+    assert appmod._skyscanner_unwrap(None) == ({}, None)
+
+
+def test_skyscanner_fare_parses_double_nested_envelope(monkeypatch, fake_resp):
+    """A complete result wrapped in the NEW extra data envelope still yields a fare."""
+    monkeypatch.setattr(appmod, "RAPIDAPI_KEY", "k")
+    monkeypatch.setattr(appmod.time, "sleep", lambda *_a, **_k: None)
+    inner = _sky_complete_payload()["data"]          # {context, itineraries}
+    double = {"status": True, "data": {"data": inner, "status": True, "message": "Successful"}}
+    monkeypatch.setattr(appmod.requests, "get", lambda *a, **k: fake_resp(double, status=200))
+    res = appmod.skyscanner_fare("YYZ", "LAX", "2026-08-07", "2026-08-09", 1, 0)
+    assert res is not None and res["cheapest_cad"] == 4400 and res["source"] == "skyscanner"
+
+
+def test_skyscanner_fare_surfaces_upstream_error(monkeypatch, fake_resp, caplog):
+    """When flights-sky's own upstream fails (inner status False), return None AND log
+    the real error instead of a silent empty result."""
+    import logging
+    monkeypatch.setattr(appmod, "RAPIDAPI_KEY", "k")
+    monkeypatch.setattr(appmod, "SKYSCANNER_VERBOSE", True)
+    monkeypatch.setattr(appmod.time, "sleep", lambda *_a, **_k: None)
+    errenv = {"status": True, "data": {"data": {}, "status": False,
+                                       "message": "Connection aborted. RemoteDisconnected"}}
+    monkeypatch.setattr(appmod.requests, "get", lambda *a, **k: fake_resp(errenv, status=200))
+    with caplog.at_level(logging.INFO, logger="app"):
+        res = appmod.skyscanner_fare("YYZ", "PEK", "2026-12-12", "2027-01-04", 2, 0)
+    assert res is None
+    text = " ".join(r.getMessage() for r in caplog.records)
+    assert "UPSTREAM error" in text and "Connection aborted" in text
+
+
 def test_skyscanner_fare_search_uses_connect_read_timeout_tuple(monkeypatch, fake_resp):
     """The initial search-roundtrip request uses a (connect, read) timeout tuple.
 

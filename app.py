@@ -1135,6 +1135,34 @@ def _skyscanner_get(url, params=None, retries_502=2, timeout=30):
         return r
 
 
+def _skyscanner_unwrap(resp_json):
+    """Unwrap the flights-sky response envelope(s) to the real payload.
+
+    flights-sky wraps the payload in one (older) or two (current) ``{data, status,
+    message, token, errors}`` envelopes — the actual ``context``/``itineraries`` live
+    at ``data`` or ``data.data``. An inner envelope with ``status == False`` carries an
+    UPSTREAM error in ``message`` (e.g. "Connection aborted …" when flights-sky can't
+    reach Skyscanner) — that error is otherwise invisible and looks like an empty result.
+
+    Returns ``(payload_dict, upstream_error_or_None)``. ``payload_dict`` is the deepest
+    dict that contains ``context``/``itineraries`` (or the last dict reached, possibly
+    empty). Defensive: a non-dict yields ``({}, None)``.
+    """
+    upstream_error = None
+    cur = resp_json if isinstance(resp_json, dict) else {}
+    for _ in range(4):  # bounded descent through envelope layers (cur is always a dict)
+        if cur.get("status") is False and cur.get("message"):
+            upstream_error = cur.get("message")
+        if "context" in cur or "itineraries" in cur:
+            return cur, upstream_error
+        nxt = cur.get("data")
+        if isinstance(nxt, dict):
+            cur = nxt
+            continue
+        break
+    return (cur if isinstance(cur, dict) else {}), upstream_error
+
+
 def _skyscanner_flatten_items(data):
     """Flatten all buckets[].items[] from a complete flights-sky response, deduped.
 
@@ -1282,12 +1310,17 @@ def skyscanner_fare(origin, dest, dep, ret, adults, children):
         _sky_log(f"search {origin}->{dest}: HTTP {r.status_code} after {time.time()-t0:.1f}s → None")
         return None
     try:
-        data = r.json().get("data", {})
+        data, up_err = _skyscanner_unwrap(r.json())
     except Exception:
         _sky_log(f"search {origin}->{dest}: unparseable JSON → None")
         return None
-    if not isinstance(data, dict):
+    if up_err:
+        # flights-sky reached us but its OWN upstream (Skyscanner) failed — surface the
+        # real reason instead of a silent empty result, then fall through (None).
+        _sky_log(f"search {origin}->{dest}: flights-sky UPSTREAM error after "
+                 f"{time.time()-t0:.1f}s → None — {up_err}")
         return None
+    # _skyscanner_unwrap always returns a dict payload.
     _initial_ctx = data.get("context") if isinstance(data.get("context"), dict) else {}
     _sky_log(f"search {origin}->{dest}: HTTP 200 in {time.time()-t0:.1f}s, "
              f"status={_initial_ctx.get('status')}, sessionId={'yes' if _initial_ctx.get('sessionId') else 'no'}")
@@ -1338,14 +1371,13 @@ def skyscanner_fare(origin, dest, dep, ret, adults, children):
                 _sky_log(f"poll {poll_n}/{SKYSCANNER_POLL_ATTEMPTS} {origin}->{dest}: HTTP {pr.status_code}")
                 continue
             try:
-                data = pr.json().get("data", {})
+                data, poll_err = _skyscanner_unwrap(pr.json())
             except Exception:
-                continue
-            if not isinstance(data, dict):
                 continue
             ctx = data.get("context") if isinstance(data.get("context"), dict) else {}
             _sky_log(f"poll {poll_n}/{SKYSCANNER_POLL_ATTEMPTS} {origin}->{dest}: "
-                     f"status={ctx.get('status')} at {time.time()-t0:.1f}s")
+                     f"status={ctx.get('status')}"
+                     f"{(' upstream-error: ' + str(poll_err)) if poll_err else ''} at {time.time()-t0:.1f}s")
             if ctx.get("status") == "complete":
                 completed = True
                 break
