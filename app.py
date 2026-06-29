@@ -399,6 +399,10 @@ def providers_configured():
         return ["demo"]
     p = []
     if RAPIDAPI_KEY:
+        # Same flights-sky subscription powers BOTH the Google Flights (synchronous,
+        # PRIMARY) and Skyscanner (async) endpoints, so one key configures both.
+        # google first — it is the provider tried first in the fallback chain.
+        p.append("google")
         p.append("skyscanner")
     if SERPAPI_KEY:
         p.append("serpapi")
@@ -1273,6 +1277,161 @@ def _skyscanner_layovers(item):
     return out
 
 
+def _google_airlines(item):
+    """De-duped carrier names for a Google Flights item (order-preserving).
+
+    Prefers the item's ``airlineNames`` list; falls back to the names inside the
+    ``airline`` list of ``{airlineCode, airlineName, link}`` dicts. Returns a list
+    (possibly empty) — never fabricated.
+    """
+    names = []
+    raw = item.get("airlineNames")
+    if isinstance(raw, list):
+        for n in raw:
+            if isinstance(n, str) and n and n not in names:
+                names.append(n)
+    if names:
+        return names
+    airline = item.get("airline")
+    if isinstance(airline, list):
+        for a in airline:
+            n = a.get("airlineName") if isinstance(a, dict) else None
+            if isinstance(n, str) and n and n not in names:
+                names.append(n)
+    return names
+
+
+def _google_layovers(item):
+    """Per-connection layovers for a Google Flights item's OUTBOUND leg.
+
+    ``transferAirports`` (when a non-empty list of IATA strings) is used directly.
+    Otherwise the connection airports are derived from ``segments``: each segment's
+    ``arrivalAirportCode`` except the last (the final arrival is the destination, not
+    a layover). Google's segment data has no clean layover gap, so ``duration_min``
+    is left None (best-effort, never fabricated). Returns [] for a nonstop (single
+    segment) item.
+    """
+    transfers = item.get("transferAirports")
+    if isinstance(transfers, list) and transfers:
+        out = []
+        for t in transfers:
+            out.append({"iata": t if isinstance(t, str) else None,
+                        "duration_min": None})
+        return out
+    segments = item.get("segments")
+    if not isinstance(segments, list):
+        return []
+    segs = [s for s in segments if isinstance(s, dict)]
+    out = []
+    for seg in segs[:-1]:
+        out.append({"iata": seg.get("arrivalAirportCode"), "duration_min": None})
+    return out
+
+
+def _google_int(v):
+    """``v`` as an int when it's a real numeric (int/float, non-bool); else None.
+
+    Google's ``stops``/``duration`` are documented as integers, but guard against an
+    upstream shape drift (e.g. a stringified ``"0"``) so a non-numeric value degrades
+    to None — never leaks a wrong type downstream nor is silently treated as nonstop.
+    """
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, (int, float)):
+        return int(v)
+    return None
+
+
+def _google_priced(flights):
+    """Items from ``flights`` that carry a numeric (int/float, non-bool) ``price``."""
+    out = []
+    for it in flights:
+        if not isinstance(it, dict):
+            continue
+        price = it.get("price")
+        if isinstance(price, bool):
+            continue
+        if isinstance(price, (int, float)):
+            out.append(it)
+    return out
+
+
+def google_flights_fare(origin, dest, dep, ret, adults, children):
+    """Real round-trip fares from RapidAPI flights-sky's Google Flights endpoint.
+
+    SYNCHRONOUS (no sessionId/poll): one GET to ``/google/flights/search-roundtrip``
+    returns everything (~13s upstream). ``price`` is the PARTY TOTAL round-trip fare
+    for the passed adults AND children, so it is used as-is. ``children`` is an integer
+    COUNT (not ages) and is only sent when > 0. ``stops``/``duration`` are OUTBOUND.
+
+    Defensive: missing key, no/failed response, ``status`` != true, ``data`` not a
+    dict, or no priced flights → None. Never fabricates a price. This is the PRIMARY
+    provider (tried first) and bypasses the async Skyscanner search/poll flow.
+    """
+    if not RAPIDAPI_KEY:
+        return None
+    params = {
+        "departureId": origin, "arrivalId": dest,
+        "departureDate": dep, "arrivalDate": ret,
+        "currency": "CAD", "adults": adults,
+    }
+    # children is a COUNT; only send when > 0 (omitting is safest for 0).
+    if children:
+        params["children"] = children
+    t0 = time.time()
+    r = _request_with_retry(
+        "GET",
+        f"https://{RAPIDAPI_HOST}/google/flights/search-roundtrip",
+        headers=_skyscanner_headers(),
+        params=params,
+        timeout=(10, 40),
+    )
+    if r is None or r.status_code != 200:
+        _sky_log(f"google {origin}->{dest}: no/failed response → None")
+        return None
+    try:
+        body = r.json()
+    except Exception:
+        _sky_log(f"google {origin}->{dest}: unparseable JSON → None")
+        return None
+    if not isinstance(body, dict) or body.get("status") is not True:
+        _sky_log(f"google {origin}->{dest}: status not true → None")
+        return None
+    data = body.get("data")
+    if not isinstance(data, dict):
+        _sky_log(f"google {origin}->{dest}: data not a dict → None")
+        return None
+    top = data.get("topFlights") or []
+    other = data.get("otherFlights") or []
+    flights = (top if isinstance(top, list) else []) + \
+              (other if isinstance(other, list) else [])
+    priced = _google_priced(flights)
+    if not priced:
+        _sky_log(f"google {origin}->{dest}: 0 priced flights → None")
+        return None
+
+    cheapest = min(priced, key=lambda it: it["price"])
+    # Numeric stops only (defensive): a non-int stops never counts as nonstop.
+    nonstops = [it for it in priced if _google_int(it.get("stops")) == 0]
+    ns = min(nonstops, key=lambda it: it["price"]) if nonstops else None
+
+    _sky_log(f"google {origin}->{dest}: DONE in {time.time()-t0:.1f}s — "
+             f"{len(priced)} priced, cheapest CAD {round(cheapest['price'])}")
+
+    return {
+        "cheapest_cad": round(cheapest["price"]),
+        "stops": _google_int(cheapest.get("stops")),
+        "nonstop_cad": round(ns["price"]) if ns else None,
+        "duration_min": _google_int(cheapest.get("duration")),
+        "nonstop_duration_min": _google_int(ns.get("duration")) if ns else None,
+        "airlines": _google_airlines(cheapest),
+        "nonstop_airlines": _google_airlines(ns) if ns else None,
+        "layovers": _google_layovers(cheapest),
+        "source": "google",
+        "book": None,
+    }
+
+
 def skyscanner_fare(origin, dest, dep, ret, adults, children):
     """Real round-trip fares from RapidAPI flights-sky (Skyscanner data).
 
@@ -1533,6 +1692,7 @@ def serpapi_fare(origin, dest, dep, ret, adults, children):
 # ordered-fallback priority order. The name MUST match the label producible by
 # providers_configured() so compare mode can skip unconfigured providers.
 _PROVIDER_CHAIN = (
+    ("google", lambda *a: google_flights_fare(*a)),
     ("skyscanner", lambda *a: skyscanner_fare(*a)),
     ("serpapi", lambda *a: serpapi_fare(*a)),
     ("amadeus", lambda *a: amadeus_fare(*a)),
@@ -1643,7 +1803,7 @@ def _get_fare_compare(origin, dest, dep, ret, adults, children, nonstop_threshol
 
     Concurrency note: under run_search's outer grid pool (SEARCH_CONCURRENCY
     workers) this inner pool nests, so peak in-flight provider requests are
-    bounded by SEARCH_CONCURRENCY × len(configured providers) (≤ 5). That is the
+    bounded by SEARCH_CONCURRENCY × len(configured providers) (≤ 6). That is the
     deliberate cost of compare mode (the #37 cell cap still bounds total cells);
     each provider's own timeout/retry budget keeps any single request bounded.
 
@@ -1721,7 +1881,7 @@ def _get_fare_uncached(origin, dest, dep, ret, adults, children, compare=False,
     if compare:
         return _get_fare_compare(origin, dest, dep, ret, adults, children,
                                  nonstop_threshold)
-    for provider in (skyscanner_fare, serpapi_fare, amadeus_fare, travelpayouts_fare, kiwi_fare):
+    for provider in (google_flights_fare, skyscanner_fare, serpapi_fare, amadeus_fare, travelpayouts_fare, kiwi_fare):
         try:
             res = provider(origin, dest, dep, ret, adults, children)
             if res and res.get("cheapest_cad"):

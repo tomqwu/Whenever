@@ -226,6 +226,10 @@ def _configure_all(monkeypatch):
     monkeypatch.setattr(appmod, "AMADEUS_SECRET", "k")     # amadeus
     monkeypatch.setattr(appmod, "TRAVELPAYOUTS_TOKEN", "k")  # travelpayouts
     monkeypatch.setattr(appmod, "KIWI_API_KEY", "k")       # kiwi
+    # RAPIDAPI_KEY also configures the (primary) google provider; default it to
+    # no-data so compare tests that only exercise the OTHER providers stay
+    # deterministic (no live call) unless a test overrides it explicitly.
+    monkeypatch.setattr(appmod, "google_flights_fare", lambda *a: None)
 
 
 def test_compare_picks_cheapest_with_alternatives(monkeypatch):
@@ -2452,3 +2456,394 @@ def test_request_with_retry_post_json_kwarg(monkeypatch, fake_resp):
                                    timeout=5)
     assert r.status_code == 200
     assert captured["json"] == {"a": 1} and captured["data"] == {"b": 2}
+
+
+# ---------------------------------------------------------------------------
+# Google Flights provider (synchronous /google/flights/search-roundtrip)
+# ---------------------------------------------------------------------------
+
+def _g_segment(dep_code, arr_code, dur, airline_name="Korean Air", airline_code="KE"):
+    """One Google Flights segment mirroring the live /tmp/gsample.json shape."""
+    return {
+        "departureAirportCode": dep_code,
+        "departureAirportName": dep_code + " Airport",
+        "arrivalAirportName": arr_code + " Airport",
+        "arrivalAirportCode": arr_code,
+        "durationMinutes": dur,
+        "departureTime": "10:00",
+        "arrivalTime": "13:17",
+        "cabinClass": 1,
+        "airline": {"airlineCode": airline_code, "flightNumber": "78",
+                    "airlineName": airline_name},
+        "overnight": False,
+    }
+
+
+def _g_flight(price, stops, duration, segments, airline_names,
+              transfer=None, available=True):
+    """One Google Flights item (topFlights/otherFlights) mirroring the live shape."""
+    return {
+        "price": price,
+        "returningToken": "tok-%s" % price,
+        "airlineCode": "KE",
+        "airlineNames": list(airline_names),
+        "segments": segments,
+        "departureAirportCode": segments[0]["departureAirportCode"],
+        "arrivalAirportCode": segments[-1]["arrivalAirportCode"],
+        "duration": duration,
+        "stops": stops,
+        "transferAirports": transfer,
+        "fareId": None,
+        "airline": [{"airlineCode": "KE", "airlineName": n,
+                     "link": "https://x"} for n in airline_names],
+        "isAvailable": available,
+    }
+
+
+def _g_body():
+    """A realistic success body: a cheaper 2-stop Korean item (otherFlights),
+    a 1-stop Air Canada item (topFlights), and a pricier nonstop item."""
+    korean_2stop = _g_flight(
+        5208, 2, 1965,
+        [_g_segment("YYZ", "ICN", 780, "Korean Air", "KE"),
+         _g_segment("ICN", "NRT", 120, "Korean Air", "KE"),
+         _g_segment("NRT", "PEK", 200, "Korean Air", "KE")],
+        ["Korean Air"])
+    ac_1stop = _g_flight(
+        5495, 1, 1160,
+        [_g_segment("YYZ", "YVR", 317, "Air Canada", "AC"),
+         _g_segment("YVR", "PEK", 775, "Air Canada", "AC")],
+        ["Air Canada"])
+    nonstop = _g_flight(
+        7200, 0, 800,
+        [_g_segment("YYZ", "PEK", 800, "Hainan Airlines", "HU")],
+        ["Hainan Airlines"])
+    return {
+        "status": True,
+        "message": "Successful",
+        "data": {
+            "topFlights": [ac_1stop],
+            "otherFlights": [korean_2stop, nonstop],
+            "filters": {},
+            "priceHistory": [],
+        },
+    }
+
+
+def test_google_flights_fare_none_without_key(monkeypatch):
+    """No RAPIDAPI_KEY → None immediately (no request)."""
+    monkeypatch.setattr(appmod, "RAPIDAPI_KEY", None)
+    monkeypatch.setattr(appmod.requests, "get",
+                        lambda *a, **k: pytest.fail("must not call when no key"))
+    assert appmod.google_flights_fare("YYZ", "PEK", "2026-12-12",
+                                      "2027-01-04", 2, 0) is None
+
+
+def test_google_flights_fare_happy_path(monkeypatch, fake_resp):
+    """Parses topFlights+otherFlights, picks the cheapest (2-stop Korean @5208),
+    derives nonstop from the nonstop item, and normalizes the shared dict."""
+    monkeypatch.setattr(appmod, "RAPIDAPI_KEY", "k")
+    captured = {}
+
+    def fake_get(url, headers=None, params=None, timeout=None):
+        captured["url"] = url
+        captured["headers"] = headers
+        captured["params"] = params
+        captured["timeout"] = timeout
+        return fake_resp(_g_body(), status=200)
+
+    monkeypatch.setattr(appmod.requests, "get", fake_get)
+    res = appmod.google_flights_fare("YYZ", "PEK", "2026-12-12",
+                                     "2027-01-04", 2, 2)
+
+    # endpoint + auth + sync params
+    assert captured["url"].endswith("/google/flights/search-roundtrip")
+    assert captured["headers"]["x-rapidapi-host"] == appmod.RAPIDAPI_HOST
+    assert captured["headers"]["x-rapidapi-key"] == "k"
+    assert captured["params"]["departureId"] == "YYZ"
+    assert captured["params"]["arrivalId"] == "PEK"
+    assert captured["params"]["departureDate"] == "2026-12-12"
+    assert captured["params"]["arrivalDate"] == "2027-01-04"
+    assert captured["params"]["currency"] == "CAD"
+    assert captured["params"]["adults"] == 2
+    # children is a COUNT and is sent when > 0
+    assert captured["params"]["children"] == 2
+    # generous read timeout (connect, read) for the ~13s sync call
+    assert captured["timeout"] == (10, 40)
+
+    # normalized result
+    assert res["source"] == "google"
+    assert res["cheapest_cad"] == 5208           # party total, used as-is
+    assert res["stops"] == 2                      # outbound stops on cheapest
+    assert res["duration_min"] == 1965            # outbound minutes on cheapest
+    assert res["airlines"] == ["Korean Air"]
+    assert res["nonstop_cad"] == 7200             # the nonstop item
+    assert res["nonstop_duration_min"] == 800
+    assert res["nonstop_airlines"] == ["Hainan Airlines"]
+    # layovers from cheapest segments: all arrivalAirportCodes except the last
+    assert res["layovers"] == [
+        {"iata": "ICN", "duration_min": None},
+        {"iata": "NRT", "duration_min": None},
+    ]
+    assert res["book"] is None
+
+
+def test_google_flights_fare_children_zero_omitted(monkeypatch, fake_resp):
+    """children=0 → the children param is OMITTED (not sent)."""
+    monkeypatch.setattr(appmod, "RAPIDAPI_KEY", "k")
+    captured = {}
+    monkeypatch.setattr(appmod.requests, "get",
+                        lambda url, headers=None, params=None, timeout=None:
+                        captured.update(params=params) or fake_resp(_g_body(), 200))
+    appmod.google_flights_fare("YYZ", "PEK", "2026-12-12", "2027-01-04", 1, 0)
+    assert "children" not in captured["params"]
+    assert captured["params"]["adults"] == 1
+
+
+def test_google_flights_fare_party_total_used_as_is(monkeypatch, fake_resp):
+    """The item price is the PARTY TOTAL and is used verbatim (only rounded)."""
+    monkeypatch.setattr(appmod, "RAPIDAPI_KEY", "k")
+    only = _g_flight(8987.4, 1, 1160,
+                     [_g_segment("YYZ", "YVR", 317, "Air Canada", "AC"),
+                      _g_segment("YVR", "PEK", 775, "Air Canada", "AC")],
+                     ["Air Canada"])
+    body = {"status": True, "message": "ok",
+            "data": {"topFlights": [only], "otherFlights": []}}
+    monkeypatch.setattr(appmod.requests, "get",
+                        lambda *a, **k: fake_resp(body, 200))
+    res = appmod.google_flights_fare("YYZ", "PEK", "d", "r", 2, 2)
+    assert res["cheapest_cad"] == 8987            # round(8987.4)
+    assert res["nonstop_cad"] is None             # no nonstop item
+
+
+def test_google_flights_fare_transfer_airports_preferred(monkeypatch, fake_resp):
+    """A non-empty transferAirports list is used for layovers over segments."""
+    monkeypatch.setattr(appmod, "RAPIDAPI_KEY", "k")
+    item = _g_flight(5208, 1, 1965,
+                     [_g_segment("YYZ", "ICN", 780),
+                      _g_segment("ICN", "PEK", 200)],
+                     ["Korean Air"], transfer=["ICN"])
+    body = {"status": True, "data": {"topFlights": [item], "otherFlights": []}}
+    monkeypatch.setattr(appmod.requests, "get",
+                        lambda *a, **k: fake_resp(body, 200))
+    res = appmod.google_flights_fare("YYZ", "PEK", "d", "r", 1, 0)
+    assert res["layovers"] == [{"iata": "ICN", "duration_min": None}]
+
+
+def test_google_flights_fare_nonstop_empty_layovers(monkeypatch, fake_resp):
+    """A nonstop (single-segment) cheapest item → empty layovers list."""
+    monkeypatch.setattr(appmod, "RAPIDAPI_KEY", "k")
+    item = _g_flight(4000, 0, 800,
+                     [_g_segment("YYZ", "PEK", 800, "Hainan", "HU")],
+                     ["Hainan"])
+    body = {"status": True, "data": {"topFlights": [item], "otherFlights": []}}
+    monkeypatch.setattr(appmod.requests, "get",
+                        lambda *a, **k: fake_resp(body, 200))
+    res = appmod.google_flights_fare("YYZ", "PEK", "d", "r", 1, 0)
+    assert res["layovers"] == []
+    assert res["stops"] == 0
+    assert res["nonstop_cad"] == 4000
+    assert res["nonstop_duration_min"] == 800
+    assert res["nonstop_airlines"] == ["Hainan"]
+
+
+def test_google_flights_fare_airlines_from_airline_list(monkeypatch, fake_resp):
+    """When airlineNames is absent, names fall back to airline[].airlineName."""
+    monkeypatch.setattr(appmod, "RAPIDAPI_KEY", "k")
+    item = _g_flight(4000, 0, 800,
+                     [_g_segment("YYZ", "PEK", 800)], ["Korean Air"])
+    del item["airlineNames"]
+    body = {"status": True, "data": {"topFlights": [item], "otherFlights": []}}
+    monkeypatch.setattr(appmod.requests, "get",
+                        lambda *a, **k: fake_resp(body, 200))
+    res = appmod.google_flights_fare("YYZ", "PEK", "d", "r", 1, 0)
+    assert res["airlines"] == ["Korean Air"]
+
+
+def test_google_flights_fare_no_response(monkeypatch):
+    """_request_with_retry returning None (network/timeout) → None."""
+    monkeypatch.setattr(appmod, "RAPIDAPI_KEY", "k")
+    monkeypatch.setattr(appmod, "_request_with_retry", lambda *a, **k: None)
+    assert appmod.google_flights_fare("YYZ", "PEK", "d", "r", 1, 0) is None
+
+
+def test_google_flights_fare_non_200(monkeypatch, fake_resp):
+    """A non-200 status → None."""
+    monkeypatch.setattr(appmod, "RAPIDAPI_KEY", "k")
+    monkeypatch.setattr(appmod.requests, "get",
+                        lambda *a, **k: fake_resp({}, status=500))
+    assert appmod.google_flights_fare("YYZ", "PEK", "d", "r", 1, 0) is None
+
+
+def test_google_flights_fare_unparseable_json(monkeypatch):
+    """A 200 whose body is not JSON → None."""
+    monkeypatch.setattr(appmod, "RAPIDAPI_KEY", "k")
+
+    class BadResp:
+        status_code = 200
+        def json(self):
+            raise ValueError("nope")
+
+    monkeypatch.setattr(appmod.requests, "get", lambda *a, **k: BadResp())
+    assert appmod.google_flights_fare("YYZ", "PEK", "d", "r", 1, 0) is None
+
+
+def test_google_flights_fare_status_false(monkeypatch, fake_resp):
+    """status:false (error body) → None even with a non-null message."""
+    monkeypatch.setattr(appmod, "RAPIDAPI_KEY", "k")
+    body = {"status": False, "message": "validation error",
+            "data": None, "errors": ["bad"]}
+    monkeypatch.setattr(appmod.requests, "get",
+                        lambda *a, **k: fake_resp(body, 200))
+    assert appmod.google_flights_fare("YYZ", "PEK", "d", "r", 1, 0) is None
+
+
+def test_google_flights_fare_data_not_dict(monkeypatch, fake_resp):
+    """status:true but data not a dict → None."""
+    monkeypatch.setattr(appmod, "RAPIDAPI_KEY", "k")
+    body = {"status": True, "message": "ok", "data": None}
+    monkeypatch.setattr(appmod.requests, "get",
+                        lambda *a, **k: fake_resp(body, 200))
+    assert appmod.google_flights_fare("YYZ", "PEK", "d", "r", 1, 0) is None
+
+
+def test_google_flights_fare_empty_flights(monkeypatch, fake_resp):
+    """topFlights/otherFlights both empty → None."""
+    monkeypatch.setattr(appmod, "RAPIDAPI_KEY", "k")
+    body = {"status": True, "data": {"topFlights": [], "otherFlights": []}}
+    monkeypatch.setattr(appmod.requests, "get",
+                        lambda *a, **k: fake_resp(body, 200))
+    assert appmod.google_flights_fare("YYZ", "PEK", "d", "r", 1, 0) is None
+
+
+def test_google_flights_fare_skips_priceless_items(monkeypatch, fake_resp):
+    """Items without a numeric price are skipped; a bool price is NOT numeric."""
+    monkeypatch.setattr(appmod, "RAPIDAPI_KEY", "k")
+    no_price = _g_flight(5000, 1, 900,
+                         [_g_segment("YYZ", "ICN", 500),
+                          _g_segment("ICN", "PEK", 300)], ["Korean Air"])
+    del no_price["price"]
+    bool_price = _g_flight(1, 0, 800,
+                           [_g_segment("YYZ", "PEK", 800)], ["X"])
+    bool_price["price"] = True            # must NOT count as a numeric price
+    good = _g_flight(6000, 1, 1000,
+                     [_g_segment("YYZ", "YVR", 400, "Air Canada", "AC"),
+                      _g_segment("YVR", "PEK", 600, "Air Canada", "AC")],
+                     ["Air Canada"])
+    body = {"status": True,
+            "data": {"topFlights": [no_price, bool_price],
+                     "otherFlights": [good, "not-a-dict"]}}
+    monkeypatch.setattr(appmod.requests, "get",
+                        lambda *a, **k: fake_resp(body, 200))
+    res = appmod.google_flights_fare("YYZ", "PEK", "d", "r", 1, 0)
+    assert res["cheapest_cad"] == 6000       # only the well-formed priced item
+    assert res["nonstop_cad"] is None        # the bool-priced "nonstop" is ignored
+
+
+def test_google_flights_fare_non_numeric_stops_duration(monkeypatch, fake_resp):
+    """Non-numeric stops/duration degrade to None and never count as nonstop.
+
+    stops=True (bool → not numeric) and duration="800" (string → not numeric) must
+    yield stops=None / duration_min=None, and the item is NOT treated as nonstop.
+    """
+    monkeypatch.setattr(appmod, "RAPIDAPI_KEY", "k")
+    weird = _g_flight(4000, True, 800,
+                      [_g_segment("YYZ", "PEK", 800)], ["X"])
+    weird["duration"] = "800"            # stringified duration
+    body = {"status": True, "data": {"topFlights": [weird], "otherFlights": []}}
+    monkeypatch.setattr(appmod.requests, "get",
+                        lambda *a, **k: fake_resp(body, 200))
+    res = appmod.google_flights_fare("YYZ", "PEK", "d", "r", 1, 0)
+    assert res["cheapest_cad"] == 4000   # price still real → still returned
+    assert res["stops"] is None          # bool stops not numeric
+    assert res["duration_min"] is None   # string duration not numeric
+    assert res["nonstop_cad"] is None    # bool stops != 0 → not nonstop
+    assert res["nonstop_duration_min"] is None
+
+
+def test_google_flights_fare_non_list_buckets(monkeypatch, fake_resp):
+    """topFlights/otherFlights of a non-list type are treated as empty → None."""
+    monkeypatch.setattr(appmod, "RAPIDAPI_KEY", "k")
+    body = {"status": True, "data": {"topFlights": "x", "otherFlights": 5}}
+    monkeypatch.setattr(appmod.requests, "get",
+                        lambda *a, **k: fake_resp(body, 200))
+    assert appmod.google_flights_fare("YYZ", "PEK", "d", "r", 1, 0) is None
+
+
+def test_google_flights_fare_layovers_non_list_segments(monkeypatch, fake_resp):
+    """A cheapest item whose segments is not a list → layovers []."""
+    monkeypatch.setattr(appmod, "RAPIDAPI_KEY", "k")
+    item = _g_flight(4000, 0, 800,
+                     [_g_segment("YYZ", "PEK", 800)], ["X"])
+    item["segments"] = None
+    item["transferAirports"] = None
+    body = {"status": True, "data": {"topFlights": [item], "otherFlights": []}}
+    monkeypatch.setattr(appmod.requests, "get",
+                        lambda *a, **k: fake_resp(body, 200))
+    res = appmod.google_flights_fare("YYZ", "PEK", "d", "r", 1, 0)
+    assert res["layovers"] == []
+
+
+def test_google_flights_fare_verbose_trace(monkeypatch, fake_resp, caplog):
+    """SKYSCANNER_VERBOSE on emits a one-line google trace at INFO."""
+    monkeypatch.setattr(appmod, "RAPIDAPI_KEY", "k")
+    monkeypatch.setattr(appmod, "SKYSCANNER_VERBOSE", True)
+    monkeypatch.setattr(appmod.requests, "get",
+                        lambda *a, **k: fake_resp(_g_body(), 200))
+    with caplog.at_level("INFO"):
+        appmod.google_flights_fare("YYZ", "PEK", "d", "r", 1, 0)
+    assert any("google" in r.message for r in caplog.records)
+
+
+def test_google_tried_first_in_provider_chain(monkeypatch):
+    """google_flights_fare is tried BEFORE skyscanner and every other provider."""
+    call_order = []
+    google_result = {"cheapest_cad": 5208, "stops": 2, "nonstop_cad": 7200,
+                     "source": "google", "book": None}
+    monkeypatch.setattr(appmod, "google_flights_fare",
+                        lambda *a: call_order.append("google") or google_result)
+    monkeypatch.setattr(appmod, "skyscanner_fare",
+                        lambda *a: call_order.append("skyscanner") or None)
+    monkeypatch.setattr(appmod, "serpapi_fare",
+                        lambda *a: call_order.append("serpapi") or None)
+    monkeypatch.setattr(appmod, "amadeus_fare",
+                        lambda *a: call_order.append("amadeus") or None)
+    monkeypatch.setattr(appmod, "travelpayouts_fare",
+                        lambda *a: call_order.append("travelpayouts") or None)
+    monkeypatch.setattr(appmod, "kiwi_fare",
+                        lambda *a: call_order.append("kiwi") or None)
+    monkeypatch.setattr(appmod, "FARE_CACHE_TTL", 0)
+
+    res = appmod.get_fare("YYZ", "PEK", "2026-12-12", "2027-01-04", 2, 0)
+
+    assert call_order == ["google"]      # google succeeded → nothing else tried
+    assert res["source"] == "google"
+    assert "skyscanner" not in call_order
+
+
+def test_providers_configured_includes_google_when_key_set(monkeypatch):
+    """providers_configured() lists 'google' FIRST (before skyscanner) when keyed."""
+    monkeypatch.setattr(appmod, "RAPIDAPI_KEY", "k")
+    p = appmod.providers_configured()
+    assert "google" in p
+    assert "skyscanner" in p
+    assert p.index("google") < p.index("skyscanner")
+
+
+def test_providers_configured_excludes_google_when_unset(monkeypatch):
+    """No RAPIDAPI_KEY → neither google nor skyscanner is configured."""
+    monkeypatch.setattr(appmod, "RAPIDAPI_KEY", None)
+    p = appmod.providers_configured()
+    assert "google" not in p
+    assert "skyscanner" not in p
+
+
+def test_google_first_in_provider_chain_constant(monkeypatch):
+    """The _PROVIDER_CHAIN compare ordering also lists google first."""
+    assert appmod._PROVIDER_CHAIN[0][0] == "google"
+    # and its lambda dispatches to google_flights_fare
+    called = {}
+    monkeypatch.setattr(appmod, "google_flights_fare",
+                        lambda *a: called.setdefault("n", a))
+    appmod._PROVIDER_CHAIN[0][1]("YYZ", "PEK", "d", "r", 1, 0)
+    assert called["n"] == ("YYZ", "PEK", "d", "r", 1, 0)

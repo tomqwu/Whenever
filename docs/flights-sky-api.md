@@ -1,8 +1,65 @@
-# flights-sky (Skyscanner) API — integration reference
+# flights-sky API — integration reference
 
-The preferred fare provider (`skyscanner_fare` in `app.py`). This is the **real,
-verified** reference for the API our key is subscribed to. Written from live probing
-— keep it accurate as the API evolves.
+This RapidAPI subscription (`flights-sky.p.rapidapi.com`, `RAPIDAPI_KEY`) exposes **two
+different flight backends** under one key:
+
+- **Google Flights** under `/google/...` — **SYNCHRONOUS** (one call, no poll). This is
+  now the **PRIMARY** provider (`google_flights_fare`, tried FIRST). See
+  [Google Flights (working, synchronous)](#google-flights-working-synchronous).
+- **Skyscanner** under `/web/flights/...` — async search-then-poll
+  (`skyscanner_fare`). Kept as a fallback; its upstream has been intermittently failing
+  ("Connection aborted"), which is why the synchronous Google path is preferred.
+
+Both are documented here from live probing — keep accurate as the API evolves.
+
+## Google Flights (working, synchronous)
+
+`GET https://{RAPIDAPI_HOST}/google/flights/search-roundtrip` — same auth headers as
+below (`x-rapidapi-host`, `x-rapidapi-key`). **One call returns everything in ~13s — no
+`sessionId`, no polling.** This bypasses the slow async Skyscanner flow entirely and is
+the app's PRIMARY fare source (`google_flights_fare`, first in the provider chain).
+
+| query param | value |
+|---|---|
+| `departureId` / `arrivalId` | origin / dest **IATA** (e.g. `YYZ`, `PEK`) |
+| `departureDate` / `arrivalDate` | `YYYY-MM-DD` (outbound / return) |
+| `currency` | `CAD` |
+| `adults` | adult count |
+| `children` | **integer COUNT of children — NOT ages.** Only sent when > 0 (omitted for 0). |
+
+**`price` is the PARTY TOTAL round-trip fare** (verified live: adults=1 → 2485,
+adults=2 → 5208, 2 adults + 2 children → 8987 CAD), so it is used as-is (only rounded).
+
+Success body:
+```
+{"status": true, "message": "Successful",
+ "data": {"topFlights": [...], "otherFlights": [...], "filters": {...}, "priceHistory": []}}
+```
+Error body: `{"status": false, "message": "...", "data": null, "errors": <...>}`.
+We treat `status` != true / `data` not a dict / no priced flights → `None` (never fabricate).
+
+Each flight item (in `topFlights` / `otherFlights`):
+- `price` (number, party total round-trip)
+- `stops` (int, **OUTBOUND**), `duration` (int minutes, **OUTBOUND**)
+- `airlineNames` (list[str]); `airline` (list[`{airlineCode, airlineName, link}`])
+- `segments` (list of `{departureAirportCode, arrivalAirportCode, durationMinutes, departureTime, arrivalTime, ...}`)
+- `transferAirports` (often null), `isAvailable` (bool), `returningToken`, `fareId`
+
+Normalization (`google_flights_fare` → shared `get_fare` dict, `source="google"`):
+- `flights = topFlights + otherFlights`; keep items with a numeric `price`.
+- `cheapest` = min by price → `cheapest_cad` = round(price), `stops`, `duration_min`.
+- `airlines` = de-duped `airlineNames` (fallback to `airline[].airlineName`).
+- nonstop items = `stops == 0` → `nonstop_cad` / `nonstop_duration_min` / `nonstop_airlines`.
+- `layovers` from cheapest `segments`: each segment's `arrivalAirportCode` except the last
+  → `{"iata": <code>, "duration_min": None}` (segments give no clean layover gap, so
+  `duration_min` is None). A non-empty `transferAirports` list is used instead when present.
+  `[]` for a nonstop (single-segment) item.
+- `book` = None (no trivial deep link).
+
+---
+
+The rest of this file documents the legacy async **Skyscanner** path
+(`skyscanner_fare`), retained as a fallback.
 
 ## ⚠️ Which API is this? (don't confuse the two)
 
