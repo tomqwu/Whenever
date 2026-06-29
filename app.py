@@ -221,6 +221,11 @@ SKYSCANNER_POLL_TIMEOUT = int(os.environ.get("SKYSCANNER_POLL_TIMEOUT", "20"))
 # we keep polling, and we only bail after this many back-to-back silences. Bounds the
 # worst case to ~ stalls x SKYSCANNER_POLL_TIMEOUT of pure silence.
 SKYSCANNER_POLL_MAX_STALLS = int(os.environ.get("SKYSCANNER_POLL_MAX_STALLS", "3"))
+# The Google Flights endpoint intermittently returns a transient error (HTTP 200 with
+# status:false, or 0 flights) during bad spells — verified live. Retry a few times with
+# a short backoff so a single blip doesn't surface as "no fares". Bounded.
+GOOGLE_RETRIES = int(os.environ.get("GOOGLE_RETRIES", "3"))
+GOOGLE_RETRY_BACKOFF = float(os.environ.get("GOOGLE_RETRY_BACKOFF", "2"))
 # Verbose provider tracing. When on, every flights-sky HTTP call is logged with its
 # status, the session status, and elapsed time so you can SEE what the async search is
 # doing (e.g. polls stuck on "incomplete", timeouts, throttling) instead of just a
@@ -1364,12 +1369,27 @@ def google_flights_fare(origin, dest, dep, ret, adults, children):
     for the passed adults AND children, so it is used as-is. ``children`` is an integer
     COUNT (not ages) and is only sent when > 0. ``stops``/``duration`` are OUTBOUND.
 
-    Defensive: missing key, no/failed response, ``status`` != true, ``data`` not a
-    dict, or no priced flights → None. Never fabricates a price. This is the PRIMARY
-    provider (tried first) and bypasses the async Skyscanner search/poll flow.
+    The endpoint intermittently returns a transient error, so this retries the single
+    attempt up to GOOGLE_RETRIES times with a short backoff before giving up. PRIMARY
+    provider (tried first); bypasses the async Skyscanner search/poll flow.
     """
     if not RAPIDAPI_KEY:
         return None
+    for attempt in range(GOOGLE_RETRIES + 1):
+        res = _google_fare_once(origin, dest, dep, ret, adults, children)
+        if res is not None:
+            return res
+        if attempt < GOOGLE_RETRIES:
+            time.sleep(GOOGLE_RETRY_BACKOFF)
+    return None
+
+
+def _google_fare_once(origin, dest, dep, ret, adults, children):
+    """One attempt at a Google Flights round-trip fare → normalized dict or None.
+
+    Defensive: no/failed response, ``status`` != true, ``data`` not a dict, or no priced
+    flights → None (the caller retries). Never fabricates a price.
+    """
     params = {
         "departureId": origin, "arrivalId": dest,
         "departureDate": dep, "arrivalDate": ret,

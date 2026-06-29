@@ -1,0 +1,456 @@
+{
+ "status": true,
+ "message": "Successful",
+ "data": {
+  "topFlights": [
+   {
+    "price": 8987,
+    "returningToken": "eyJ0IjoiQ2pSSWFIcDVhbWRFT0hKM1dXdEJURXc1TWtGQ1J5MHRMUzB0TFMwdExYWjBjbWN4T0VGQlFVRkJSM0JEWlU1WlRtaHlhMGxCRWdwQlF6RXdOM3hCUXpJNUdnc0lzT3cyRUFJYUEwTkJSRGdjY08vTUpnPT0iLCJmciI6IllZWiIsInRvIjoiUEVLIiwiZGF0ZSI6IjIwMjYtMTItMTIiLCJjMSI6IkFDIiwibm8xIjoiMTA3IiwiYzIiOiJBQyIsIm5vMiI6IjI5IiwiZGVwMiI6IllWUiIsImNvdW50IjoyfQ==",
+    "airlineCode": "AC",
+    "airlineNames": [
+     "Air Canada"
+    ],
+    "segments": [
+     {
+      "departureAirportCode": "YYZ",
+      "departureAirportName": "Toronto Pearson International Airport",
+      "arrivalAirportName": "Vancouver International Airport",
+      "arrivalAirportCode": "YVR",
+      "durationMinutes": 323,
+      "departureTime": "10:00",
+      "arrivalTime": "13:23",
+      "cabinClass": 1,
+      "seatPitch": "31 in",
+      "airlineIndex": null,
+      "aircraftType": null,
+      "aircraftName": "Airbus A321",
+      "overnight": false,
+      "delayed": null,
+      "departureDate": "2026-12-12",
+      "arrivalDate": "2026-12-12",
+      "airline": {
+       "airlineCode": "AC",
+       "flightNumber": "107",
+       "airlineName": "Air Canada"
+      },
+      "seatWidth": "31 inches",
+      "flightId": 1163304,
+      "someFlag": 2
+     },
+     {
+      "departureAirportCode": "YVR",
+      "departureAirportName": "Vancouver International Airport",
+      "arrivalAirportName": "Beijing Capital International Airport",
+      "arrivalAirportCode": "PEK",
+      "durationMinutes": 780,
+      "departureTime": "14:20",
+      "arrivalTime": "18:20",
+      "cabinClass": 1,
+      "seatPitch": "31 in",
+      "airlineIndex": null,
+      "aircraftType": null,
+      "aircraftName": "Boeing 787",
+      "overnight": false,
+      "delayed": null,
+      "departureDate": "2026-12-12",
+      "arrivalDate": "2026-12-13",
+      "airline": {
+       "airlineCode": "AC",
+       "flightNumber": "29",
+       "airlineName": "Air Canada"
+      },
+      "seatWidth": "31 inches",
+      "flightId": 1732844,
+      "someFlag": 2
+     }
+    ],
+    "departureAirportCode": "YYZ",
+    "departureDate": "2026-12-12",
+    "departureTime": "10:00",
+    "arrivalAirportCode": "PEK",
+    "arrivalDate": "2026-12-13",
+    "arrivalTime": "18:20",
+    "duration": 1160,
+    "stops": 1,
+    "isCodeShare": false,
+    "hasTransit": null,
+    "transferAirports": null,
+    "fareId": null,
+    "metaData": null,
+    "baggage": null,
+    "airline": [
+     {
+      "airlineCode": "AC",
+      "airlineName": "Air Canada",
+      "link": "https://www.aircanada.com/ca/en/aco/home/plan/accessibility.html"
+     }
+    ],
+    "isAvailable": false
+   },
+   {
+    "price": 11778,
+    "returningToken": "eyJ0IjoiQ2pSSWFIcDVhbWRFT0hKM1dXdEJURXc1TWtGQ1J5MHRMUzB0TFMwdExYWjBjbWN4T0VGQlFVRkJSM0JEWlU1WlRtaHlhMGxCRWdwTFJUYzRmRXRGT0RZekdnc0lxUEZIRUFJYUEwTkJSRGdjY09YTE1nPT0iLCJmciI6IllZWiIsInRvIjoiUEVLIiwiZGF0ZSI6IjIwMjYtMTItMTIiLCJjMSI6IktFIiwibm8xIjoiNzgiLCJjMiI6IktFIiwibm8yIjoiODYzIiwiZGVwMiI6IklDTiIsImNvdW50IjoyfQ==",
+    "airlineCode": "KE",
+    "airlineNames": [
+     "Korean Air"
+    ],
+    "segments": [
+     {
+      "departureAirportCode": "YYZ",
+      "departureAirportName": "Toronto Pearson International Airport",
+      "arrivalAirportName": "Incheon International Airport",
+      "arrivalAirportCode": "ICN",
+      "durationMinutes": 910,
+      "departureTime": "11:40",
+      "arrivalTime": "16:50",
+      "cabinClass": 1,
+      "seatPitch": "32 in",
+      "airlineIndex": null,
+      "aircraftType": null,
+      "aircraftName": "Airbus A350",
+      "overnight": false,
+      "delayed": null,
+      "departureDate": "2026-12-12",
+      "arrivalDate": "2026-12-13",
+      "airline": {
+       "airlineCode": "KE",
+       "flightNumber": "78",
+       "airlineName": "Korean Air"
+      },
+      "seatWidth": "32 inches",
+      "flightId": 2381792,
+      "someFlag": 2
+     },
+     {
+      "departureAirportCode": "ICN",
+      "departureAirportName": "Incheon International Airport",
+      "arrivalAirportName": "Beijing Capital International Airport",
+      "arrivalAirportCode": "PEK",
+      "durationMinutes": 145,
+      "departureTime": "20:50",
+      "arrivalTime": "22:15",
+      "cabinClass": 1,
+      "seatPitch": "30 in",
+      "airlineIndex": null,
+      "aircraftType": null,
+      "aircraftName": "Boeing 737",
+      "overnight": false,
+      "delayed": null,
+      "departureDate": "2026-12-13",
+      "arrivalDate": "2026-12-13",
+      "airline": {
+       "airlineCode": "KE",
+       "flightNumber": "863",
+       "airlineName": "Korean Air"
+      },
+      "seatWidth": "30 inches",
+      "flightId": 410268,
+      "someFlag": 2
+     }
+    ],
+    "departureAirportCode": "YYZ",
+    "departureDate": "2026-12-12",
+    "departureTime": "11:40",
+    "arrivalAirportCode": "PEK",
+    "arrivalDate": "2026-12-13",
+    "arrivalTime": "22:15",
+    "duration": 1295,
+    "stops": 1,
+    "isCodeShare": false,
+    "hasTransit": null,
+    "transferAirports": null,
+    "fareId": null,
+    "metaData": null,
+    "baggage": null,
+    "airline": [
+     {
+      "airlineCode": "KE",
+      "airlineName": "Korean Air",
+      "link": "https://www.koreanair.com/kr/en/airport/assistance/special-needs"
+     }
+    ],
+    "isAvailable": false
+   }
+  ],
+  "otherFlights": [
+   {
+    "price": 8987,
+    "returningToken": "eyJ0IjoiQ2pSSWFIcDVhbWRFT0hKM1dXdEJURXc1TWtGQ1J5MHRMUzB0TFMwdExYWjBjbWN4T0VGQlFVRkJSM0JEWlU1WlRtaHlhMGxCRWdwQlF6RXdNWHhCUXpJNUdnc0lzT3cyRUFJYUEwTkJSRGdjY08vTUpnPT0iLCJmciI6IllZWiIsInRvIjoiUEVLIiwiZGF0ZSI6IjIwMjYtMTItMTIiLCJjMSI6IkFDIiwibm8xIjoiMTAxIiwiYzIiOiJBQyIsIm5vMiI6IjI5IiwiZGVwMiI6IllWUiIsImNvdW50IjoyfQ==",
+    "airlineCode": "AC",
+    "airlineNames": [
+     "Air Canada"
+    ],
+    "segments": [
+     {
+      "departureAirportCode": "YYZ",
+      "departureAirportName": "Toronto Pearson International Airport",
+      "arrivalAirportName": "Vancouver International Airport",
+      "arrivalAirportCode": "YVR",
+      "durationMinutes": 336,
+      "departureTime": "06:15",
+      "arrivalTime": "09:51",
+      "cabinClass": 1,
+      "seatPitch": "31 in",
+      "airlineIndex": null,
+      "aircraftType": null,
+      "aircraftName": "Airbus A321",
+      "overnight": false,
+      "delayed": null,
+      "departureDate": "2026-12-12",
+      "arrivalDate": "2026-12-12",
+      "airline": {
+       "airlineCode": "AC",
+       "flightNumber": "101",
+       "airlineName": "Air Canada"
+      },
+      "seatWidth": "31 inches",
+      "flightId": 1163304,
+      "someFlag": 2
+     },
+     {
+      "departureAirportCode": "YVR",
+      "departureAirportName": "Vancouver International Airport",
+      "arrivalAirportName": "Beijing Capital International Airport",
+      "arrivalAirportCode": "PEK",
+      "durationMinutes": 780,
+      "departureTime": "14:20",
+      "arrivalTime": "18:20",
+      "cabinClass": 1,
+      "seatPitch": "31 in",
+      "airlineIndex": null,
+      "aircraftType": null,
+      "aircraftName": "Boeing 787",
+      "overnight": false,
+      "delayed": null,
+      "departureDate": "2026-12-12",
+      "arrivalDate": "2026-12-13",
+      "airline": {
+       "airlineCode": "AC",
+       "flightNumber": "29",
+       "airlineName": "Air Canada"
+      },
+      "seatWidth": "31 inches",
+      "flightId": 1732844,
+      "someFlag": 2
+     }
+    ],
+    "departureAirportCode": "YYZ",
+    "departureDate": "2026-12-12",
+    "departureTime": "06:15",
+    "arrivalAirportCode": "PEK",
+    "arrivalDate": "2026-12-13",
+    "arrivalTime": "18:20",
+    "duration": 1385,
+    "stops": 1,
+    "isCodeShare": false,
+    "hasTransit": null,
+    "transferAirports": null,
+    "fareId": null,
+    "metaData": null,
+    "baggage": null,
+    "airline": [
+     {
+      "airlineCode": "AC",
+      "airlineName": "Air Canada",
+      "link": "https://www.aircanada.com/ca/en/aco/home/plan/accessibility.html"
+     }
+    ],
+    "isAvailable": false
+   },
+   {
+    "price": 8987,
+    "returningToken": "eyJ0IjoiQ2pSSWFIcDVhbWRFT0hKM1dXdEJURXc1TWtGQ1J5MHRMUzB0TFMwdExYWjBjbWN4T0VGQlFVRkJSM0JEWlU1WlRtaHlhMGxCRWdwQlF6RXdNM3hCUXpJNUdnc0lzT3cyRUFJYUEwTkJSRGdjY08vTUpnPT0iLCJmciI6IllZWiIsInRvIjoiUEVLIiwiZGF0ZSI6IjIwMjYtMTItMTIiLCJjMSI6IkFDIiwibm8xIjoiMTAzIiwiYzIiOiJBQyIsIm5vMiI6IjI5IiwiZGVwMiI6IllWUiIsImNvdW50IjoyfQ==",
+    "airlineCode": "AC",
+    "airlineNames": [
+     "Air Canada"
+    ],
+    "segments": [
+     {
+      "departureAirportCode": "YYZ",
+      "departureAirportName": "Toronto Pearson International Airport",
+      "arrivalAirportName": "Vancouver International Airport",
+      "arrivalAirportCode": "YVR",
+      "durationMinutes": 323,
+      "departureTime": "07:00",
+      "arrivalTime": "10:23",
+      "cabinClass": 1,
+      "seatPitch": "31 in",
+      "airlineIndex": null,
+      "aircraftType": null,
+      "aircraftName": "Airbus A321",
+      "overnight": false,
+      "delayed": null,
+      "departureDate": "2026-12-12",
+      "arrivalDate": "2026-12-12",
+      "airline": {
+       "airlineCode": "AC",
+       "flightNumber": "103",
+       "airlineName": "Air Canada"
+      },
+      "seatWidth": "31 inches",
+      "flightId": 1163304,
+      "someFlag": 2
+     },
+     {
+      "departureAirportCode": "YVR",
+      "departureAirportName": "Vancouver International Airport",
+      "arrivalAirportName": "Beijing Capital International Airport",
+      "arrivalAirportCode": "PEK",
+      "durationMinutes": 780,
+      "departureTime": "14:20",
+      "arrivalTime": "18:20",
+      "cabinClass": 1,
+      "seatPitch": "31 in",
+      "airlineIndex": null,
+      "aircraftType": null,
+      "aircraftName": "Boeing 787",
+      "overnight": false,
+      "delayed": null,
+      "departureDate": "2026-12-12",
+      "arrivalDate": "2026-12-13",
+      "airline": {
+       "airlineCode": "AC",
+       "flightNumber": "29",
+       "airlineName": "Air Canada"
+      },
+      "seatWidth": "31 inches",
+      "flightId": 1732844,
+      "someFlag": 2
+     }
+    ],
+    "departureAirportCode": "YYZ",
+    "departureDate": "2026-12-12",
+    "departureTime": "07:00",
+    "arrivalAirportCode": "PEK",
+    "arrivalDate": "2026-12-13",
+    "arrivalTime": "18:20",
+    "duration": 1340,
+    "stops": 1,
+    "isCodeShare": false,
+    "hasTransit": null,
+    "transferAirports": null,
+    "fareId": null,
+    "metaData": null,
+    "baggage": null,
+    "airline": [
+     {
+      "airlineCode": "AC",
+      "airlineName": "Air Canada",
+      "link": "https://www.aircanada.com/ca/en/aco/home/plan/accessibility.html"
+     }
+    ],
+    "isAvailable": false
+   },
+   {
+    "price": 8987,
+    "returningToken": "eyJ0IjoiQ2pSSWFIcDVhbWRFT0hKM1dXdEJURXc1TWtGQ1J5MHRMUzB0TFMwdExYWjBjbWN4T0VGQlFVRkJSM0JEWlU1WlRtaHlhMGxCRWhKQlF6RXhNVE44UVVNeE1UQXpmRUZETWprYUN3aXc3RFlRQWhvRFEwRkVPQnh3Nzh3bSIsImZyIjoiWVlaIiwidG8iOiJQRUsiLCJkYXRlIjoiMjAyNi0xMi0xMiIsImMxIjoiQUMiLCJubzEiOiIxMTEzIiwiYzIiOiJBQyIsIm5vMiI6IjI5IiwiZGVwMiI6IllWUiIsImNvdW50IjozfQ==",
+    "airlineCode": "AC",
+    "airlineNames": [
+     "Air Canada"
+    ],
+    "segments": [
+     {
+      "departureAirportCode": "YYZ",
+      "departureAirportName": "Toronto Pearson International Airport",
+      "arrivalAirportName": "Regina International Airport",
+      "arrivalAirportCode": "YQR",
+      "durationMinutes": 223,
+      "departureTime": "08:00",
+      "arrivalTime": "10:43",
+      "cabinClass": 1,
+      "seatPitch": "30 in",
+      "airlineIndex": null,
+      "aircraftType": null,
+      "aircraftName": "Airbus A220-300 Passenger",
+      "overnight": false,
+      "delayed": null,
+      "departureDate": "2026-12-12",
+      "arrivalDate": "2026-12-12",
+      "airline": {
+       "airlineCode": "AC",
+       "flightNumber": "1113",
+       "airlineName": "Air Canada"
+      },
+      "seatWidth": "30 inches",
+      "flightId": 774576,
+      "someFlag": 2
+     },
+     {
+      "departureAirportCode": "YQR",
+      "departureAirportName": "Regina International Airport",
+      "arrivalAirportName": "Vancouver International Airport",
+      "arrivalAirportCode": "YVR",
+      "durationMinutes": 155,
+      "departureTime": "11:35",
+      "arrivalTime": "13:10",
+      "cabinClass": 1,
+      "seatPitch": "30 in",
+      "airlineIndex": null,
+      "aircraftType": null,
+      "aircraftName": "Airbus A220-300 Passenger",
+      "overnight": false,
+      "delayed": null,
+      "departureDate": "2026-12-12",
+      "arrivalDate": "2026-12-12",
+      "airline": {
+       "airlineCode": "AC",
+       "flightNumber": "1103",
+       "airlineName": "Air Canada"
+      },
+      "seatWidth": "30 inches",
+      "flightId": 558664,
+      "someFlag": 2
+     },
+     {
+      "departureAirportCode": "YVR",
+      "departureAirportName": "Vancouver International Airport",
+      "arrivalAirportName": "Beijing Capital International Airport",
+      "arrivalAirportCode": "PEK",
+      "durationMinutes": 780,
+      "departureTime": "14:20",
+      "arrivalTime": "18:20",
+      "cabinClass": 1,
+      "seatPitch": "31 in",
+      "airlineIndex": null,
+      "aircraftType": null,
+      "aircraftName": "Boeing 787",
+      "overnight": false,
+      "delayed": null,
+      "departureDate": "2026-12-12",
+      "arrivalDate": "2026-12-13",
+      "airline": {
+       "airlineCode": "AC",
+       "flightNumber": "29",
+       "airlineName": "Air Canada"
+      },
+      "seatWidth": "31 inches",
+      "flightId": 1732844,
+      "someFlag": 2
+     }
+    ],
+    "departureAirportCode": "YYZ",
+    "departureDate": "2026-12-12",
+    "departureTime": "08:00",
+    "arrivalAirportCode": "PEK",
+    "arrivalDate": "2026-12-13",
+    "arrivalTime": "18:20",
+    "duration": 1280,
+    "stops": 1,
+    "isCodeShare": false,
+    "hasTransit": null,
+    "transferAirports": null,
+    "fareId": null,
+    "metaData": null,
+    "baggage": null,
+    "airline": [
+     {
+      "airlineCode": "AC",
+      "airlineName": "Air Canada",
+      "link": "https://www.aircanada.com/ca/en/aco/home/plan/accessibility.html"
+     }
+    ],
+    "isAvailable": false
+   }
+  ]
+ }
+}
