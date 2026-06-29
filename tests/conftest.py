@@ -55,6 +55,11 @@ def _reset_state(monkeypatch):
     # writes whenever_fare_cache.json into the repo (#42). Tests that exercise
     # persistence set FARE_CACHE_PATH to a tmp_path via their own monkeypatch.
     monkeypatch.setattr(appmod, "FARE_CACHE_PATH", "")
+    # Google's transient-error retry is disabled by default in tests (0 retries, 0
+    # backoff) so the suite stays fast and deterministic; tests exercising the retry
+    # set GOOGLE_RETRIES / GOOGLE_RETRY_BACKOFF via their own monkeypatch.
+    monkeypatch.setattr(appmod, "GOOGLE_RETRIES", 0)
+    monkeypatch.setattr(appmod, "GOOGLE_RETRY_BACKOFF", 0)
     appmod._rate_state.clear()
     appmod.top_cities.cache_clear()
     appmod.resolve_airport.cache_clear()
